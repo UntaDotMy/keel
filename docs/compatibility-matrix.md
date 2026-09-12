@@ -34,6 +34,8 @@ The goal is to keep the supported entry points explicit for both human operators
 | `code-index refresh|status|map` | Supported | Supported | Supported | Supported | Persistent deterministic workspace index for files, symbols, chunks, paths, relationships, commit generation, and stale-state reporting. |
 | `code-search search` | Supported | Supported | Supported | Supported | Indexed ranked retrieval. Path filters accept `/` and `\` on every platform; results include path, symbol, line range, score, reason, and snippet. |
 | `code-search siblings` | Supported | Supported | Supported | Supported | Indexed completeness scan: searches explicit query text or tokens from the current git diff and lists every other in-repo copy. Pass `--base-ref <ref>` to include committed work on a feature branch. Writes the completeness-gate marker. Required after a fix or implement. |
+| `host matrix [--host] [--json]` | Supported | Supported | Supported | Supported | Machine-readable capability rows for every installer-wired host. `GOVERNED`, `PARTIALLY_GOVERNED`, `OBSERVED`, and `UNSUPPORTED` are explicit states; an unknown host fails closed. |
+| `host conformance [--host] [--recovery-dir] [--json]` | Supported | Supported | Supported | Supported in CI | Runs the bounded native fixture through the governed command-proxy path and verifies all eight evidence stages. Unsupported/partial hosts return `not_run` and a non-zero exit; this is not a live third-party-host claim. |
 
 ## Host integration coverage
 
@@ -59,6 +61,24 @@ When an AI agent is operating from an arbitrary workspace or a harness home inst
 - Use `--repo-root <path>` only when the command needs a different owning repository than the current directory, extracted bundle, executable location, or recorded install source.
 - Keep the native CLI as the only install/update surface; shell and PowerShell wrapper launchers are not supported runtime entrypoints.
 - Treat bare `keel ...` as a convenience command shape, not a guarantee that the executable is on PATH in every runtime.
+
+## Host conformance proof
+
+Run the matrix before narrowing a proof to one adapter:
+
+```bash
+keel host matrix --json
+keel host conformance --json --recovery-dir <operator-owned-recovery-dir>
+```
+
+The conformance command uses the same `run_proxy` owner used by host hooks,
+captures raw evidence, checks reduction and the exact context budget, and emits
+one report per governed host. A report is `pass` only when `host_action`,
+`keel_receives`, `policy_applies`, `tool_executes`, `raw_captured`,
+`reducer_runs`, `budget_applied`, and `bounded_result_returned` all pass. The
+fixture proves Keel's native boundary; it does not simulate a missing host hook
+or promote a host matrix row into live host-process evidence. CI runs the
+integration test and parses the JSON report fail-closed.
 
 ## Shell PATH
 

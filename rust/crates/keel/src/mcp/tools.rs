@@ -445,9 +445,9 @@ fn tools_list_cache_ttl_ms() -> u64 {
     mcp_cursor_ttl_seconds().saturating_mul(1_000)
 }
 
-/// `tools/list` is identical for every caller; keel exposes no per-caller tool
-/// filtering, so the page holds no caller-specific data and is safe to share.
-const TOOLS_LIST_CACHE_SCOPE: &str = "public";
+/// Cursors bind workspace and application context, so complete pages must not
+/// be reused by shared intermediary caches even when tool definitions match.
+const TOOLS_LIST_CACHE_SCOPE: &str = "private";
 
 /// The one owner of the `tools/list` result shape. Every return path builds its
 /// page here, so the required protocol fields are inside the measurement the
@@ -458,6 +458,12 @@ fn tools_list_page(tools: &[Value], next_cursor: Option<&str>) -> Value {
         "tools": tools,
         "ttlMs": tools_list_cache_ttl_ms(),
         "cacheScope": TOOLS_LIST_CACHE_SCOPE,
+        "_meta": {
+            "io.modelcontextprotocol/serverInfo": {
+                "name": super::MCP_SERVER_NAME,
+                "version": super::MCP_SERVER_VERSION,
+            }
+        },
     });
     if let Some(cursor) = next_cursor {
         page["nextCursor"] = Value::String(cursor.to_string());
@@ -1432,7 +1438,7 @@ fn handle_tools_call_cancellable_with_context_and_executor(
             match project_mcp_context(&name, &text, ContextSource::McpTool, &request_context) {
                 Ok(projection) => json!({
                     "content": [
-                        { "type": "text", "text": truncate_mcp_text(&projection.summary) }
+                        { "type": "text", "text": projection.summary }
                     ],
                     "isError": false,
                     "context": projection.metadata(),
@@ -1449,7 +1455,7 @@ fn handle_tools_call_cancellable_with_context_and_executor(
             match project_mcp_context(&name, &message, ContextSource::Error, &request_context) {
                 Ok(projection) => json!({
                     "content": [
-                        { "type": "text", "text": truncate_mcp_text(&projection.summary) }
+                        { "type": "text", "text": projection.summary }
                     ],
                     "isError": true,
                     "context": projection.metadata(),
@@ -1466,8 +1472,8 @@ fn handle_tools_call_cancellable_with_context_and_executor(
 }
 
 /// Apply the same model-boundary policy to every MCP text result, including
-/// errors. MCP has no raw artifact owner for arbitrary tool text, so an
-/// overflow is an explicit error rather than a full-catalog/raw fallback.
+/// errors. RawStore owns recovery before any reduction; storage failure is
+/// explicit and never causes a raw model-visible fallback.
 pub(crate) fn project_mcp_context(
     tool_name: &str,
     text: &str,
@@ -1490,10 +1496,14 @@ pub(crate) fn project_mcp_context(
         _ => crate::proxy::context::DEFAULT_MAX_SINGLE_RESULT_TOKENS,
     };
     let policy = ContextPolicy::for_surface(max_tokens);
+    if text.len() > policy.max_input_bytes {
+        return Err("MCP context input exceeds raw artifact size limit".to_string());
+    }
+    let raw_id = save_mcp_raw_context(tool_name, text, &source, request_context)?;
     let input = ProjectionInput::new(
         source.clone(),
         text,
-        None::<String>,
+        Some(raw_id),
         request_context.workspace_id.clone(),
         request_context.session_id.clone(),
     )
@@ -1503,14 +1513,69 @@ pub(crate) fn project_mcp_context(
             .clone()
             .unwrap_or_else(|| tool_name.to_string()),
     );
-    // Repeated failures remain actionable diagnostics while still passing
-    // through the same measurement and bounding policy.
-    let result = if source == ContextSource::Error {
-        crate::proxy::context::ContextFirewall::new(policy).project(input)
-    } else {
-        crate::proxy::context::project_scoped(policy, input)
+    // Every MCP request is independent. A repeated RPC must still return its
+    // result; connection/host identity is not a conversation dedupe handle.
+    let result = crate::proxy::context::ContextFirewall::new(policy).project(input);
+    result
+        .map(|mut projection| {
+            projection.surface = tool_name.to_string();
+            projection
+        })
+        .map_err(|error| format!("keel context firewall rejected MCP {tool_name}: {error}"))
+}
+
+fn save_mcp_raw_context(
+    surface: &str,
+    text: &str,
+    source: &ContextSource,
+    context: &super::McpRequestContext,
+) -> Result<String, String> {
+    use crate::proxy::raw_store::{RawNamespace, RawRun, RawStore, RunMeta};
+    let store = RawStore::with_namespace(
+        RawStore::new().root().clone(),
+        RawNamespace {
+            workspace_id: context.workspace_id.clone(),
+            session_id: context.session_id.clone(),
+        },
+    );
+    let raw_id = RawStore::generate_id();
+    let workspace = PathBuf::from(&context.workspace_id);
+    let exit_code = i32::from(*source == ContextSource::Error);
+    let mut meta = RunMeta {
+        raw_id: raw_id.clone(),
+        command: format!("mcp {surface}"),
+        program: "mcp".to_string(),
+        args: vec![surface.to_string()],
+        cwd: workspace.clone(),
+        started_at: now_unix_seconds(),
+        duration_ms: 0,
+        exit_code,
+        adapter_name: "mcp-context".to_string(),
+        raw_path: PathBuf::new(),
+        compact_path: PathBuf::new(),
+        agent: "mcp".to_string(),
+        workspace,
+        stdout_bytes: text.len(),
+        stderr_bytes: 0,
+        compact_stdout_bytes: 0,
+        compact_stderr_bytes: 0,
+        estimated_tokens_before: TokenMeter::count_text(text),
+        estimated_tokens_after: 0,
+        estimated_tokens_saved: 0,
+        savings_pct: 0.0,
+        compacted: false,
     };
-    result.map_err(|error| format!("keel context firewall rejected MCP {tool_name}: {error}"))
+    store
+        .save(
+            &mut meta,
+            &RawRun {
+                stdout: text.as_bytes().to_vec(),
+                stderr: Vec::new(),
+                exit_code,
+            },
+        )
+        .map_err(|_| "MCP context recovery storage failed".to_string())?;
+    Ok(raw_id)
 }
 
 pub(crate) const EAGER_MCP_TOOL_NAMES: &[&str] = &[
@@ -2305,7 +2370,7 @@ fn tool_system_map(arguments: &Value) -> Result<String, String> {
     // its bare error message.
     let text = system_map_text(workspace_override.as_deref())
         .map_err(|error| format!("system_map: {error}"))?;
-    Ok(truncate_mcp_text(&text))
+    Ok(text)
 }
 
 fn string_list_field(arguments: &Value, name: &str) -> Option<Vec<String>> {
@@ -4812,6 +4877,7 @@ fn truncate_chars(text: &str, max_chars: usize) -> (String, bool) {
     (kept, true)
 }
 
+#[cfg(test)]
 pub(crate) fn truncate_mcp_text(text: &str) -> String {
     let max_chars = max_mcp_text_chars();
     let (kept, truncated) = truncate_chars(text, max_chars);
@@ -6965,7 +7031,7 @@ mod tests {
                     .expect("the default handshake must produce a page");
             assert_eq!(page["resultType"], "complete", "{profile:?}");
             assert!(page["ttlMs"].as_u64().is_some(), "{profile:?}");
-            assert_eq!(page["cacheScope"], "public", "{profile:?}");
+            assert_eq!(page["cacheScope"], "private", "{profile:?}");
         }
     }
 
@@ -7068,7 +7134,7 @@ mod tests {
                 mcp_tool_handler(name).is_some(),
                 "dispatch handler table missing arm for {name}"
             );
-            // MCP 2025-11-25: inputSchema MUST be a JSON Schema object.
+            // MCP 2026-07-28: inputSchema MUST be a JSON Schema object.
             let schema = tools
                 .iter()
                 .find(|t| t.get("name").and_then(Value::as_str) == Some(*name))
@@ -7118,6 +7184,9 @@ mod tests {
 
     #[test]
     fn anvil_requires_action() {
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let params = json!({
             "name": "anvil",
             "arguments": {}
@@ -7186,6 +7255,9 @@ mod tests {
 
     #[test]
     fn anvil_loop_and_live_run_start_background() {
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let loop_result = handle_tools_call(&json!({
             "name": "anvil",
             "arguments": { "action": "loop" }
@@ -7219,6 +7291,9 @@ mod tests {
 
     #[test]
     fn review_pre_pr_starts_background() {
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let result = handle_tools_call(&json!({
             "name": "review",
             "arguments": { "action": "pre-pr" }
@@ -7229,6 +7304,9 @@ mod tests {
 
     #[test]
     fn git_workflow_await_ci_starts_background() {
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let result = handle_tools_call(&json!({
             "name": "git_workflow",
             "arguments": { "action": "await-ci" }
@@ -7239,6 +7317,9 @@ mod tests {
 
     #[test]
     fn cli_passthrough_starts_the_same_long_jobs_in_background() {
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         for args in [
             json!(["anvil", "loop"]),
             json!(["anvil", "run"]),
@@ -7413,6 +7494,9 @@ mod tests {
 
     #[test]
     fn run_command_wait_true_refuses_long_keel_jobs() {
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let result = handle_tools_call(&json!({
             "name": "run_command",
             "arguments": { "argv": ["keel", "anvil", "loop"], "wait": true }
@@ -7428,6 +7512,9 @@ mod tests {
 
     #[test]
     fn observe_and_rewrite_tools_smoke() {
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let obs = handle_tools_call(&json!({
             "name": "observe",
             "arguments": { "json": true }
@@ -7557,6 +7644,9 @@ mod tests {
 
     #[test]
     fn skill_eval_design_intelligence_dispatch_list_succeed() {
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let se = handle_tools_call(&json!({
             "name": "skill_eval",
             "arguments": { "repo_root": ".", "json": true }
@@ -7589,6 +7679,9 @@ mod tests {
 
     #[test]
     fn unknown_tool_reports_invalid_params() {
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let params = json!({ "name": "definitely-not-real", "arguments": {} });
         let error = handle_tools_call(&params).expect_err("unknown tool errors");
         assert_eq!(error.code, JSON_RPC_INVALID_PARAMS);
@@ -7596,6 +7689,9 @@ mod tests {
 
     #[test]
     fn skill_route_missing_prompt_is_tool_error() {
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         // Empty prompt -> Ok envelope with isError true, not a protocol error.
         let params = json!({ "name": "skill_route", "arguments": {} });
         let result = handle_tools_call(&params).expect("envelope present");
@@ -7606,6 +7702,9 @@ mod tests {
 
     #[test]
     fn brief_create_missing_request_is_tool_error() {
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let params = json!({ "name": "brief_create", "arguments": { "request": "   " } });
         let result = handle_tools_call(&params).expect("envelope present");
         assert_eq!(result["isError"], json!(true));
@@ -7615,6 +7714,9 @@ mod tests {
 
     #[test]
     fn cli_missing_args_is_tool_error() {
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let params = json!({ "name": "cli", "arguments": {} });
         let result = handle_tools_call(&params).expect("envelope present");
         assert_eq!(result["isError"], json!(true));
@@ -7624,6 +7726,9 @@ mod tests {
 
     #[test]
     fn cli_refuses_mcp_subcommand() {
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         // The mcp subcommand would recurse into another server; refuse outright.
         let params = json!({ "name": "cli", "arguments": { "args": ["mcp", "serve"] } });
         let result = handle_tools_call(&params).expect("envelope present");
@@ -7634,6 +7739,9 @@ mod tests {
 
     #[test]
     fn cli_refuses_nested_cli_subcommand() {
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let params = json!({ "name": "cli", "arguments": { "args": ["cli", "status"] } });
         let result = handle_tools_call(&params).expect("envelope present");
         assert_eq!(result["isError"], json!(true));
@@ -7643,6 +7751,9 @@ mod tests {
 
     #[test]
     fn cli_gates_destructive_subcommand_without_confirm() {
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         // A management subcommand must refuse unless confirm:true is passed. This
         // asserts the gate WITHOUT running the subcommand (no confirm → early
         // return before any spawn).
@@ -7667,6 +7778,9 @@ mod tests {
 
     #[test]
     fn cli_gates_hook_install_and_uninstall() {
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         // `hook install`/`hook uninstall` mutate the global settings.json, so they
         // are gated by a second-arg check even though the `hook` group has
         // read-only members. No confirm → refuse before any spawn.
@@ -7712,6 +7826,9 @@ mod tests {
 
     #[test]
     fn brief_create_rejects_traversal_id() {
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         // Security regression: a caller-supplied id is the brief filename stem,
         // so a separator/.. /absolute id must be refused before it can steer the
         // write outside the working-briefs directory.
@@ -7736,6 +7853,9 @@ mod tests {
 
     #[test]
     fn brief_get_rejects_traversal_id() {
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         for evil in ["../secret", "/etc/hosts", "a\\b", "C:foo", "   "] {
             let params = json!({ "name": "brief_get", "arguments": { "id": evil } });
             let result = handle_tools_call(&params).expect("envelope present");
@@ -7837,6 +7957,9 @@ mod tests {
 
     #[test]
     fn review_requires_action() {
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let params = json!({ "name": "review", "arguments": {} });
         let result = handle_tools_call(&params).expect("envelope present");
         assert_eq!(result["isError"], json!(true));
@@ -8010,6 +8133,9 @@ mod tests {
 
     #[test]
     fn git_workflow_requires_action() {
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let params = json!({ "name": "git_workflow", "arguments": {} });
         let result = handle_tools_call(&params).expect("envelope present");
         assert_eq!(result["isError"], json!(true));
@@ -8019,6 +8145,9 @@ mod tests {
 
     #[test]
     fn memory_requires_action() {
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let params = json!({ "name": "memory", "arguments": {} });
         let result = handle_tools_call(&params).expect("envelope present");
         assert_eq!(result["isError"], json!(true));
@@ -8028,6 +8157,9 @@ mod tests {
 
     #[test]
     fn code_search_requires_query() {
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let params = json!({ "name": "code_search", "arguments": {} });
         let result = handle_tools_call(&params).expect("envelope present");
         assert_eq!(result["isError"], json!(true));
@@ -8080,6 +8212,9 @@ mod tests {
 
     #[test]
     fn mcp_projection_uses_the_authoritative_request_identity() {
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let workspace = std::env::current_dir()
             .expect("cwd")
             .canonicalize()
@@ -8094,8 +8229,63 @@ mod tests {
         let projection =
             project_mcp_context("stats", "bounded result", ContextSource::McpTool, &context)
                 .expect("projection");
-        assert_eq!(projection.raw_artifact_id, None);
+        let raw_id = projection
+            .raw_artifact_id
+            .as_deref()
+            .expect("recoverable evidence");
+        let store = crate::proxy::raw_store::RawStore::with_namespace(
+            crate::proxy::raw_store::RawStore::new().root().clone(),
+            crate::proxy::raw_store::RawNamespace {
+                workspace_id: context.workspace_id.clone(),
+                session_id: context.session_id.clone(),
+            },
+        );
+        assert_eq!(
+            store
+                .read_file(raw_id, "stdout.log")
+                .expect("recover raw result"),
+            b"bounded result"
+        );
+        assert_eq!(projection.surface, "stats");
+        assert_eq!(projection.raw_size, "bounded result".len());
         assert!(projection.provenance_id.starts_with("prov-fnv1a:"));
+    }
+
+    #[test]
+    fn mcp_repeated_results_are_independent_and_large_results_are_recoverable() {
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let context = super::super::McpRequestContext::authoritative(None);
+        let text = format!(
+            "error: failing test at src/example.rs:42\n{}",
+            "repeated diagnostic output\n".repeat(2_000)
+        );
+        let first = project_mcp_context("test", &text, ContextSource::McpTool, &context).unwrap();
+        let second = project_mcp_context("test", &text, ContextSource::McpTool, &context).unwrap();
+        assert!(first.truncated && second.truncated);
+        assert!(first.summary.contains("src/example.rs:42"));
+        assert!(first
+            .summary
+            .contains(first.raw_artifact_id.as_deref().unwrap()));
+        assert_eq!(
+            TokenMeter::count_text(&first.summary),
+            first.visible_tokens as usize
+        );
+        assert!(first.visible_tokens <= first.budget);
+        let store = crate::proxy::raw_store::RawStore::with_namespace(
+            crate::proxy::raw_store::RawStore::new().root().clone(),
+            crate::proxy::raw_store::RawNamespace {
+                workspace_id: context.workspace_id,
+                session_id: context.session_id,
+            },
+        );
+        assert_eq!(
+            store
+                .read_file(first.raw_artifact_id.as_deref().unwrap(), "stdout.log")
+                .unwrap(),
+            text.as_bytes()
+        );
     }
 
     #[test]

@@ -11,6 +11,8 @@ keel plan research --plan <plan-id> \
   --claim "Exact external fact used by the plan" \
   --source-url "https://vendor.example/current-doc" \
   --source-type official-doc \
+  --source-version "2026-09" \
+  --required-version "2026-09" \
   --retrieved-at "2026-09-09T00:00:00Z" \
   --support "Brief original paraphrase of the supporting passage" \
   --freshness fresh \
@@ -18,6 +20,10 @@ keel plan research --plan <plan-id> \
 # Complete the generated architecture.md design note.
 keel plan design --plan <plan-id>
 keel plan tasks --plan <plan-id>
+# Update one task or checklist subtask only through the planner owner.
+keel plan update --plan <plan-id> --task <task-id> --subtask <subtask-id> \
+  --status done --evidence-path evidence/tests.json \
+  --verification-timestamp "2026-09-12T00:00:00Z"
 keel plan check --plan <plan-id>
 keel plan check --rtm --plan <plan-id>
 ```
@@ -64,6 +70,12 @@ validation rather than being rewritten.
 `plan tasks` adds one task ticket per requirement. Later stage updates use
 Keel's atomic text writer and publish `status.json` last.
 
+For released behavior that must match an exact dependency or protocol version,
+set `--freshness version-bound` together with equal `--source-version` and
+`--required-version` values. The planner rejects missing or mismatched version
+metadata; a version-bound source must be an official document, standard, or
+repository record.
+
 ## Task tickets and evidence
 
 Each `task-<n>.json` retains the aggregate task's `id`, title, requirement and
@@ -108,6 +120,29 @@ User request -> Requirement -> Acceptance criterion -> Task -> Checklist subtask
 It rejects deleted derived layers, missing or duplicate ticket links, dangling
 RTM links, criteria without evidence-producing subtasks, unjustified statuses,
 and `done` subtasks without resolvable evidence.
+
+### Updating task state
+
+`plan update` is the governed mutation path for generated tickets. It validates
+the complete existing plan before changing a ticket, then validates the changed
+ticket and regenerates `tasks.json`, `rtm.json`, and `status.json` from the same
+candidate state. Each file is published with Keel's atomic text writer; a write
+failure attempts to restore the prior bytes.
+
+Use `--task <task-id>` to update a parent task with `planned`, `in_progress`,
+`blocked`, or `done`. A parent task cannot be marked `done` while any checklist
+subtask or todo is unfinished. Add `--subtask <subtask-id>` to update one
+checklist node with `open`, `done`, `skipped`, `not_applicable`, or `needs_human`.
+`done` requires both a plan-relative regular JSON `--evidence-path` and an
+RFC3339 `--verification-timestamp`; the evidence object's identity, expected
+type, result, and content fingerprint are checked before publication. The
+other non-open states clear prior evidence, and `skipped`, `not_applicable`,
+and `needs_human` require a non-empty `--reason`.
+
+Updating a subtask derives its parent ticket status (`planned`, `in_progress`,
+`blocked`, or `done`) and updates the aggregate task status and RTM evidence
+references together. A rejected update leaves the ticket and all generated
+artifacts unchanged.
 
 ## Honest gate status semantics
 

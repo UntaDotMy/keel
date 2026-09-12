@@ -90,6 +90,9 @@ pub(crate) struct ResearchCacheHit {
     pub answer: String,
     pub source_url: String,
     pub source_type: String,
+    /// Scope that owns the finding. Legacy records without this field are
+    /// treated as global so the existing cache remains readable.
+    pub scope: String,
     pub publication_date: Option<String>,
     pub retrieved_at: String,
     pub freshness_class: String,
@@ -106,18 +109,36 @@ pub(crate) fn lookup_fresh_research_cache(
     claude_home: &Path,
     query: &str,
 ) -> Result<ResearchCacheLookup, String> {
+    lookup_fresh_research_cache_in_scope(claude_home, query, None)
+}
+
+/// Look up fresh research in one explicit scope. `None` preserves the legacy
+/// cross-scope planner behavior; callers that know the current workspace should
+/// pass its scope so an unrelated finding cannot become the current truth.
+pub(crate) fn lookup_fresh_research_cache_in_scope(
+    claude_home: &Path,
+    query: &str,
+    scope: Option<&str>,
+) -> Result<ResearchCacheLookup, String> {
     let store = family_store(claude_home, "memory", "research-cache");
     let records = store.list_records().map_err(|error| error.to_string())?;
     let now = format_timestamp_iso8601(current_timestamp_millis());
     let mut lookup = ResearchCacheLookup::default();
-    for (_, record) in &records {
+    for (id, record) in &records {
+        if let Some(scope) = scope {
+            if research_cache_record_scope(record) != normalize_memory_scope(scope) {
+                continue;
+            }
+        }
         if !research_cache_record_matches(record, query) {
             continue;
         }
         let Some(hit) = complete_research_cache_hit(record) else {
             continue;
         };
-        if research_cache_record_is_stale(record, &now) {
+        if research_cache_record_is_stale(record, &now)
+            || research_cache_record_has_current_replacement(&records, id, record)
+        {
             lookup.stale_matches += 1;
         } else {
             lookup.fresh.push(hit);
@@ -179,8 +200,19 @@ fn now_id(prefix: &str) -> (String, String) {
 }
 
 // ---------------------------------------------------------------------------
-// research-cache: record | lookup | stale | reward | list
+// research-cache: record | lookup | stale | reward | supersede | expire | list
 // ---------------------------------------------------------------------------
+
+const DEFAULT_RESEARCH_CACHE_SCOPE: &str = "global";
+/// A cache is durable evidence, not an unbounded transcript. These limits
+/// bound new records and list projections while retaining existing files.
+const MAX_RESEARCH_CACHE_RECORDS: usize = 200;
+const MAX_MEMORY_RECORD_BYTES: usize = 16 * 1024;
+const MAX_FAMILY_LIST_RECORDS: usize = 200;
+const MAX_FAMILY_LIST_BYTES: usize = 64 * 1024;
+const MAX_INSTINCT_RECORDS: usize = 200;
+const MAX_INSTINCT_BYTES: usize = 64 * 1024;
+const MAX_LESSON_EVIDENCE_BYTES: usize = 4 * 1024;
 
 fn run_research_cache(
     command_group: &str,
@@ -196,11 +228,14 @@ fn run_research_cache(
              \n\
              record   --question \"...\" --answer \"...\" [--source ...] [--source-type ...]\n\
                       [--publication-date ...] [--retrieved-at ...] [--freshness-class ...]\n\
-                      [--used-by REQ-001,AC-001] [--freshness <ttl>]\n\
+                      [--used-by REQ-001,AC-001] [--freshness <ttl>] [--scope <scope>]\n\
+                      [--supersedes <id>]\n\
                       aliases: --query = --question, --result = --answer\n\
-             lookup   --query \"...\" [--include-stale]\n\
+             lookup   --query \"...\" [--include-stale] [--scope <scope>]\n\
              stale    [--days N]\n\
              reward   --id <id>\n\
+             supersede --id <id> [--replacement <id>]\n\
+             expire   --id <id>\n\
              list"
         );
         return if arguments.is_empty() { 1 } else { 0 };
@@ -220,6 +255,8 @@ fn run_research_cache(
             flags.string_flag("freshness-class", "");
             flags.string_flag("used-by", "");
             flags.string_flag("freshness", "");
+            flags.string_flag("scope", DEFAULT_RESEARCH_CACHE_SCOPE);
+            flags.string_flag("supersedes", "");
             flags.string_flag("claude-home", "");
             flags.bool_flag("json", false);
             if let Err(error) = flags.parse(&arguments[1..]) {
@@ -255,6 +292,36 @@ fn run_research_cache(
             else {
                 return 1;
             };
+            let scope =
+                match parse_memory_scope(flags.string_value("scope"), &label, standard_error) {
+                    Some(scope) => scope,
+                    None => return 2,
+                };
+            let store = family_store(&home, command_group, "research-cache");
+            let supersedes = flags.string_value("supersedes").trim().to_string();
+            if !supersedes.is_empty() {
+                let previous = match store.read_record(&supersedes) {
+                    Ok(Some(previous)) => previous,
+                    Ok(None) => {
+                        let _ = writeln!(
+                            standard_error,
+                            "{label} record: --supersedes target {supersedes} does not exist"
+                        );
+                        return 2;
+                    }
+                    Err(error) => {
+                        let _ = writeln!(standard_error, "{label} record: {error}");
+                        return 2;
+                    }
+                };
+                if research_cache_record_scope(&previous) != scope {
+                    let _ = writeln!(
+                        standard_error,
+                        "{label} record: --supersedes target {supersedes} is outside scope {scope:?}"
+                    );
+                    return 2;
+                }
+            }
             let (id, at) = now_id("rc");
             let freshness = flags.string_value("freshness").trim().to_string();
             let retrieved_at = match flags.string_value("retrieved-at").trim() {
@@ -288,14 +355,52 @@ fn run_research_cache(
                 ),
                 ("freshness".into(), freshness.clone()),
                 ("state".into(), "fresh".into()),
+                ("lifecycle".into(), "active".into()),
+                ("scope".into(), scope),
                 ("recordedAt".into(), at),
             ];
+            if !supersedes.is_empty() {
+                record.push(("supersedes".into(), supersedes.clone()));
+            }
             if let Some(expires_at) = freshness_expiry(&freshness, current_timestamp_millis()) {
                 record.push(("expiresAt".into(), expires_at));
             }
-            let store = family_store(&home, command_group, "research-cache");
+            if let Err(error) = validate_record_capacity(
+                &store,
+                &id,
+                &record,
+                MAX_RESEARCH_CACHE_RECORDS,
+                MAX_MEMORY_RECORD_BYTES,
+                (!supersedes.is_empty()).then_some(supersedes.as_str()),
+            ) {
+                let _ = writeln!(standard_error, "{label}: {error}");
+                return 2;
+            }
             match store.write_record(&id, &record) {
                 Ok(path) => {
+                    // Write the replacement before transitioning its predecessor;
+                    // roll it back if the predecessor cannot be marked superseded.
+                    if !supersedes.is_empty() {
+                        if let Err(error) =
+                            transition_cache_record(&store, &supersedes, "superseded", &id)
+                        {
+                            if let Err(cleanup_error) = store.delete_record(&id) {
+                                let _ = writeln!(
+                                    standard_error,
+                                    "{label} record: replacement rollback failed: {cleanup_error}"
+                                );
+                            }
+                            let _ = crate::utility::recall::reindex_after_write_paths(
+                                &home,
+                                &[path.as_path()],
+                            );
+                            let _ = writeln!(
+                                standard_error,
+                                "{label} record: supersede transition failed: {error}"
+                            );
+                            return 2;
+                        }
+                    }
                     // Sync the recall FTS index now so the record is searchable
                     // on the very next `recall` without a separate trigger.
                     // Best-effort: the file on disk is durable regardless, and a
@@ -328,6 +433,7 @@ fn run_research_cache(
             let mut flags = FlagSet::new(format!("{label} lookup"));
             flags.string_flag("query", "");
             flags.string_flag("claude-home", "");
+            flags.string_flag("scope", "");
             flags.bool_flag("include-stale", false);
             flags.bool_flag("json", false);
             if let Err(error) = flags.parse(&arguments[1..]) {
@@ -357,13 +463,25 @@ fn run_research_cache(
             };
             let now = format_timestamp_iso8601(current_timestamp_millis());
             let include_stale = flags.bool_value("include-stale");
+            let scope =
+                match optional_memory_scope(flags.string_value("scope"), &label, standard_error) {
+                    Some(scope) => scope,
+                    None => return 2,
+                };
             let mut stale_matches = Vec::new();
             let mut matches = Vec::new();
-            for (_, record) in &records {
+            for (id, record) in &records {
+                if let Some(scope) = scope.as_deref() {
+                    if research_cache_record_scope(record) != scope {
+                        continue;
+                    }
+                }
                 if !research_cache_record_matches(record, &query) {
                     continue;
                 }
-                if research_cache_record_is_stale(record, &now) {
+                if research_cache_record_is_stale(record, &now)
+                    || research_cache_record_has_current_replacement(&records, id, record)
+                {
                     stale_matches.push(record);
                     if include_stale {
                         matches.push(record);
@@ -438,13 +556,16 @@ fn run_research_cache(
             let id = flags.string_value("id").trim().to_string();
             if !id.is_empty() {
                 return mark_cache_entry_state(
+                    &home,
                     &store,
                     &label,
                     &id,
                     "stale",
-                    flags.bool_value("json"),
-                    standard_output,
-                    standard_error,
+                    CacheStateOutput {
+                        json: flags.bool_value("json"),
+                        standard_output,
+                        standard_error,
+                    },
                 );
             }
             let days: u128 = match flags.string_value("days").trim().parse::<u128>() {
@@ -531,13 +652,90 @@ fn run_research_cache(
             };
             let store = family_store(&home, command_group, "research-cache");
             mark_cache_entry_state(
+                &home,
                 &store,
                 &label,
                 &id,
                 "rewarded",
-                flags.bool_value("json"),
-                standard_output,
-                standard_error,
+                CacheStateOutput {
+                    json: flags.bool_value("json"),
+                    standard_output,
+                    standard_error,
+                },
+            )
+        }
+        "supersede" => {
+            let mut flags = FlagSet::new(format!("{label} supersede"));
+            flags.string_flag("id", "");
+            flags.string_flag("replacement", "");
+            flags.string_flag("superseded-by", "");
+            flags.string_flag("claude-home", "");
+            flags.bool_flag("json", false);
+            if let Err(error) = flags.parse(&arguments[1..]) {
+                let _ = writeln!(standard_error, "{}", error.message);
+                return 1;
+            }
+            let id = flags.string_value("id").trim().to_string();
+            if id.is_empty() {
+                let _ = writeln!(standard_error, "{label} supersede: --id is required");
+                return 1;
+            }
+            let Some(home) =
+                resolve_home(flags.string_value("claude-home"), &label, standard_error)
+            else {
+                return 1;
+            };
+            let replacement = if !flags.string_value("replacement").trim().is_empty() {
+                flags.string_value("replacement").trim()
+            } else {
+                flags.string_value("superseded-by").trim()
+            };
+            let store = family_store(&home, command_group, "research-cache");
+            mark_cache_entry_state_with_link(
+                &home,
+                &store,
+                &label,
+                &id,
+                "superseded",
+                replacement,
+                CacheStateOutput {
+                    json: flags.bool_value("json"),
+                    standard_output,
+                    standard_error,
+                },
+            )
+        }
+        "expire" => {
+            let mut flags = FlagSet::new(format!("{label} expire"));
+            flags.string_flag("id", "");
+            flags.string_flag("claude-home", "");
+            flags.bool_flag("json", false);
+            if let Err(error) = flags.parse(&arguments[1..]) {
+                let _ = writeln!(standard_error, "{}", error.message);
+                return 1;
+            }
+            let id = flags.string_value("id").trim().to_string();
+            if id.is_empty() {
+                let _ = writeln!(standard_error, "{label} expire: --id is required");
+                return 1;
+            }
+            let Some(home) =
+                resolve_home(flags.string_value("claude-home"), &label, standard_error)
+            else {
+                return 1;
+            };
+            let store = family_store(&home, command_group, "research-cache");
+            mark_cache_entry_state(
+                &home,
+                &store,
+                &label,
+                &id,
+                "expired",
+                CacheStateOutput {
+                    json: flags.bool_value("json"),
+                    standard_output,
+                    standard_error,
+                },
             )
         }
         "list" => list_family(
@@ -551,7 +749,7 @@ fn run_research_cache(
         other => {
             let _ = writeln!(
                 standard_error,
-                "{label}: unknown action {other} (expected record|lookup|stale|reward|list)"
+                "{label}: unknown action {other} (expected record|lookup|stale|reward|supersede|expire|list)"
             );
             1
         }
@@ -1804,6 +2002,11 @@ fn instincts_record(
     let mut flags = FlagSet::new(format!("{label} record"));
     flags.string_flag("trigger", "");
     flags.string_flag("guidance", "");
+    flags.string_flag("evidence", "");
+    flags.string_flag("scope", DEFAULT_RESEARCH_CACHE_SCOPE);
+    flags.string_flag("problem-pattern", "");
+    flags.string_flag("cause-hypothesis", "");
+    flags.string_flag("correct-response", "");
     flags.string_flag("claude-home", "");
     flags.bool_flag("json", false);
     if let Err(error) = flags.parse(arguments) {
@@ -1822,32 +2025,119 @@ fn instincts_record(
     let Some(home) = resolve_home(flags.string_value("claude-home"), label, standard_error) else {
         return 1;
     };
+    let scope = match parse_memory_scope(flags.string_value("scope"), label, standard_error) {
+        Some(scope) => scope,
+        None => return 2,
+    };
+    let evidence = flags.string_value("evidence").trim().to_string();
+    if evidence.len() > MAX_LESSON_EVIDENCE_BYTES {
+        let _ = writeln!(
+            standard_error,
+            "{label} record: evidence is {} bytes, over the {MAX_LESSON_EVIDENCE_BYTES}-byte limit",
+            evidence.len()
+        );
+        return 2;
+    }
     let store = family_store(&home, command_group, "instincts");
     // Keyed by trigger so re-recording the same pattern reinforces one record.
     let id = sanitize_id(&trigger);
     let (_, at) = now_id("instinct");
-    let (confidence, observations) = match store.read_record(&id) {
-        Ok(Some(existing)) => {
-            let prior_conf: i64 = field(&existing, "confidence")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0);
-            let prior_obs: i64 = field(&existing, "observations")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0);
-            (prior_conf + INSTINCT_SEED_CONFIDENCE, prior_obs + 1)
+    let mut record = match store.read_record(&id) {
+        Ok(Some(record)) => record,
+        Ok(None) => Vec::new(),
+        Err(error) => {
+            let _ = writeln!(standard_error, "{label}: {error}");
+            return 1;
         }
-        _ => (INSTINCT_SEED_CONFIDENCE, 1),
     };
-    let record: Record = vec![
-        ("id".into(), id.clone()),
-        ("trigger".into(), trigger),
-        ("guidance".into(), guidance),
-        ("confidence".into(), confidence.to_string()),
-        ("observations".into(), observations.to_string()),
-        ("updatedAt".into(), at),
-    ];
+    let prior_conf: i64 = field(&record, "confidence")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    let prior_obs: i64 = field(&record, "observations")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    let confidence = prior_conf.saturating_add(INSTINCT_SEED_CONFIDENCE);
+    let observations = prior_obs.saturating_add(1);
+    let prior_evidence_count: i64 = field(&record, "evidenceCount")
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0);
+    let evidence_count = if evidence.is_empty() {
+        prior_evidence_count
+    } else {
+        prior_evidence_count.saturating_add(1).max(1)
+    };
+    let problem_pattern = flags.string_value("problem-pattern").trim();
+    let cause_hypothesis = flags.string_value("cause-hypothesis").trim();
+    let correct_response = flags.string_value("correct-response").trim();
+    let has_evidence = !evidence.is_empty() && evidence_count > 0;
+    let lifecycle = if has_evidence && confidence >= INSTINCT_PROMOTE_THRESHOLD {
+        "active"
+    } else {
+        "candidate"
+    };
+    for (key, value) in [
+        ("id", id.clone()),
+        ("trigger", trigger),
+        ("guidance", guidance.clone()),
+        ("confidence", confidence.to_string()),
+        ("observations", observations.to_string()),
+        ("scope", scope),
+        ("source", "manual".to_string()),
+        (
+            "problemPattern",
+            if problem_pattern.is_empty() {
+                field(&record, "problemPattern")
+                    .unwrap_or(field(&record, "trigger").unwrap_or(""))
+                    .to_string()
+            } else {
+                problem_pattern.to_string()
+            },
+        ),
+        (
+            "causeHypothesis",
+            if cause_hypothesis.is_empty() {
+                field(&record, "causeHypothesis").unwrap_or("").to_string()
+            } else {
+                cause_hypothesis.to_string()
+            },
+        ),
+        (
+            "correctResponse",
+            if correct_response.is_empty() {
+                field(&record, "correctResponse")
+                    .unwrap_or(guidance.as_str())
+                    .to_string()
+            } else {
+                correct_response.to_string()
+            },
+        ),
+        ("evidenceCount", evidence_count.to_string()),
+        ("evaluationMetric", "confidence_and_recurrence".to_string()),
+        ("evaluationStatus", lifecycle.to_string()),
+        ("lifecycle", lifecycle.to_string()),
+        ("updatedAt", at.clone()),
+    ] {
+        set_field(&mut record, key, value);
+    }
+    if !evidence.is_empty() {
+        set_field(&mut record, "evidence", evidence);
+        set_field(&mut record, "evidenceSource", "manual".to_string());
+        set_field(&mut record, "lastVerifiedAt", at);
+    }
+    if let Err(error) = validate_instinct_capacity(&store, &id, &record) {
+        let _ = writeln!(standard_error, "{label}: {error}");
+        return 2;
+    }
     match store.write_record(&id, &record) {
         Ok(path) => {
+            if let Err(error) =
+                crate::utility::recall::reindex_after_write_paths(&home, &[path.as_path()])
+            {
+                let _ = writeln!(
+                    standard_error,
+                    "{label}: recall index sync skipped ({error})"
+                );
+            }
             if flags.bool_value("json") {
                 let payload = Value::Object(vec![
                     ("recorded".into(), Value::Bool(true)),
@@ -1857,7 +2147,7 @@ fn instincts_record(
             }
             let _ = writeln!(
                 standard_output,
-                "{label}: {id} (confidence {confidence}, {observations} obs)"
+                "{label}: {id} (confidence {confidence}, {observations} obs, lifecycle {lifecycle})"
             );
             let _ = writeln!(standard_output, "  saved: {}", display_path(&path));
             0
@@ -1923,8 +2213,42 @@ fn instincts_adjust(
     set_field(&mut record, "confidence", new_confidence.to_string());
     let (_, at) = now_id("instinct");
     set_field(&mut record, "updatedAt", at);
+    if delta < 0 {
+        let prior_lifecycle = field(&record, "lifecycle").unwrap_or("");
+        let prior_demotions = field(&record, "demotionCount")
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0);
+        let demotion_count = prior_demotions.saturating_add(1);
+        let lifecycle =
+            if matches!(prior_lifecycle, "questioned" | "quarantined") || demotion_count >= 2 {
+                "quarantined"
+            } else if new_confidence < INSTINCT_PROMOTE_THRESHOLD {
+                "questioned"
+            } else {
+                "active"
+            };
+        set_field(&mut record, "demotionCount", demotion_count.to_string());
+        set_field(&mut record, "lifecycle", lifecycle.to_string());
+        set_field(&mut record, "evaluationStatus", "regressed".to_string());
+    } else if new_confidence >= INSTINCT_PROMOTE_THRESHOLD && instinct_record_has_evidence(&record)
+    {
+        set_field(&mut record, "lifecycle", "active".to_string());
+        set_field(&mut record, "evaluationStatus", "supported".to_string());
+    }
+    if let Err(error) = validate_instinct_capacity(&store, &id, &record) {
+        let _ = writeln!(standard_error, "{label}: {error}");
+        return 2;
+    }
     match store.write_record(&id, &record) {
-        Ok(_) => {
+        Ok(path) => {
+            if let Err(error) =
+                crate::utility::recall::reindex_after_write_paths(&home, &[path.as_path()])
+            {
+                let _ = writeln!(
+                    standard_error,
+                    "{label}: recall index sync skipped ({error})"
+                );
+            }
             if flags.bool_value("json") {
                 let payload = Value::Object(vec![
                     ("updated".into(), Value::Bool(true)),
@@ -1954,6 +2278,7 @@ fn instincts_promote(
 ) -> u8 {
     let mut flags = FlagSet::new(format!("{label} promote"));
     flags.string_flag("threshold", INSTINCT_PROMOTE_THRESHOLD.to_string());
+    flags.string_flag("scope", "");
     flags.string_flag("write", "");
     flags.string_flag("claude-home", "");
     flags.bool_flag("json", false);
@@ -1969,6 +2294,10 @@ fn instincts_promote(
     let Some(home) = resolve_home(flags.string_value("claude-home"), label, standard_error) else {
         return 1;
     };
+    let scope = match optional_memory_scope(flags.string_value("scope"), label, standard_error) {
+        Some(scope) => scope,
+        None => return 2,
+    };
     let store = family_store(&home, command_group, "instincts");
     let records = match store.list_records() {
         Ok(records) => records,
@@ -1977,14 +2306,25 @@ fn instincts_promote(
             return 1;
         }
     };
+    let mut excluded_without_evidence = 0usize;
     let promoted: Vec<&Record> = records
         .iter()
         .map(|(_, record)| record)
         .filter(|record| {
-            field(record, "confidence")
+            let in_scope = scope
+                .as_deref()
+                .map(|scope| field(record, "scope") == Some(scope))
+                .unwrap_or(true);
+            let confidence_ok = field(record, "confidence")
                 .and_then(|v| v.parse::<i64>().ok())
                 .map(|confidence| confidence >= threshold)
-                .unwrap_or(false)
+                .unwrap_or(false);
+            let active = instinct_record_lifecycle_is_promotable(record);
+            let evidence = instinct_record_has_evidence(record);
+            if confidence_ok && in_scope && !evidence {
+                excluded_without_evidence += 1;
+            }
+            in_scope && confidence_ok && active && evidence
         })
         .collect();
 
@@ -2031,6 +2371,10 @@ fn instincts_promote(
             ("threshold".into(), Value::Number(threshold.to_string())),
             ("count".into(), Value::Number(promoted.len().to_string())),
             (
+                "excludedWithoutEvidence".into(),
+                Value::Number(excluded_without_evidence.to_string()),
+            ),
+            (
                 "promoted".into(),
                 Value::Array(
                     promoted
@@ -2044,8 +2388,10 @@ fn instincts_promote(
     }
     let _ = writeln!(
         standard_output,
-        "{label}: {} instinct(s) at or above confidence {threshold}",
-        promoted.len()
+        "{label}: {} instinct(s) at or above confidence {threshold}; evidence-backed={} ({} excluded without evidence)",
+        promoted.len(),
+        promoted.len(),
+        excluded_without_evidence
     );
     for record in &promoted {
         let _ = writeln!(
@@ -2094,6 +2440,152 @@ fn split_flag_list(value: &str) -> Vec<String> {
         .map(|part| part.trim().to_string())
         .filter(|part| !part.is_empty())
         .collect()
+}
+
+fn normalize_memory_scope(scope: &str) -> String {
+    let normalized = scope.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        DEFAULT_RESEARCH_CACHE_SCOPE.to_string()
+    } else {
+        normalized
+    }
+}
+
+fn parse_memory_scope(
+    raw_scope: &str,
+    label: &str,
+    standard_error: &mut dyn Write,
+) -> Option<String> {
+    let scope = normalize_memory_scope(raw_scope);
+    if scope.len() > 256 || scope.chars().any(char::is_control) {
+        let _ = writeln!(
+            standard_error,
+            "{label}: --scope must be <= 256 bytes and contain no control characters"
+        );
+        return None;
+    }
+    Some(scope)
+}
+
+fn optional_memory_scope(
+    raw_scope: &str,
+    label: &str,
+    standard_error: &mut dyn Write,
+) -> Option<Option<String>> {
+    if raw_scope.trim().is_empty() {
+        Some(None)
+    } else {
+        parse_memory_scope(raw_scope, label, standard_error).map(Some)
+    }
+}
+
+fn instinct_record_lifecycle_is_promotable(record: &Record) -> bool {
+    !matches!(
+        field(record, "lifecycle")
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "candidate" | "demoted" | "questioned" | "quarantined" | "superseded" | "expired"
+    )
+}
+
+fn instinct_record_has_evidence(record: &Record) -> bool {
+    field(record, "evidence")
+        .map(str::trim)
+        .is_some_and(|value| !value.is_empty())
+        && field(record, "evidenceCount")
+            .and_then(|value| value.parse::<u64>().ok())
+            .is_some_and(|count| count > 0)
+}
+
+fn research_cache_record_scope(record: &Record) -> String {
+    field(record, "scope")
+        .map(normalize_memory_scope)
+        .unwrap_or_else(|| DEFAULT_RESEARCH_CACHE_SCOPE.to_string())
+}
+
+fn cache_lifecycle_for_state(state: &str) -> &'static str {
+    match state.trim().to_ascii_lowercase().as_str() {
+        "stale" | "conflicted" | "questioned" => "questioned",
+        "quarantined" => "quarantined",
+        "superseded" => "superseded",
+        "expired" => "expired",
+        _ => "active",
+    }
+}
+
+/// Measure a flat record before it reaches the shared JSON writer. The estimate
+/// includes key/value quoting and separators, so it is conservative.
+fn record_storage_bytes(record: &Record) -> usize {
+    record
+        .iter()
+        .map(|(key, value)| key.len().saturating_add(value.len()).saturating_add(8))
+        .sum()
+}
+
+fn validate_record_shape(record: &Record, max_bytes: usize) -> Result<(), String> {
+    let bytes = record_storage_bytes(record);
+    if bytes > max_bytes {
+        Err(format!(
+            "record is {bytes} bytes, over the {max_bytes}-byte storage limit"
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_record_capacity(
+    store: &RecordStore,
+    id: &str,
+    record: &Record,
+    max_records: usize,
+    max_bytes: usize,
+    replacing_id: Option<&str>,
+) -> Result<(), String> {
+    validate_record_shape(record, max_bytes)?;
+    let records = store
+        .list_records()
+        .map_err(|error| format!("inspect record capacity: {error}"))?;
+    if !records.iter().any(|(existing_id, _)| existing_id == id)
+        && replacing_id.is_none()
+        && records.len() >= max_records
+    {
+        return Err(format!(
+            "record store is at its {max_records}-record limit; expire or supersede an existing entry before adding another"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_instinct_capacity(
+    store: &RecordStore,
+    id: &str,
+    record: &Record,
+) -> Result<(), String> {
+    validate_record_shape(record, MAX_INSTINCT_BYTES)?;
+    let records = store
+        .list_records()
+        .map_err(|error| format!("inspect instinct capacity: {error}"))?;
+    if !records.iter().any(|(existing_id, _)| existing_id == id)
+        && records.len() >= MAX_INSTINCT_RECORDS
+    {
+        return Err(format!(
+            "instinct store is at its {MAX_INSTINCT_RECORDS}-record limit; existing evidence was preserved"
+        ));
+    }
+    let total_bytes: usize = records
+        .iter()
+        .filter(|(existing_id, _)| existing_id != id)
+        .map(|(_, existing)| record_storage_bytes(existing))
+        .sum::<usize>()
+        .saturating_add(record_storage_bytes(record));
+    if total_bytes > MAX_INSTINCT_BYTES {
+        return Err(format!(
+            "instinct store would be {total_bytes} bytes, over the {MAX_INSTINCT_BYTES}-byte limit; existing evidence was preserved"
+        ));
+    }
+    Ok(())
 }
 
 /// Convert a compact freshness guidance value into an absolute expiry. The
@@ -2157,6 +2649,26 @@ fn research_cache_record_matches(record: &Record, query: &str) -> bool {
         .all(|term| haystack.contains(term))
 }
 
+/// A replacement declaration is treated as a current-truth override even for
+/// legacy records where the old file was not transitioned atomically. The
+/// declaration must remain in the same scope and itself be active; an inactive
+/// replacement cannot hide an otherwise current finding.
+fn research_cache_record_has_current_replacement(
+    records: &[(String, Record)],
+    target_id: &str,
+    target: &Record,
+) -> bool {
+    let target_scope = research_cache_record_scope(target);
+    records.iter().any(|(_, candidate)| {
+        field(candidate, "supersedes") == Some(target_id)
+            && research_cache_record_scope(candidate) == target_scope
+            && !research_cache_record_is_stale(
+                candidate,
+                &format_timestamp_iso8601(current_timestamp_millis()),
+            )
+    })
+}
+
 fn complete_research_cache_hit(record: &Record) -> Option<ResearchCacheHit> {
     let non_empty = |name| {
         field(record, name)
@@ -2168,6 +2680,7 @@ fn complete_research_cache_hit(record: &Record) -> Option<ResearchCacheHit> {
         answer: non_empty("answer")?.to_string(),
         source_url: non_empty("source")?.to_string(),
         source_type: non_empty("sourceType")?.to_string(),
+        scope: research_cache_record_scope(record),
         publication_date: non_empty("publicationDate").map(str::to_string),
         retrieved_at: non_empty("retrievedAt")?.to_string(),
         freshness_class: non_empty("freshnessClass")?.to_string(),
@@ -2181,14 +2694,29 @@ fn complete_research_cache_hit(record: &Record) -> Option<ResearchCacheHit> {
 }
 
 fn research_cache_record_is_stale(record: &Record, now: &str) -> bool {
+    let state = field(record, "state")
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    let lifecycle = field(record, "lifecycle")
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
     matches!(
-        field(record, "state")
-            .unwrap_or("")
-            .trim()
-            .to_ascii_lowercase()
-            .as_str(),
-        "stale" | "expired"
-    ) || research_cache_record_expiry(record).is_some_and(|expires_at| expires_at.as_str() <= now)
+        state.as_str(),
+        "stale" | "expired" | "superseded" | "conflicted" | "quarantined"
+    ) || matches!(
+        lifecycle.as_str(),
+        "questioned" | "quarantined" | "superseded" | "expired"
+    ) || research_cache_record_expiry(record).is_some_and(|expires_at| {
+        match (
+            chrono::DateTime::parse_from_rfc3339(&expires_at),
+            chrono::DateTime::parse_from_rfc3339(now),
+        ) {
+            (Ok(expires), Ok(now)) => expires <= now,
+            _ => true,
+        }
+    })
 }
 
 /// Return the stored expiry, or derive one for records written before the
@@ -2212,53 +2740,111 @@ fn research_cache_record_expiry(record: &Record) -> Option<String> {
     freshness_expiry(freshness, recorded_at_millis)
 }
 
+struct CacheStateOutput<'a> {
+    json: bool,
+    standard_output: &'a mut dyn Write,
+    standard_error: &'a mut dyn Write,
+}
+
 /// Set the `state` field on one research-cache record (used by `stale --id` and `reward`).
 fn mark_cache_entry_state(
+    claude_home: &Path,
     store: &RecordStore,
     label: &str,
     id: &str,
     new_state: &str,
-    json: bool,
-    standard_output: &mut dyn Write,
-    standard_error: &mut dyn Write,
+    output: CacheStateOutput<'_>,
 ) -> u8 {
-    let record = match store.read_record(id) {
-        Ok(Some(record)) => record,
-        Ok(None) => {
-            let _ = writeln!(
-                standard_error,
-                "{label}: no research-cache entry with id {id}"
-            );
-            return 1;
-        }
-        Err(error) => {
-            let _ = writeln!(standard_error, "{label}: {error}");
-            return 1;
-        }
-    };
-    let mut record: Record = record
-        .into_iter()
-        .filter(|(key, _)| key != "state")
-        .collect();
-    record.push(("state".into(), new_state.to_string()));
-    match store.write_record(id, &record) {
-        Ok(path) => {
-            if json {
+    mark_cache_entry_state_with_link(claude_home, store, label, id, new_state, "", output)
+}
+
+fn mark_cache_entry_state_with_link(
+    claude_home: &Path,
+    store: &RecordStore,
+    label: &str,
+    id: &str,
+    new_state: &str,
+    link_id: &str,
+    output: CacheStateOutput<'_>,
+) -> u8 {
+    match transition_cache_record(store, id, new_state, link_id) {
+        Ok((path, record)) => {
+            // Reindex lifecycle changes so inactive JSON leaves active recall
+            // while the durable source remains available for audit.
+            if let Err(error) =
+                crate::utility::recall::reindex_after_write_paths(claude_home, &[path.as_path()])
+            {
+                let _ = writeln!(
+                    output.standard_error,
+                    "{label}: recall index sync skipped ({error})"
+                );
+            }
+            if output.json {
                 let payload = Value::Object(vec![
                     ("updated".into(), Value::Bool(true)),
                     ("entry".into(), record_to_value(&record)),
                 ]);
-                return render_json(standard_output, standard_error, &payload);
+                return render_json(output.standard_output, output.standard_error, &payload);
             }
-            let _ = writeln!(standard_output, "{label}: {id} -> {new_state}");
-            let _ = writeln!(standard_output, "  {}", display_path(&path));
+            let _ = writeln!(output.standard_output, "{label}: {id} -> {new_state}");
+            let _ = writeln!(output.standard_output, "  {}", display_path(&path));
             0
         }
         Err(error) => {
-            let _ = writeln!(standard_error, "{label}: {error}");
-            1
+            let _ = writeln!(output.standard_error, "{label}: {error}");
+            if error.contains("no research-cache entry") {
+                1
+            } else {
+                2
+            }
         }
     }
+}
+
+/// Apply one durable research-cache lifecycle transition. This helper is used
+/// by explicit CLI actions and `record --supersedes`, keeping the state shape
+/// and storage bound identical across both paths.
+fn transition_cache_record(
+    store: &RecordStore,
+    id: &str,
+    new_state: &str,
+    link_id: &str,
+) -> Result<(std::path::PathBuf, Record), String> {
+    let record = match store.read_record(id) {
+        Ok(Some(record)) => record,
+        Ok(None) => return Err(format!("no research-cache entry with id {id}")),
+        Err(error) => return Err(error.to_string()),
+    };
+    let mut record: Record = record
+        .into_iter()
+        .filter(|(key, _)| {
+            key != "state"
+                && key != "lifecycle"
+                && key != "supersededBy"
+                && key != "expiredAt"
+                && key != "supersededAt"
+                && key != "updatedAt"
+        })
+        .collect();
+    record.push(("state".into(), new_state.to_string()));
+    record.push((
+        "lifecycle".into(),
+        cache_lifecycle_for_state(new_state).to_string(),
+    ));
+    if !link_id.is_empty() {
+        record.push(("supersededBy".into(), link_id.to_string()));
+    }
+    let (_, updated_at) = now_id("rc-state");
+    if matches!(new_state, "expired" | "superseded") {
+        record.push((format!("{new_state}At"), updated_at));
+    } else {
+        record.push(("updatedAt".into(), updated_at));
+    }
+    validate_record_shape(&record, MAX_MEMORY_RECORD_BYTES)?;
+    let path = store
+        .write_record(id, &record)
+        .map_err(|error| error.to_string())?;
+    Ok((path, record))
 }
 
 fn emit_created(
@@ -2281,6 +2867,31 @@ fn emit_created(
     let _ = writeln!(standard_output, "{label}: id={id}");
     let _ = writeln!(standard_output, "  saved: {}", display_path(path));
     0
+}
+
+fn bounded_family_projection(records: &[(String, Record)]) -> (Vec<Value>, bool) {
+    let byte_budget = MAX_FAMILY_LIST_BYTES.saturating_sub(1024);
+    let mut used_bytes = 0usize;
+    let mut projected = Vec::new();
+    let mut truncated = false;
+    for (_, record) in records {
+        if projected.len() >= MAX_FAMILY_LIST_RECORDS {
+            truncated = true;
+            break;
+        }
+        let value = record_to_value(record);
+        let bytes = serialized_value(&value).len();
+        if bytes > byte_budget.saturating_sub(used_bytes) {
+            truncated = true;
+            break;
+        }
+        used_bytes = used_bytes.saturating_add(bytes);
+        projected.push(value);
+    }
+    if projected.len() < records.len() {
+        truncated = true;
+    }
+    (projected, truncated)
 }
 
 fn list_family(
@@ -2309,24 +2920,36 @@ fn list_family(
             return 1;
         }
     };
+    let total_count = records.len();
+    let (projected_records, truncated) = bounded_family_projection(&records);
     if flags.bool_value("json") {
         let payload = Value::Object(vec![
-            ("count".into(), Value::Number(records.len().to_string())),
             (
-                "records".into(),
-                Value::Array(
-                    records
-                        .iter()
-                        .map(|(_, record)| record_to_value(record))
-                        .collect(),
-                ),
+                "count".into(),
+                Value::Number(projected_records.len().to_string()),
             ),
+            ("totalCount".into(), Value::Number(total_count.to_string())),
+            ("truncated".into(), Value::Bool(truncated)),
+            ("records".into(), Value::Array(projected_records)),
         ]);
         return render_json(standard_output, standard_error, &payload);
     }
-    let _ = writeln!(standard_output, "{label}: {} record(s)", records.len());
-    for (id, _) in &records {
-        let _ = writeln!(standard_output, "  {id}");
+    let _ = writeln!(
+        standard_output,
+        "{label}: {} of {total_count} record(s){}",
+        projected_records.len(),
+        if truncated {
+            " (bounded output; use a scoped query or inspect files)"
+        } else {
+            ""
+        }
+    );
+    for value in &projected_records {
+        if let Value::Object(fields) = value {
+            if let Some((_, Value::String(id))) = fields.iter().find(|(key, _)| key == "id") {
+                let _ = writeln!(standard_output, "  {id}");
+            }
+        }
     }
     0
 }
@@ -2379,6 +3002,26 @@ fn show_family_record(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn research_expiry_compares_instants_and_rejects_corrupt_expiry() {
+        let record = |expiry: &str| vec![("expiresAt".into(), expiry.into())];
+        assert!(super::research_cache_record_is_stale(
+            &record("2026-09-12T01:00:00+08:00"),
+            "2026-09-11T18:00:00Z"
+        ));
+        assert!(!super::research_cache_record_is_stale(
+            &record("2026-09-11T12:00:00-08:00"),
+            "2026-09-11T18:00:00Z"
+        ));
+        assert!(super::research_cache_record_is_stale(
+            &record("invalid"),
+            "2026-09-11T18:00:00Z"
+        ));
+        assert!(super::research_cache_record_is_stale(
+            &vec![("state".into(), "conflicted".into())],
+            "2026-09-11T18:00:00Z"
+        ));
+    }
     use super::*;
     use std::path::PathBuf;
 
@@ -2973,6 +3616,8 @@ mod tests {
                 "flaky test retries",
                 "--guidance",
                 "quarantine and trace root cause",
+                "--evidence",
+                "reproduced in two sessions",
                 "--claude-home",
                 &h,
             ],
@@ -3053,6 +3698,8 @@ mod tests {
                 "guess pattern",
                 "--guidance",
                 "do x",
+                "--evidence",
+                "reproduced in two sessions",
                 "--claude-home",
                 &h,
             ],
@@ -3124,6 +3771,8 @@ mod tests {
                 "merge garbage",
                 "--guidance",
                 "dispatch parallel agents only on disjoint files",
+                "--evidence",
+                "verified by two independent runs",
                 "--claude-home",
                 &h,
             ],

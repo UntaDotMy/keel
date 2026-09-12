@@ -241,11 +241,6 @@ const MAX_PRELOADED_EVENTS: usize = MAX_EVENT_QUEUE - 1;
 /// collector even while workers are busy.
 const MAX_PENDING_JOBS: usize = 512;
 
-/// JSON-RPC batches are intentionally bounded before their elements become
-/// pending jobs. HTTP uses the same bound; keeping stdio and HTTP aligned makes
-/// the two transports fail closed in the same way.
-const MAX_STDIO_BATCH_ITEMS: usize = 64;
-
 /// Cancellation registrations are small, transient state, but a client can
 /// keep many requests in flight. Keep this cap above the maximum worker count
 /// while still making the collection finite.
@@ -263,21 +258,9 @@ const MAX_CANCELLATION_ID_BYTES: usize = 512;
 /// chats) is separate: each session is its own `keel mcp serve` process.
 const DEFAULT_MAX_INFLIGHT: usize = 64;
 
-/// Default wire-protocol version advertised during `initialize` when the client
-/// does not request one. Per the MCP lifecycle spec the server SHOULD respond
-/// with the client's requested `protocolVersion` when it can support it, and
-/// only fall back to its own latest supported version otherwise. We echo the
-/// client's value in [`handle_initialize`] and use this constant as the
-/// fallback, so the server stays compatible as the spec revises without needing
-/// a constant bump each time. Current spec revision: 2025-11-25
-/// (see code.claude.com/docs/en/mcp and modelcontextprotocol.io/specification).
-pub(super) const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
-pub(super) const MCP_LEGACY_PROTOCOL_VERSION: &str = "2024-11-05";
-pub(super) const MCP_PREVIOUS_PROTOCOL_VERSION: &str = "2025-03-26";
+/// Only the stateless, per-request metadata protocol is served.
+pub(super) const MCP_PROTOCOL_VERSION: &str = "2026-07-28";
 
-/// Server identity returned in the `initialize` response. The version mirrors
-/// the workspace package version so plugin manifests and the server agree on
-/// what the host is talking to.
 pub(super) const MCP_SERVER_NAME: &str = "keel";
 pub(super) const MCP_SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -294,6 +277,12 @@ pub(super) const JSON_RPC_INTERNAL_ERROR: i64 = -32603;
 /// surface and the read surface stay in lockstep.
 const SYSTEM_MAP_RESOURCE_URI: &str = "keel://system-map";
 const RECALL_STATUS_RESOURCE_URI: &str = "keel://recall/status";
+
+// Listings describe a fixed workspace surface; reads return live state. Keep
+// both cacheable, but never reusable through a shared intermediary cache.
+const MCP_RESOURCE_LIST_CACHE_TTL_MS: u64 = 300_000;
+const MCP_RESOURCE_READ_CACHE_TTL_MS: u64 = 60_000;
+const MCP_RESOURCE_CACHE_SCOPE: &str = "private";
 
 /// Entry point for `keel mcp <subcommand>`.
 pub fn run_mcp_command(
@@ -700,46 +689,21 @@ enum ServeEvent {
     /// Unrecoverable stdin error.
     ReaderError(String),
     /// A worker finished a request that needs a response written to stdout.
-    /// `batch` is set when the request was part of a JSON-RPC batch array.
     Response {
         value: Value,
-        batch: Option<BatchMember>,
         cancellation_key: Option<String>,
         cancellation: Arc<AtomicBool>,
     },
     /// A worker finished a notification (no response). Frees an in-flight slot.
     WorkerDone {
-        batch: Option<BatchMember>,
         cancellation_key: Option<String>,
         cancellation: Arc<AtomicBool>,
     },
 }
 
-/// Identity of one element inside an open JSON-RPC batch.
-#[derive(Clone, Copy)]
-struct BatchMember {
-    batch_id: u64,
-    index: usize,
-}
-
-/// Collects per-index results until every batch element has finished, then
-/// emits one JSON array (JSON-RPC 2.0 §6). Notification slots contribute no
-/// response object.
-struct BatchCollector {
-    slots: Vec<BatchSlot>,
-    remaining: usize,
-}
-
-enum BatchSlot {
-    Pending,
-    Notification,
-    Response(Value),
-}
-
-/// One scheduled unit of work (single-line request or batch element).
+/// One scheduled newline-delimited request.
 struct PendingJob {
     request: Value,
-    batch: Option<BatchMember>,
     cancellation_key: Option<String>,
     cancellation: Arc<AtomicBool>,
 }
@@ -1016,7 +980,6 @@ pub(super) fn cancellation_key(request_id: &Value) -> Option<String> {
 
 fn new_pending_job(
     request: Value,
-    batch: Option<BatchMember>,
     cancellations: &mut HashMap<String, Arc<AtomicBool>>,
 ) -> Result<PendingJob, PendingJobError> {
     let key = request.get("id").and_then(cancellation_key);
@@ -1032,7 +995,6 @@ fn new_pending_job(
     }
     Ok(PendingJob {
         request,
-        batch,
         cancellation_key: key,
         cancellation,
     })
@@ -1073,14 +1035,7 @@ fn rejected_request_response(request: &Value, code: i64, message: &str) -> Optio
     rejected_request_id(request).map(|id| error_response(id, code, message))
 }
 
-fn rejected_batch_response(items: &[Value], code: i64, message: &str) -> Option<Value> {
-    let responses: Vec<Value> = items
-        .iter()
-        .filter_map(|item| rejected_request_response(item, code, message))
-        .collect();
-    (!responses.is_empty()).then_some(Value::Array(responses))
-}
-
+#[cfg(test)]
 fn remove_pending_job_registration(
     cancellations: &mut HashMap<String, Arc<AtomicBool>>,
     job: &PendingJob,
@@ -1143,9 +1098,7 @@ fn run_serve_event_loop(
 ) -> u8 {
     let mut in_flight: usize = 0;
     let mut pending: VecDeque<PendingJob> = VecDeque::new();
-    let mut batches: HashMap<u64, BatchCollector> = HashMap::new();
     let mut cancellations: HashMap<String, Arc<AtomicBool>> = HashMap::new();
-    let mut next_batch_id: u64 = 1;
     let mut reader_done = false;
     let mut exit_code: u8 = 0;
     let idle_budget = idle_timeout();
@@ -1209,12 +1162,11 @@ fn run_serve_event_loop(
                                     exit_code = 1;
                                     reader_done = true;
                                     pending.clear();
-                                    batches.clear();
                                 }
                             }
                         } else {
                             let request_for_error = request.clone();
-                            match new_pending_job(request, None, &mut cancellations) {
+                            match new_pending_job(request, &mut cancellations) {
                                 Ok(job) => pending.push_back(job),
                                 Err(error) => {
                                     if let Some(response) = rejected_request_response(
@@ -1232,76 +1184,10 @@ fn run_serve_event_loop(
                                             exit_code = 1;
                                             reader_done = true;
                                             pending.clear();
-                                            batches.clear();
                                         }
                                     }
                                 }
                             }
-                        }
-                    }
-                    FrameParse::Batch(items) => {
-                        if pending.len().saturating_add(items.len()) > MAX_PENDING_JOBS {
-                            if let Some(busy) = rejected_batch_response(
-                                &items,
-                                JSON_RPC_INTERNAL_ERROR,
-                                "server busy: pending request queue is full",
-                            ) {
-                                if write_framed_response(standard_output, standard_error, &busy)
-                                    .is_err()
-                                {
-                                    exit_code = 1;
-                                    reader_done = true;
-                                    pending.clear();
-                                    batches.clear();
-                                }
-                            }
-                            continue;
-                        }
-                        let batch_id = next_batch_id;
-                        let len = items.len();
-                        let mut jobs = Vec::with_capacity(len);
-                        let mut pending_error = None;
-                        for (index, request) in items.iter().cloned().enumerate() {
-                            match new_pending_job(
-                                request,
-                                Some(BatchMember { batch_id, index }),
-                                &mut cancellations,
-                            ) {
-                                Ok(job) => jobs.push(job),
-                                Err(error) => {
-                                    pending_error = Some(error);
-                                    break;
-                                }
-                            }
-                        }
-                        if let Some(error) = pending_error {
-                            for job in &jobs {
-                                remove_pending_job_registration(&mut cancellations, job);
-                            }
-                            if let Some(response) =
-                                rejected_batch_response(&items, error.code(), error.message())
-                            {
-                                if write_framed_response(standard_output, standard_error, &response)
-                                    .is_err()
-                                {
-                                    exit_code = 1;
-                                    reader_done = true;
-                                    pending.clear();
-                                    batches.clear();
-                                }
-                            }
-                            continue;
-                        }
-                        next_batch_id = next_batch_id.saturating_add(1);
-                        batches.insert(
-                            batch_id,
-                            BatchCollector {
-                                slots: (0..len).map(|_| BatchSlot::Pending).collect(),
-                                remaining: len,
-                            },
-                        );
-                        for job in jobs {
-                            pending.push_back(job);
                         }
                     }
                     FrameParse::Immediate(response) => {
@@ -1313,7 +1199,6 @@ fn run_serve_event_loop(
                             exit_code = 1;
                             reader_done = true;
                             pending.clear();
-                            batches.clear();
                         }
                     }
                 }
@@ -1328,7 +1213,6 @@ fn run_serve_event_loop(
                 exit_code = 1;
                 reader_done = true;
                 pending.clear();
-                batches.clear();
             }
             ServeEvent::ReaderEof => {
                 reader_done = true;
@@ -1338,11 +1222,9 @@ fn run_serve_event_loop(
                 exit_code = 1;
                 reader_done = true;
                 pending.clear();
-                batches.clear();
             }
             ServeEvent::Response {
                 value,
-                batch,
                 cancellation_key,
                 cancellation,
             } => {
@@ -1353,29 +1235,7 @@ fn run_serve_event_loop(
                     &cancellation,
                 );
                 if cancellation.load(Ordering::Acquire) {
-                    if let Some(member) = batch {
-                        if let Some(finished) =
-                            complete_batch_slot(&mut batches, member, BatchSlot::Notification)
-                        {
-                            let _ =
-                                write_framed_response(standard_output, standard_error, &finished);
-                        }
-                    }
-                } else if let Some(member) = batch {
-                    if let Some(finished) =
-                        complete_batch_slot(&mut batches, member, BatchSlot::Response(value))
-                    {
-                        if let Err(write_error) =
-                            write_framed_response(standard_output, standard_error, &finished)
-                        {
-                            let _ =
-                                writeln!(standard_error, "[keel mcp] write stdout: {write_error}");
-                            exit_code = 1;
-                            reader_done = true;
-                            pending.clear();
-                            batches.clear();
-                        }
-                    }
+                    continue;
                 } else if let Err(write_error) =
                     write_framed_response(standard_output, standard_error, &value)
                 {
@@ -1383,11 +1243,9 @@ fn run_serve_event_loop(
                     exit_code = 1;
                     reader_done = true;
                     pending.clear();
-                    batches.clear();
                 }
             }
             ServeEvent::WorkerDone {
-                batch,
                 cancellation_key,
                 cancellation,
             } => {
@@ -1397,22 +1255,6 @@ fn run_serve_event_loop(
                     cancellation_key.as_deref(),
                     &cancellation,
                 );
-                if let Some(member) = batch {
-                    if let Some(finished) =
-                        complete_batch_slot(&mut batches, member, BatchSlot::Notification)
-                    {
-                        if let Err(write_error) =
-                            write_framed_response(standard_output, standard_error, &finished)
-                        {
-                            let _ =
-                                writeln!(standard_error, "[keel mcp] write stdout: {write_error}");
-                            exit_code = 1;
-                            reader_done = true;
-                            pending.clear();
-                            batches.clear();
-                        }
-                    }
-                }
             }
         }
 
@@ -1423,7 +1265,6 @@ fn run_serve_event_loop(
             in_flight += 1;
             let worker_tx = event_tx.clone();
             let request_id = job.request.get("id").cloned().unwrap_or(Value::Null);
-            let batch = job.batch;
             let cancellation_key = job.cancellation_key;
             let cancellation = job.cancellation;
             let worker_cancellation_key = cancellation_key.clone();
@@ -1442,14 +1283,12 @@ fn run_serve_event_loop(
                             Some(response) => {
                                 let _ = worker_tx.send(ServeEvent::Response {
                                     value: response,
-                                    batch,
                                     cancellation_key: worker_cancellation_key,
                                     cancellation: worker_cancellation,
                                 });
                             }
                             None => {
                                 let _ = worker_tx.send(ServeEvent::WorkerDone {
-                                    batch,
                                     cancellation_key: worker_cancellation_key,
                                     cancellation: worker_cancellation,
                                 });
@@ -1469,22 +1308,7 @@ fn run_serve_event_loop(
                     JSON_RPC_INTERNAL_ERROR,
                     &format!("failed to spawn request worker: {error}"),
                 );
-                if let Some(member) = batch {
-                    if let Some(finished) =
-                        complete_batch_slot(&mut batches, member, BatchSlot::Response(response))
-                    {
-                        if write_framed_response(standard_output, standard_error, &finished)
-                            .is_err()
-                        {
-                            exit_code = 1;
-                            reader_done = true;
-                            pending.clear();
-                            batches.clear();
-                            break;
-                        }
-                    }
-                } else if write_framed_response(standard_output, standard_error, &response).is_err()
-                {
+                if write_framed_response(standard_output, standard_error, &response).is_err() {
                     exit_code = 1;
                     reader_done = true;
                     pending.clear();
@@ -1493,7 +1317,7 @@ fn run_serve_event_loop(
             }
         }
 
-        if reader_done && pending.is_empty() && in_flight == 0 && batches.is_empty() {
+        if reader_done && pending.is_empty() && in_flight == 0 {
             break;
         }
     }
@@ -1501,54 +1325,14 @@ fn run_serve_event_loop(
     exit_code
 }
 
-/// Record one finished batch element. When the last slot completes, remove the
-/// collector and return the JSON-RPC batch response array (or `None` when the
-/// batch was notifications-only — JSON-RPC §6: return nothing).
-fn complete_batch_slot(
-    batches: &mut HashMap<u64, BatchCollector>,
-    member: BatchMember,
-    slot: BatchSlot,
-) -> Option<Value> {
-    let collector = batches.get_mut(&member.batch_id)?;
-    if member.index >= collector.slots.len() {
-        return None;
-    }
-    if matches!(collector.slots[member.index], BatchSlot::Pending) {
-        collector.slots[member.index] = slot;
-        collector.remaining = collector.remaining.saturating_sub(1);
-    }
-    if collector.remaining > 0 {
-        return None;
-    }
-    let finished = batches.remove(&member.batch_id)?;
-    let responses: Vec<Value> = finished
-        .slots
-        .into_iter()
-        .filter_map(|s| match s {
-            BatchSlot::Response(value) => Some(value),
-            BatchSlot::Notification | BatchSlot::Pending => None,
-        })
-        .collect();
-    if responses.is_empty() {
-        None
-    } else {
-        Some(Value::Array(responses))
-    }
-}
-
 enum FrameParse {
     /// Single JSON-RPC object (normal stdio line).
     Single(Value),
-    /// JSON-RPC batch array — response must be one array when complete.
-    Batch(Vec<Value>),
     /// Parse/shape error that must be answered immediately without a worker.
     Immediate(Value),
 }
 
-/// Parse a single newline-delimited frame.
-///
-/// - Object → single request/notification (MCP 2025-11-25 stdio default).
-/// - Array → JSON-RPC 2.0 batch (also older MCP 2025-03-26 receive-batch).
+/// Parse one newline-delimited request; modern MCP forbids batch arrays.
 fn parse_frame(frame: &str) -> FrameParse {
     let parsed: Result<Value, serde_json::Error> = serde_json::from_str(frame);
     match parsed {
@@ -1557,62 +1341,13 @@ fn parse_frame(frame: &str) -> FrameParse {
             JSON_RPC_PARSE_ERROR,
             &format!("Parse error: {parse_error}"),
         )),
-        Ok(Value::Array(items)) => {
-            if items.is_empty() {
-                return FrameParse::Immediate(error_response(
-                    Value::Null,
-                    JSON_RPC_INVALID_REQUEST,
-                    "Invalid Request: empty batch",
-                ));
-            }
-            if items.len() > MAX_STDIO_BATCH_ITEMS {
-                return FrameParse::Immediate(error_response(
-                    Value::Null,
-                    JSON_RPC_INVALID_REQUEST,
-                    "Invalid Request: batch exceeds maximum item count",
-                ));
-            }
-            FrameParse::Batch(items)
-        }
-        Ok(other) => FrameParse::Single(other),
-    }
-}
-
-/// Dispatch a JSON-RPC body (object or batch array) for HTTP / tests.
-/// Returns framed outcomes without I/O.
-#[cfg(test)]
-pub(crate) fn dispatch_body(body: &Value) -> DispatchBodyResult {
-    match body {
-        Value::Array(items) if items.is_empty() => DispatchBodyResult::Json(error_response(
+        Ok(Value::Array(_)) => FrameParse::Immediate(error_response(
             Value::Null,
             JSON_RPC_INVALID_REQUEST,
-            "Invalid Request: empty batch",
+            "JSON-RPC batches are not supported by MCP 2026-07-28",
         )),
-        Value::Array(items) => {
-            let mut responses = Vec::new();
-            for item in items {
-                if let Some(response) = dispatch(item) {
-                    responses.push(response);
-                }
-            }
-            if responses.is_empty() {
-                DispatchBodyResult::Accepted
-            } else {
-                DispatchBodyResult::Json(Value::Array(responses))
-            }
-        }
-        other => match dispatch(other) {
-            Some(response) => DispatchBodyResult::Json(response),
-            None => DispatchBodyResult::Accepted,
-        },
+        Ok(other) => FrameParse::Single(other),
     }
-}
-
-pub(crate) enum DispatchBodyResult {
-    /// JSON-RPC response object or batch array.
-    Json(Value),
-    /// Notification-only / no response body (HTTP 202).
-    Accepted,
 }
 
 /// Soft ceiling for one newline-delimited JSON-RPC response frame on stdio.
@@ -1763,25 +1498,88 @@ pub(super) fn dispatch_cancellable_with_context(
     let params = object.get("params").cloned().unwrap_or(Value::Null);
     let request_context = context.with_request_id(id.as_ref());
 
-    // JSON-RPC 2.0 §4.1: a request without `id` is a notification — no
-    // An id:null is a valid request and must receive a response.
+    // Notifications never dispatch request handlers or produce responses.
     let is_notification = id.is_none();
 
     if is_notification {
-        // Currently the only meaningful incoming notification is
-        // `notifications/initialized`. Other notifications are ignored
-        // silently per the spec — they must never produce a response.
-        let _ = handle_method_cancellable(&method, &params, cancellation, &request_context);
         return None;
     }
 
     let request_id = id.unwrap_or(Value::Null);
+    if !request_id.is_string() && request_id.as_i64().is_none() && request_id.as_u64().is_none() {
+        return Some(error_response(
+            Value::Null,
+            JSON_RPC_INVALID_REQUEST,
+            "Request id must be a string or integer",
+        ));
+    }
+    if method == "initialize" {
+        return Some(unsupported_protocol_response(
+            request_id,
+            params.get("protocolVersion").and_then(Value::as_str),
+        ));
+    }
+    if let Err(response) = validate_request_metadata(&params, &request_id) {
+        return Some(response);
+    }
     Some(
         match handle_method_cancellable(&method, &params, cancellation, &request_context) {
             Ok(result) => success_response(request_id, result),
             Err(MethodError { code, message }) => error_response(request_id, code, &message),
         },
     )
+}
+
+pub(super) fn unsupported_protocol_response(id: Value, requested: Option<&str>) -> Value {
+    let mut response = error_response(
+        id,
+        -32022,
+        "Unsupported protocol version; supported: 2026-07-28",
+    );
+    response["error"]["data"] =
+        json!({"supported": [MCP_PROTOCOL_VERSION], "requested": requested});
+    response
+}
+
+pub(super) fn validate_request_metadata(params: &Value, id: &Value) -> Result<(), Value> {
+    let meta = params.get("_meta");
+    let Some(version) = meta
+        .and_then(|m| m.get("io.modelcontextprotocol/protocolVersion"))
+        .and_then(Value::as_str)
+    else {
+        return Err(error_response(
+            id.clone(),
+            JSON_RPC_INVALID_PARAMS,
+            "Missing required _meta protocolVersion",
+        ));
+    };
+    if version != MCP_PROTOCOL_VERSION {
+        return Err(unsupported_protocol_response(id.clone(), Some(version)));
+    }
+    if !meta
+        .and_then(|m| m.get("io.modelcontextprotocol/clientCapabilities"))
+        .is_some_and(Value::is_object)
+    {
+        return Err(error_response(
+            id.clone(),
+            JSON_RPC_INVALID_PARAMS,
+            "Missing or invalid _meta clientCapabilities",
+        ));
+    }
+    if let Some(info) = meta.and_then(|m| m.get("io.modelcontextprotocol/clientInfo")) {
+        if !["name", "version"].iter().all(|field| {
+            info.get(field)
+                .and_then(Value::as_str)
+                .is_some_and(|value| !value.trim().is_empty())
+        }) {
+            return Err(error_response(
+                id.clone(),
+                JSON_RPC_INVALID_PARAMS,
+                "Invalid _meta clientInfo",
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Dispatcher for a single MCP method. Kept method-keyed (rather than
@@ -1794,9 +1592,15 @@ fn handle_method_cancellable(
     context: &McpRequestContext,
 ) -> Result<Value, MethodError> {
     match method {
-        "initialize" => handle_initialize(params),
-        "notifications/initialized" => Ok(Value::Null),
-        "ping" => Ok(json!({})),
+        "server/discover" => Ok(json!({
+            "supportedVersions": [MCP_PROTOCOL_VERSION],
+            "capabilities": {"tools": {}, "resources": {}},
+            "_meta": {"io.modelcontextprotocol/serverInfo": {
+                "name": MCP_SERVER_NAME, "version": MCP_SERVER_VERSION
+            }},
+            "ttlMs": 3_600_000,
+            "cacheScope": "public"
+        })),
         "tools/list" => tools::handle_tools_list_for_profile_params_with_context(
             McpCatalogProfile::from_env(),
             params,
@@ -1877,67 +1681,10 @@ fn handle_method_cancellable(
     }
 }
 
-fn handle_initialize(params: &Value) -> Result<Value, MethodError> {
-    let object = params.as_object().ok_or_else(|| MethodError {
-        code: JSON_RPC_INVALID_PARAMS,
-        message: "initialize params must be an object".to_string(),
-    })?;
-    let requested = object
-        .get("protocolVersion")
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| MethodError {
-            code: JSON_RPC_INVALID_PARAMS,
-            message: "initialize params.protocolVersion must be a non-empty string".to_string(),
-        })?;
-    if !object.get("capabilities").is_some_and(Value::is_object) {
-        return Err(MethodError {
-            code: JSON_RPC_INVALID_PARAMS,
-            message: "initialize params.capabilities must be an object".to_string(),
-        });
-    }
-    let client_info = object
-        .get("clientInfo")
-        .and_then(Value::as_object)
-        .ok_or_else(|| MethodError {
-            code: JSON_RPC_INVALID_PARAMS,
-            message: "initialize params.clientInfo must be an object".to_string(),
-        })?;
-    for field in ["name", "version"] {
-        if !client_info
-            .get(field)
-            .and_then(Value::as_str)
-            .is_some_and(|value| !value.trim().is_empty())
-        {
-            return Err(MethodError {
-                code: JSON_RPC_INVALID_PARAMS,
-                message: format!("initialize params.clientInfo.{field} must be a non-empty string"),
-            });
-        }
-    }
-    let negotiated = if matches!(
-        requested,
-        MCP_LEGACY_PROTOCOL_VERSION | MCP_PREVIOUS_PROTOCOL_VERSION | MCP_PROTOCOL_VERSION
-    ) {
-        requested
-    } else {
-        MCP_PROTOCOL_VERSION
-    };
-    Ok(json!({
-        "protocolVersion": negotiated,
-        "serverInfo": {
-            "name": MCP_SERVER_NAME,
-            "version": MCP_SERVER_VERSION,
-        },
-        "capabilities": {
-            "tools": {},
-            "resources": {},
-        },
-    }))
-}
-
 fn handle_resources_list() -> Value {
     json!({
+        "ttlMs": MCP_RESOURCE_LIST_CACHE_TTL_MS,
+        "cacheScope": MCP_RESOURCE_CACHE_SCOPE,
         "resources": [
             {
                 "uri": SYSTEM_MAP_RESOURCE_URI,
@@ -2019,7 +1766,7 @@ fn handle_resources_read(
                 "resources/read system_map",
                 || system_map_text(None),
             ) {
-                Ok(text) => (tools::truncate_mcp_text(&text), false),
+                Ok(text) => (text, false),
                 Err(message) => (message, true),
             };
             (
@@ -2040,7 +1787,7 @@ fn handle_resources_read(
                         .map_err(|error| format!("serialize recall status: {error}"))
                 },
             ) {
-                Ok(text) => (tools::truncate_mcp_text(&text), false),
+                Ok(text) => (text, false),
                 Err(message) => (message, true),
             };
             (
@@ -2072,6 +1819,8 @@ fn handle_resources_read(
         message,
     })?;
     let mut response = json!({
+        "ttlMs": MCP_RESOURCE_READ_CACHE_TTL_MS,
+        "cacheScope": MCP_RESOURCE_CACHE_SCOPE,
         "contents": [
             {
                 "uri": uri,
@@ -2124,6 +1873,18 @@ pub(super) fn recall_status_payload() -> Result<Value, String> {
 /// the server side rather than a compatibility choice.
 pub(super) const MCP_RESULT_TYPE_COMPLETE: &str = "complete";
 
+/// Reserved result metadata key carrying the server's self-reported identity
+/// on every modern response. Keep this in the envelope owner so individual
+/// handlers cannot accidentally omit it.
+pub(super) const MCP_SERVER_INFO_META_KEY: &str = "io.modelcontextprotocol/serverInfo";
+
+fn mcp_server_info() -> Value {
+    json!({
+        "name": MCP_SERVER_NAME,
+        "version": MCP_SERVER_VERSION,
+    })
+}
+
 /// Stamp the required `resultType` onto an object result. Applied at the single
 /// envelope owner so no method can forget it. Re-stamping a result that already
 /// carries the field (a measured `tools/list` page, a `tools/call` envelope) is
@@ -2135,6 +1896,23 @@ pub(super) fn mark_result_complete(result: Value) -> Value {
                 "resultType".to_string(),
                 Value::String(MCP_RESULT_TYPE_COMPLETE.to_string()),
             );
+            let metadata = object
+                .entry("_meta".to_string())
+                .or_insert_with(|| Value::Object(serde_json::Map::new()));
+            match metadata {
+                Value::Object(metadata) => {
+                    metadata
+                        .entry(MCP_SERVER_INFO_META_KEY.to_string())
+                        .or_insert_with(mcp_server_info);
+                }
+                // A scalar `_meta` cannot carry reserved identity; replace only
+                // that malformed container while preserving valid handler metadata.
+                malformed => {
+                    let mut fallback = serde_json::Map::new();
+                    fallback.insert(MCP_SERVER_INFO_META_KEY.to_string(), mcp_server_info());
+                    *malformed = Value::Object(fallback);
+                }
+            }
             Value::Object(object)
         }
         // MCP results are objects; anything else keeps its shape rather than
@@ -2173,6 +1951,120 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn modern_request(mut value: Value) -> Value {
+        if value.get("id").is_some() && value.get("method").is_some() {
+            if !value.get("params").is_some_and(Value::is_object) {
+                value["params"] = json!({});
+            }
+            value["params"]["_meta"] = json!({
+                "io.modelcontextprotocol/protocolVersion": MCP_PROTOCOL_VERSION,
+                "io.modelcontextprotocol/clientCapabilities": {}
+            });
+        }
+        value
+    }
+
+    fn dispatch_modern(value: &Value) -> Option<Value> {
+        super::dispatch(&modern_request(value.clone()))
+    }
+
+    #[test]
+    fn modern_requests_validate_metadata_and_supported_versions() {
+        let request = modern_request(json!({"jsonrpc":"2.0", "id":1, "method":"server/discover"}));
+        assert!(super::dispatch(&request).unwrap().get("result").is_some());
+        for field in [
+            "io.modelcontextprotocol/protocolVersion",
+            "io.modelcontextprotocol/clientCapabilities",
+        ] {
+            let mut missing = request.clone();
+            missing["params"]["_meta"]
+                .as_object_mut()
+                .unwrap()
+                .remove(field);
+            assert_eq!(super::dispatch(&missing).unwrap()["error"]["code"], -32602);
+        }
+        let mut unsupported = request.clone();
+        unsupported["params"]["_meta"]["io.modelcontextprotocol/protocolVersion"] =
+            json!("2025-11-25");
+        let response = super::dispatch(&unsupported).unwrap();
+        assert_eq!(response["error"]["code"], -32022);
+        assert_eq!(
+            response["error"]["data"]["supported"],
+            json!(["2026-07-28"])
+        );
+        assert_eq!(response["error"]["data"]["requested"], "2025-11-25");
+        let mut malformed = request;
+        malformed["params"]["_meta"]["io.modelcontextprotocol/clientCapabilities"] = json!([]);
+        assert_eq!(
+            super::dispatch(&malformed).unwrap()["error"]["code"],
+            -32602
+        );
+    }
+
+    #[test]
+    fn modern_discovery_is_compact_and_does_not_expose_catalog() {
+        let response = super::dispatch(&modern_request(
+            json!({"jsonrpc":"2.0", "id":"discover", "method":"server/discover"}),
+        ))
+        .unwrap();
+        let result = &response["result"];
+        assert_eq!(result["supportedVersions"], json!([MCP_PROTOCOL_VERSION]));
+        assert_eq!(
+            result["_meta"]["io.modelcontextprotocol/serverInfo"]["name"],
+            MCP_SERVER_NAME
+        );
+        assert!(result["capabilities"]["tools"].is_object());
+        assert!(result.get("tools").is_none());
+        assert!(tools::measure_tools_list_response(result) <= 300);
+    }
+
+    #[test]
+    fn legacy_initialize_is_explicitly_unsupported() {
+        let response = super::dispatch(&json!({"jsonrpc":"2.0", "id":1, "method":"initialize", "params":{"protocolVersion":"2025-11-25"}})).unwrap();
+        assert_eq!(response["error"]["code"], -32022);
+        assert_eq!(
+            response["error"]["data"]["supported"],
+            json!([MCP_PROTOCOL_VERSION])
+        );
+        assert!(response.get("result").is_none());
+    }
+
+    #[test]
+    fn modern_request_ids_reject_null_float_and_composite_values() {
+        for id in [Value::Null, json!(1.5), json!({}), json!([])] {
+            let response = super::dispatch(&modern_request(
+                json!({"jsonrpc":"2.0", "id":id, "method":"server/discover"}),
+            ))
+            .unwrap();
+            assert_eq!(response["error"]["code"], -32600);
+        }
+    }
+
+    #[test]
+    fn stdio_rejects_nonempty_batches_and_missing_metadata_on_real_boundary() {
+        let frames = format!(
+            "{}\n{}\n",
+            json!([modern_request(
+                json!({"jsonrpc":"2.0", "id":1, "method":"server/discover"})
+            )]),
+            json!({"jsonrpc":"2.0", "id":2, "method":"server/discover"})
+        );
+        let mut input = frames.as_bytes();
+        let mut output = Vec::new();
+        assert_eq!(
+            super::serve_stdio(&mut input, &mut output, &mut Vec::new()),
+            0
+        );
+        let responses = parse_json_lines(&String::from_utf8(output).unwrap());
+        assert_eq!(responses.len(), 2);
+        assert!(responses
+            .iter()
+            .any(|response| response["error"]["code"] == -32600));
+        assert!(responses
+            .iter()
+            .any(|response| response["error"]["code"] == -32602));
+    }
+
     #[test]
     fn idle_timeout_defaults_to_bounded_reap_window() {
         // why: the default must be a real budget so orphans self-reap, and it
@@ -2188,146 +2080,48 @@ mod tests {
     }
 
     #[test]
-    fn initialize_returns_protocol_and_server_info() {
-        let request = json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": {
-                "protocolVersion": MCP_PROTOCOL_VERSION,
-                "capabilities": {},
-                "clientInfo": { "name": "mcp-test", "version": "1.0.0" }
-            }
-        });
-        let response = dispatch(&request).expect("response present");
-        assert_eq!(response["jsonrpc"], "2.0");
-        assert_eq!(response["id"], json!(1));
-        let result = &response["result"];
-        assert_eq!(result["protocolVersion"], json!(MCP_PROTOCOL_VERSION));
-        assert_eq!(result["serverInfo"]["name"], json!(MCP_SERVER_NAME));
-        assert_eq!(result["serverInfo"]["version"], json!(MCP_SERVER_VERSION));
-        assert!(result["capabilities"]["tools"].is_object());
-        assert!(result["capabilities"]["resources"].is_object());
-    }
-
-    #[test]
-    fn initialize_echoes_client_requested_protocol_version() {
-        // Per the MCP lifecycle spec the server responds with the client's
-        // requested protocolVersion when it can support it, rather than forcing
-        // its own. This keeps the server compatible as the spec revises without a
-        // constant bump. A client asking for an older revision gets that revision
-        // back; omitting it falls back to MCP_PROTOCOL_VERSION (covered above).
-        let request = json!({
-            "jsonrpc": "2.0",
-            "id": 7,
-            "method": "initialize",
-            "params": {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {},
-                "clientInfo": { "name": "mcp-test", "version": "1.0.0" }
-            }
-        });
-        let response = dispatch(&request).expect("response present");
-        assert_eq!(
-            response["result"]["protocolVersion"],
-            json!("2024-11-05"),
-            "server must echo the client's requested protocol version"
-        );
-
-        // A non-string protocolVersion is invalid per InitializeRequestParams.
-        let bad = json!({
-            "jsonrpc": "2.0",
-            "id": 8,
-            "method": "initialize",
-            "params": {
-                "protocolVersion": 1234,
-                "capabilities": {},
-                "clientInfo": { "name": "mcp-test", "version": "1.0.0" }
-            }
-        });
-        let bad_response = dispatch(&bad).expect("response present");
-        assert_eq!(
-            bad_response["error"]["code"],
-            json!(JSON_RPC_INVALID_PARAMS),
-            "a non-string protocolVersion must be rejected"
-        );
-
-        // An explicit null protocolVersion is invalid, just like any other
-        // missing or non-string required field.
-        let null_version = json!({
-            "jsonrpc": "2.0",
-            "id": 9,
-            "method": "initialize",
-            "params": {
-                "protocolVersion": null,
-                "capabilities": {},
-                "clientInfo": { "name": "mcp-test", "version": "1.0.0" }
-            }
-        });
-        let null_response = dispatch(&null_version).expect("response present");
-        assert_eq!(
-            null_response["error"]["code"],
-            json!(JSON_RPC_INVALID_PARAMS),
-            "a null protocolVersion must be rejected"
-        );
-    }
-
-    #[test]
-    fn initialize_rejects_missing_required_parameters() {
-        for params in [
-            json!({}),
-            Value::Null,
-            json!({
-                "protocolVersion": MCP_PROTOCOL_VERSION,
-                "capabilities": {}
-            }),
-            json!({
-                "protocolVersion": MCP_PROTOCOL_VERSION,
-                "clientInfo": { "name": "mcp-test", "version": "1.0.0" }
-            }),
-            json!({
-                "protocolVersion": MCP_PROTOCOL_VERSION,
-                "capabilities": [],
-                "clientInfo": { "name": "mcp-test", "version": "1.0.0" }
-            }),
-            json!({
-                "protocolVersion": MCP_PROTOCOL_VERSION,
-                "capabilities": {},
-                "clientInfo": { "name": "mcp-test" }
-            }),
-        ] {
-            let response = dispatch(&json!({
-                "jsonrpc": "2.0",
-                "id": "invalid-init",
-                "method": "initialize",
-                "params": params,
-            }))
-            .expect("response present");
-            assert_eq!(response["error"]["code"], json!(JSON_RPC_INVALID_PARAMS));
-        }
-    }
-
-    #[test]
     fn notifications_initialized_produces_no_response() {
         let request = json!({
             "jsonrpc": "2.0",
             "method": "notifications/initialized"
         });
-        assert!(dispatch(&request).is_none());
+        assert!(dispatch_modern(&request).is_none());
     }
 
-    /// Revision `2026-07-28` requires `resultType` on every result, so a ping
-    /// result is no longer the empty object it was under earlier revisions.
+    /// Revision `2026-07-28` retires the old `ping` method. It must now follow
+    /// the ordinary JSON-RPC method-not-found path.
     #[test]
-    fn ping_result_carries_the_required_result_type() {
+    fn retired_ping_is_not_dispatched() {
         let request = json!({
             "jsonrpc": "2.0",
             "id": "ping-1",
             "method": "ping"
         });
-        let response = dispatch(&request).expect("response present");
+        let response = dispatch_modern(&request).expect("response present");
         assert_eq!(response["id"], json!("ping-1"));
-        assert_eq!(response["result"], json!({"resultType": "complete"}));
+        assert_eq!(response["error"]["code"], json!(JSON_RPC_METHOD_NOT_FOUND));
+    }
+
+    #[test]
+    fn every_success_result_carries_server_identity() {
+        for (method, params) in [
+            ("server/discover", json!({})),
+            ("tools/list", json!({})),
+            ("resources/list", json!({})),
+        ] {
+            let response = dispatch_modern(&json!({
+                "jsonrpc": "2.0",
+                "id": method,
+                "method": method,
+                "params": params,
+            }))
+            .expect("response present");
+            assert_eq!(
+                response["result"]["_meta"][MCP_SERVER_INFO_META_KEY],
+                json!({"name": MCP_SERVER_NAME, "version": MCP_SERVER_VERSION}),
+                "{method} response: {response}"
+            );
+        }
     }
 
     /// The stamp is applied at the single envelope owner, so a result already
@@ -2346,6 +2140,13 @@ mod tests {
             mark_result_complete(json!({"resultType": "complete"}))["resultType"],
             "complete"
         );
+        let authored = mark_result_complete(json!({
+            "_meta": {MCP_SERVER_INFO_META_KEY: {"name": "custom", "version": "v"}}
+        }));
+        assert_eq!(
+            authored["_meta"][MCP_SERVER_INFO_META_KEY],
+            json!({"name": "custom", "version": "v"})
+        );
     }
 
     #[test]
@@ -2358,7 +2159,7 @@ mod tests {
             "id": 7,
             "method": "tools/list"
         });
-        let response = dispatch(&request).expect("response present");
+        let response = dispatch_modern(&request).expect("response present");
         let tools = response["result"]["tools"].as_array().expect("tools array");
         let names: Vec<&str> = tools
             .iter()
@@ -2396,13 +2197,13 @@ mod tests {
         let _env_guard = crate::test_support::ENV_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let omitted = dispatch(&json!({
+        let omitted = dispatch_modern(&json!({
             "jsonrpc": "2.0",
             "id": 7,
             "method": "tools/list"
         }))
         .expect("omitted params response");
-        let empty = dispatch(&json!({
+        let empty = dispatch_modern(&json!({
             "jsonrpc": "2.0",
             "id": 8,
             "method": "tools/list",
@@ -2430,7 +2231,7 @@ mod tests {
         std::env::set_var("KEEL_MCP_CATALOG_PROFILE", "full");
         std::env::set_var("KEEL_MCP_PAGE_TOKENS", "1200");
 
-        let response = dispatch(&json!({
+        let response = dispatch_modern(&json!({
             "jsonrpc": "2.0",
             "id": "tools-budget",
             "method": "tools/list",
@@ -2462,10 +2263,12 @@ mod tests {
             "id": 11,
             "method": "resources/list"
         });
-        let response = dispatch(&request).expect("response present");
+        let response = dispatch_modern(&request).expect("response present");
         let resources = response["result"]["resources"]
             .as_array()
             .expect("resources array");
+        assert!(response["result"]["ttlMs"].as_u64().is_some());
+        assert_eq!(response["result"]["cacheScope"], "private");
         let uris: Vec<&str> = resources
             .iter()
             .filter_map(|entry| entry.get("uri").and_then(Value::as_str))
@@ -2477,6 +2280,9 @@ mod tests {
 
     #[test]
     fn dynamic_resource_reads_are_firewalled_and_provenanced() {
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut context = McpRequestContext::authoritative(None);
         context.session_id = format!("resource-firewall-test-{}", std::process::id());
         context.request_id = Some("resource-request".to_string());
@@ -2487,12 +2293,14 @@ mod tests {
             "params": { "uri": RECALL_STATUS_RESOURCE_URI }
         });
         let response = dispatch_cancellable_with_context(
-            &request,
+            &modern_request(request),
             &std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             &context,
         )
         .expect("response present");
         let result = &response["result"];
+        assert!(result["ttlMs"].as_u64().is_some());
+        assert_eq!(result["cacheScope"], "private");
         assert_eq!(result["contents"][0]["uri"], RECALL_STATUS_RESOURCE_URI);
         assert_eq!(result["context"]["source"], "mcp_tool");
         assert!(result["context"]["provenance_id"]
@@ -2507,6 +2315,9 @@ mod tests {
 
     #[test]
     fn discovery_response_keeps_legacy_fields_with_a_bounded_context_record() {
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut context = McpRequestContext::authoritative(None);
         context.session_id = format!("discover-firewall-test-{}", std::process::id());
         context.request_id = Some("discover-request".to_string());
@@ -2517,7 +2328,7 @@ mod tests {
             "params": { "query": "flutter testing", "limit": 3, "level": 1 }
         });
         let response = dispatch_cancellable_with_context(
-            &request,
+            &modern_request(request),
             &std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             &context,
         )
@@ -2552,7 +2363,7 @@ mod tests {
             "params": { "capability": "stats", "reason": "inspect context metrics" }
         });
         let response = dispatch_cancellable_with_context(
-            &request,
+            &modern_request(request),
             &std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             &context,
         )
@@ -2578,7 +2389,7 @@ mod tests {
             "id": 99,
             "method": "tools/teleport"
         });
-        let response = dispatch(&request).expect("response present");
+        let response = dispatch_modern(&request).expect("response present");
         assert_eq!(response["error"]["code"], json!(JSON_RPC_METHOD_NOT_FOUND));
     }
 
@@ -2588,7 +2399,7 @@ mod tests {
             "id": 1,
             "method": "initialize"
         });
-        let response = dispatch(&request).expect("response present");
+        let response = dispatch_modern(&request).expect("response present");
         assert_eq!(response["error"]["code"], json!(JSON_RPC_INVALID_REQUEST));
     }
 
@@ -2615,17 +2426,17 @@ mod tests {
                 "arguments": {}
             }
         });
-        let response = dispatch(&request).expect("response present");
+        let response = dispatch_modern(&request).expect("response present");
         assert_eq!(response["error"]["code"], json!(JSON_RPC_INVALID_PARAMS));
     }
 
     #[test]
     fn serve_stdio_handles_request_then_eof() {
-        let request = serde_json::to_string(&json!({
+        let request = serde_json::to_string(&modern_request(json!({
             "jsonrpc": "2.0",
             "id": 1,
-            "method": "ping"
-        }))
+            "method": "server/discover"
+        })))
         .expect("serialize");
         let mut input_bytes = request.into_bytes();
         input_bytes.push(b'\n');
@@ -2637,74 +2448,22 @@ mod tests {
         let rendered = String::from_utf8_lossy(&output);
         assert!(rendered.contains("\"id\":1"), "rendered: {rendered}");
         assert!(
-            rendered.contains("\"result\":{\"resultType\":\"complete\"}"),
+            rendered.contains("\"supportedVersions\":[\"2026-07-28\"]"),
             "rendered: {rendered}"
         );
         assert!(rendered.ends_with('\n'), "rendered: {rendered}");
     }
 
     #[test]
-    fn request_with_id_null_receives_response() {
-        let request = json!({
-            "jsonrpc": "2.0",
-            "id": Value::Null,
-            "method": "ping"
-        });
-        let response = dispatch(&request).expect("response present");
-        assert_eq!(response["jsonrpc"], "2.0");
-        assert_eq!(
-            response["id"],
-            json!(Value::Null),
-            "id must be null as per request"
-        );
-        assert_eq!(
-            response["result"]["resultType"],
-            json!("complete"),
-            "every result must carry the required resultType"
-        );
-    }
-
-    #[test]
-    fn serve_stdio_handles_jsonrpc_batch_as_one_array_response() {
-        let batch = serde_json::to_string(&json!([
-            {"jsonrpc": "2.0", "id": 1, "method": "ping"},
-            {"jsonrpc": "2.0", "id": 2, "method": "ping"},
-            {"jsonrpc": "2.0", "method": "notifications/initialized"}
-        ]))
-        .expect("serialize");
-        let mut input_bytes = batch.into_bytes();
-        input_bytes.push(b'\n');
-        let mut input: &[u8] = &input_bytes;
-        let mut output: Vec<u8> = Vec::new();
-        let mut error_output: Vec<u8> = Vec::new();
-        let exit = serve_stdio(&mut input, &mut output, &mut error_output);
-        assert_eq!(exit, 0);
-        let rendered = String::from_utf8_lossy(&output);
-        let line = rendered
-            .lines()
-            .find(|l| !l.trim().is_empty())
-            .expect("one batch response line");
-        let parsed: Value = serde_json::from_str(line).expect("batch response is JSON");
-        let arr = parsed.as_array().expect("JSON-RPC batch returns an array");
-        assert_eq!(
-            arr.len(),
-            2,
-            "notification omitted; two pings remain: {line}"
-        );
-        let ids: Vec<_> = arr.iter().map(|r| r.get("id").cloned()).collect();
-        assert!(ids.contains(&Some(json!(1))), "line={line}");
-        assert!(ids.contains(&Some(json!(2))), "line={line}");
-    }
-
-    #[test]
-    fn serve_stdio_handles_many_inflight_pings_without_shell() {
+    fn serve_stdio_handles_many_inflight_discoveries_without_shell() {
         // why: prove multi-request scheduling without spawning OS children.
-        // A previous wall-clock test used hanging `run_command` (ping/sleep) and
+        // A previous wall-clock test used hanging `run_command` (sleep) and
         // could freeze a developer machine under full suite load — do not restore it.
         let mut input_bytes = Vec::new();
         for id in 1u64..=32 {
-            let request = json!({"jsonrpc": "2.0", "id": id, "method": "ping"});
-            input_bytes.extend(serde_json::to_vec(&request).expect("serialize"));
+            let request = json!({"jsonrpc": "2.0", "id": id, "method": "server/discover"});
+            input_bytes
+                .extend(serde_json::to_vec(&modern_request(request.clone())).expect("serialize"));
             input_bytes.push(b'\n');
         }
         let mut input: &[u8] = &input_bytes;
@@ -2719,7 +2478,7 @@ mod tests {
             .count();
         assert_eq!(
             response_lines, 32,
-            "expected 32 ping responses; got: {rendered}"
+            "expected 32 discovery responses; got: {rendered}"
         );
         for id in 1u64..=32 {
             assert!(
@@ -2733,8 +2492,7 @@ mod tests {
     fn duplicate_stdio_request_ids_are_rejected_without_overwriting_owner() {
         let mut cancellations = HashMap::new();
         let first = new_pending_job(
-            json!({"jsonrpc":"2.0", "id":"duplicate", "method":"ping"}),
-            None,
+            json!({"jsonrpc":"2.0", "id":"duplicate", "method":"server/discover"}),
             &mut cancellations,
         )
         .expect("first request registers");
@@ -2744,8 +2502,7 @@ mod tests {
             .expect("first cancellation owner");
 
         let error = match new_pending_job(
-            json!({"jsonrpc":"2.0", "id":"duplicate", "method":"ping"}),
-            None,
+            json!({"jsonrpc":"2.0", "id":"duplicate", "method":"server/discover"}),
             &mut cancellations,
         ) {
             Ok(_) => panic!("duplicate request id must fail closed"),
@@ -2773,10 +2530,6 @@ mod tests {
             rejected_request_response(&notification, JSON_RPC_INTERNAL_ERROR, "server busy")
                 .is_none()
         );
-        assert!(
-            rejected_batch_response(&[notification], JSON_RPC_INTERNAL_ERROR, "server busy")
-                .is_none()
-        );
     }
 
     #[test]
@@ -2785,37 +2538,16 @@ mod tests {
             FrameParse::Immediate(response) => {
                 assert_eq!(response["error"]["code"], json!(JSON_RPC_INVALID_REQUEST));
             }
-            FrameParse::Single(_) | FrameParse::Batch(_) => {
+            FrameParse::Single(_) => {
                 panic!("empty batch must not schedule workers")
             }
         }
     }
 
     #[test]
-    fn parse_frame_rejects_batches_above_the_stdio_bound() {
-        let batch = serde_json::to_string(
-            &(0..=MAX_STDIO_BATCH_ITEMS)
-                .map(|id| json!({"jsonrpc":"2.0","id":id,"method":"ping"}))
-                .collect::<Vec<_>>(),
-        )
-        .expect("serialize oversized batch");
-        let FrameParse::Immediate(response) = parse_frame(&batch) else {
-            panic!("oversized stdio batch must not schedule all members");
-        };
-        assert_eq!(response["error"]["code"], json!(JSON_RPC_INVALID_REQUEST));
-        assert!(response["error"]["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("maximum item count")));
-    }
-
-    #[test]
     fn serve_stdio_concurrent_in_process_delays_share_wall_clock() {
-        // why: prove workers overlap without OS hang children (user ban 2026-07-15).
-        // Load-proof by COMPLETION ORDER, not wall clock (fixed ceilings flake on
-        // saturated CI/dev boxes): a 300ms delay, an 80ms delay, and a ping.
-        // Serial FIFO execution renders d1, d2, ping; concurrent workers render
-        // ping, d2, d1. Asserting that order proves overlap regardless of how
-        // slow the machine is.
+        // why: completion order proves overlap without process-hang children; wall-clock ceilings flake on saturated CI.
+        // FIFO yields d1,d2,discovery; concurrent workers yield discovery,d2,d1.
         let delay = |id: u64, ms: u64| {
             json!({
                 "jsonrpc": "2.0",
@@ -2824,10 +2556,11 @@ mod tests {
                 "params": { "ms": ms }
             })
         };
-        let ping = json!({"jsonrpc": "2.0", "id": 99, "method": "ping"});
+        let discovery = json!({"jsonrpc": "2.0", "id": 99, "method": "server/discover"});
         let mut input_bytes = Vec::new();
-        for value in [delay(1, 300), delay(2, 80), ping] {
-            input_bytes.extend(serde_json::to_vec(&value).expect("serialize"));
+        for value in [delay(1, 300), delay(2, 80), discovery] {
+            input_bytes
+                .extend(serde_json::to_vec(&modern_request(value.clone())).expect("serialize"));
             input_bytes.push(b'\n');
         }
         let mut input: &[u8] = &input_bytes;
@@ -2839,12 +2572,12 @@ mod tests {
         assert!(rendered.contains("\"id\":1"), "{rendered}");
         assert!(rendered.contains("\"id\":2"), "{rendered}");
         assert!(rendered.contains("\"id\":99"), "{rendered}");
-        let ping_pos = rendered.find("\"id\":99").expect("ping");
+        let discovery_pos = rendered.find("\"id\":99").expect("discovery");
         let d1 = rendered.find("\"id\":1").expect("d1");
         let d2 = rendered.find("\"id\":2").expect("d2");
         assert!(
-            ping_pos < d2 && d2 < d1,
-            "fast jobs must overtake the slow one (ping, then 80ms, then 300ms); \
+            discovery_pos < d2 && d2 < d1,
+            "fast jobs must overtake the slow one (discovery, then 80ms, then 300ms); \
              serial FIFO would render d1 first: {rendered}"
         );
     }
@@ -2856,6 +2589,9 @@ mod tests {
     /// concurrent call must not disturb any of them.
     #[test]
     fn concurrent_tools_list_and_tools_call_stay_independent() {
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut requests: Vec<serde_json::Value> = (0..4u64)
             .map(|id| json!({"jsonrpc": "2.0", "id": id, "method": "tools/list"}))
             .collect();
@@ -2874,7 +2610,8 @@ mod tests {
 
         let mut input_bytes = Vec::new();
         for value in &requests {
-            input_bytes.extend(serde_json::to_vec(value).expect("serialize"));
+            input_bytes
+                .extend(serde_json::to_vec(&modern_request(value.clone())).expect("serialize"));
             input_bytes.push(b'\n');
         }
         let mut input: &[u8] = &input_bytes;
@@ -3049,9 +2786,10 @@ mod tests {
                 "method": "notifications/cancelled",
                 "params": { "requestId": "slow-request", "reason": "test" }
             }),
-            json!({"jsonrpc": "2.0", "id": "still-live", "method": "ping"}),
+            json!({"jsonrpc": "2.0", "id": "still-live", "method": "server/discover"}),
         ] {
-            input_bytes.extend(serde_json::to_vec(&value).expect("serialize"));
+            input_bytes
+                .extend(serde_json::to_vec(&modern_request(value.clone())).expect("serialize"));
             input_bytes.push(b'\n');
         }
         let mut input: &[u8] = &input_bytes;
@@ -3066,20 +2804,6 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_body_batch_returns_array() {
-        let body = json!([
-            {"jsonrpc": "2.0", "id": 1, "method": "ping"},
-            {"jsonrpc": "2.0", "id": 2, "method": "ping"}
-        ]);
-        match dispatch_body(&body) {
-            DispatchBodyResult::Json(Value::Array(items)) => {
-                assert_eq!(items.len(), 2);
-            }
-            _ => panic!("expected batch array"),
-        }
-    }
-
-    #[test]
     fn tools_list_framed_response_under_stdio_ceiling_with_headroom() {
         // Drive real dispatch → handle_tools_list (slimmed). Pins the wire
         // budget so discovery cannot fill the 24KB frame and trip hosts.
@@ -3088,7 +2812,7 @@ mod tests {
             "id": 7,
             "method": "tools/list"
         });
-        let response = dispatch(&request).expect("response present");
+        let response = dispatch_modern(&request).expect("response present");
         let serialized = serde_json::to_string(&response).expect("serialize");
         assert!(
             serialized.len() <= MAX_STDIO_FRAME_BYTES,

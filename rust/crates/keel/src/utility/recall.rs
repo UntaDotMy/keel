@@ -1243,12 +1243,19 @@ fn sync_recall_index_until(
             verified_paths.push(document.absolute_path.clone());
             continue;
         }
+        let chunks = if memory_document_is_inactive(&document.absolute_path, &content) {
+            // Keep inactive JSON durable for audit/listing but remove it from
+            // active recall so current records win without rewriting sources.
+            Vec::new()
+        } else {
+            split_memory_chunks(&content)
+        };
         pending.push(PendingDocument {
             path: document.absolute_path.clone(),
             modified_at: document.modified_at_millis.to_string(),
             size: document.size_bytes.to_string(),
             content_hash,
-            chunks: split_memory_chunks(&content),
+            chunks,
             was_existing: existing_rows.contains_key(&document.absolute_path),
         });
     }
@@ -1415,6 +1422,48 @@ fn split_memory_chunks(content: &str) -> Vec<MemoryChunk> {
 
 fn stable_fingerprint(content: &str) -> String {
     format!("sha256:{}", sha256_hex(content.as_bytes()))
+}
+
+/// Decide whether a flat JSON memory record belongs in the active recall
+/// projection. The source file is never deleted or rewritten; lifecycle state
+/// only controls whether it can be returned as current truth. Non-record JSON
+/// is indexed normally so this guard cannot hide unrelated memory artifacts.
+fn memory_document_is_inactive(path: &str, content: &str) -> bool {
+    if !path.to_ascii_lowercase().ends_with(".json") {
+        return false;
+    }
+    let Ok(record) = crate::utility::record_store::parse_object_of_strings(content) else {
+        return false;
+    };
+    let state = crate::utility::record_store::field(&record, "state")
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    let lifecycle = crate::utility::record_store::field(&record, "lifecycle")
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    if matches!(
+        state.as_str(),
+        "stale" | "expired" | "superseded" | "conflicted" | "quarantined"
+    ) || matches!(
+        lifecycle.as_str(),
+        "candidate" | "demoted" | "questioned" | "quarantined" | "superseded" | "expired"
+    ) {
+        return true;
+    }
+    let Some(expires_at) = crate::utility::record_store::field(&record, "expiresAt")
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return false;
+    };
+    let Ok(expires) = chrono::DateTime::parse_from_rfc3339(expires_at) else {
+        // A malformed expiry is unsafe to reuse. The research-cache lookup
+        // follows the same fail-closed rule.
+        return true;
+    };
+    expires.with_timezone(&chrono::Utc) <= chrono::Utc::now()
 }
 
 fn memory_source_kind(path: &str) -> String {

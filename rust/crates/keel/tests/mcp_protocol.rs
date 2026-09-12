@@ -6,7 +6,7 @@
 //! Dependencies: serde_json for request/response framing, Cargo's optional
 //!   `CARGO_BIN_EXE_keel` path or the target/debug fallback for the binary under
 //!   test, and stdlib `Command`/`BufReader` plumbing for stdio.
-//! Main Functions: `mcp_serve_initialize_then_tools_list_round_trip`,
+//! Main Functions: `mcp_serve_discovery_then_paged_tools_list_round_trip`,
 //!   `mcp_serve_tools_call_recall_status_returns_text_payload`,
 //!   `mcp_serve_resources_list_includes_system_map_and_recall_status`,
 //!   `mcp_serve_unknown_method_returns_method_not_found`,
@@ -25,6 +25,8 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
+
+const MCP_PROTOCOL_VERSION: &str = "2026-07-28";
 
 const CARGO_BIN_EXE_KEEL: Option<&str> = option_env!("CARGO_BIN_EXE_keel");
 
@@ -55,6 +57,7 @@ impl McpServerProcess {
         let mut command = Command::new(binary_path);
         command.arg("mcp").arg("serve");
         command.env("CLAUDE_TARGET_OVERRIDE", claude_home);
+        command.env("KEEL_HOME", claude_home);
         command.env("HOME", claude_home);
         command.env("USERPROFILE", claude_home);
         if let Some(profile) = profile {
@@ -74,6 +77,23 @@ impl McpServerProcess {
     }
 
     fn send(&mut self, request: &Value) {
+        let mut request = request.clone();
+        if request.get("params").is_none() {
+            request["params"] = json!({});
+        }
+        if let Some(params) = request["params"].as_object_mut() {
+            params.insert(
+                "_meta".into(),
+                json!({
+                    "io.modelcontextprotocol/protocolVersion": MCP_PROTOCOL_VERSION,
+                    "io.modelcontextprotocol/clientCapabilities": {}
+                }),
+            );
+        }
+        self.send_raw(&request);
+    }
+
+    fn send_raw(&mut self, request: &Value) {
         let mut serialized = serde_json::to_string(request).expect("serialize request");
         serialized.push('\n');
         self.stdin
@@ -90,6 +110,34 @@ impl McpServerProcess {
             .expect("read response line from child stdout");
         assert!(bytes > 0, "child closed stdout before responding");
         serde_json::from_str(line.trim()).expect("parse response JSON")
+    }
+
+    fn list_all_tools(&mut self) -> Vec<Value> {
+        let mut tools = Vec::new();
+        let mut cursor = None;
+        let mut seen = std::collections::HashSet::new();
+        loop {
+            let params = cursor
+                .as_ref()
+                .map_or_else(|| json!({}), |cursor| json!({"cursor": cursor}));
+            self.send(
+                &json!({"jsonrpc": "2.0", "id": 40, "method": "tools/list", "params": params}),
+            );
+            let response = self.recv();
+            assert!(response.get("error").is_none(), "{response}");
+            assert_eq!(response["result"]["resultType"], "complete");
+            tools.extend(
+                response["result"]["tools"]
+                    .as_array()
+                    .expect("tools array")
+                    .iter()
+                    .cloned(),
+            );
+            cursor = response["result"]["nextCursor"].as_str().map(str::to_owned);
+            let Some(next) = &cursor else { break };
+            assert!(seen.insert(next.clone()), "catalog cursor repeated");
+        }
+        tools
     }
 
     fn close(mut self) {
@@ -125,6 +173,7 @@ fn spawn_http_server(claude_home: &Path) -> (Child, SocketAddr) {
     command.args(["mcp", "serve-http", "--bind", &bind]);
     command
         .env("CLAUDE_TARGET_OVERRIDE", claude_home)
+        .env("KEEL_HOME", claude_home)
         .env("HOME", claude_home)
         .env("USERPROFILE", claude_home)
         .stdout(Stdio::piped())
@@ -146,21 +195,22 @@ fn spawn_http_server(claude_home: &Path) -> (Child, SocketAddr) {
     (child, address)
 }
 
-fn send_http_initialize(address: SocketAddr, request_id: usize) -> Result<(), String> {
+fn send_http_discover(address: SocketAddr, request_id: usize) -> Result<(), String> {
     let body = serde_json::to_string(&json!({
         "jsonrpc": "2.0",
         "id": request_id,
-        "method": "initialize",
+        "method": "server/discover",
         "params": {
-            "protocolVersion": "2025-03-26",
-            "capabilities": {},
-            "clientInfo": { "name": "mcp-protocol-test", "version": "1.0.0" }
+            "_meta": {
+                "io.modelcontextprotocol/protocolVersion": MCP_PROTOCOL_VERSION,
+                "io.modelcontextprotocol/clientCapabilities": {}
+            }
         }
     }))
     .map_err(|error| format!("serialize request: {error}"))?;
     let request = format!(
         "POST /mcp HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/json\r\n\
-         Accept: application/json, text/event-stream\r\nMCP-Protocol-Version: 2025-03-26\r\n\
+         Accept: application/json, text/event-stream\r\nMCP-Protocol-Version: 2026-07-28\r\nMcp-Method: server/discover\r\n\
          Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     );
@@ -176,51 +226,42 @@ fn send_http_initialize(address: SocketAddr, request_id: usize) -> Result<(), St
     stream
         .read_to_string(&mut response)
         .map_err(|error| format!("read response: {error}"))?;
-    if !response.starts_with("HTTP/1.1 200") || !response.contains("\"protocolVersion\"") {
+    if !response.starts_with("HTTP/1.1 200") || !response.contains("\"supportedVersions\"") {
         return Err(format!("unexpected HTTP response: {response}"));
     }
     Ok(())
 }
 
 #[test]
-fn mcp_serve_initialize_then_tools_list_round_trip() {
+fn mcp_serve_discovery_then_paged_tools_list_round_trip() {
     let claude_home = unique_temp_directory("init-tools");
     let mut server = McpServerProcess::spawn(&claude_home);
 
     server.send(&json!({
         "jsonrpc": "2.0",
         "id": 1,
-        "method": "initialize",
+        "method": "server/discover",
         "params": {
-            "protocolVersion": "2025-11-25",
-            "capabilities": {},
-            "clientInfo": { "name": "mcp-protocol-test", "version": "1.0.0" }
+            "_meta": {
+                "io.modelcontextprotocol/protocolVersion": MCP_PROTOCOL_VERSION,
+                "io.modelcontextprotocol/clientCapabilities": {}
+            }
         }
     }));
-    let initialize_response = server.recv();
-    assert_eq!(initialize_response["jsonrpc"], "2.0");
-    assert_eq!(initialize_response["id"], json!(1));
-    // Empty params → server falls back to its latest supported revision. (When
-    // the client requests a protocolVersion the server echoes it instead; that
-    // negotiation path is unit-tested in mcp/mod.rs.)
+    let discovery_response = server.recv();
+    assert_eq!(discovery_response["jsonrpc"], "2.0");
+    assert_eq!(discovery_response["id"], json!(1));
+    assert_eq!(discovery_response["result"]["resultType"], "complete");
     assert_eq!(
-        initialize_response["result"]["protocolVersion"],
-        json!("2025-11-25")
+        discovery_response["result"]["supportedVersions"],
+        json!([MCP_PROTOCOL_VERSION])
     );
     assert_eq!(
-        initialize_response["result"]["serverInfo"]["name"],
-        json!("keel")
+        discovery_response["result"]["_meta"]["io.modelcontextprotocol/serverInfo"]["name"],
+        "keel"
     );
 
-    server.send(&json!({
-        "jsonrpc": "2.0",
-        "id": 2,
-        "method": "tools/list"
-    }));
-    let tools_response = server.recv();
-    let tools = tools_response["result"]["tools"]
-        .as_array()
-        .expect("tools array");
+    let tools = server.list_all_tools();
     let tool_names: Vec<String> = tools
         .iter()
         .filter_map(|entry| {
@@ -243,7 +284,7 @@ fn mcp_serve_initialize_then_tools_list_round_trip() {
         "expected default tiered MCP catalog (17 tools), got {}: {tool_names:?}",
         tools.len()
     );
-    for tool in tools {
+    for tool in &tools {
         assert_eq!(
             tool["inputSchema"]["type"],
             json!("object"),
@@ -263,10 +304,9 @@ fn mcp_serve_initialize_then_tools_list_round_trip() {
         empty_params_response.get("error").is_none(),
         "spec-default params {{}} must not fail tools/list: {empty_params_response}"
     );
-    assert_eq!(
-        empty_params_response["result"]["tools"],
-        tools_response["result"]["tools"]
-    );
+    assert!(empty_params_response["result"]["tools"]
+        .as_array()
+        .is_some_and(|page| !page.is_empty()));
 
     server.close();
     let _ = std::fs::remove_dir_all(&claude_home);
@@ -276,25 +316,18 @@ fn mcp_serve_initialize_then_tools_list_round_trip() {
     server_full.send(&json!({
         "jsonrpc": "2.0",
         "id": 1,
-        "method": "initialize",
+        "method": "server/discover",
         "params": {
-            "protocolVersion": "2025-11-25",
-            "capabilities": {},
-            "clientInfo": { "name": "mcp-protocol-test", "version": "1.0.0" }
+            "_meta": {
+                "io.modelcontextprotocol/protocolVersion": MCP_PROTOCOL_VERSION,
+                "io.modelcontextprotocol/clientCapabilities": {}
+            }
         }
     }));
     let init_full = server_full.recv();
     assert_eq!(init_full["jsonrpc"], "2.0");
 
-    server_full.send(&json!({
-        "jsonrpc": "2.0",
-        "id": 2,
-        "method": "tools/list"
-    }));
-    let full_response = server_full.recv();
-    let full_tools = full_response["result"]["tools"]
-        .as_array()
-        .expect("full tools array");
+    let full_tools = server_full.list_all_tools();
     let full_names: Vec<String> = full_tools
         .iter()
         .filter_map(|entry| {
@@ -409,34 +442,37 @@ fn mcp_serve_parse_error_returns_dash_32700() {
 }
 
 #[test]
-fn mcp_serve_ping_returns_complete_result() {
-    let claude_home = unique_temp_directory("ping");
+fn mcp_serve_discovery_returns_complete_result() {
+    let claude_home = unique_temp_directory("discovery-result");
     let mut server = McpServerProcess::spawn(&claude_home);
 
     server.send(&json!({
         "jsonrpc": "2.0",
-        "id": "ping-token",
-        "method": "ping"
+        "id": "discovery-token",
+        "method": "server/discover"
     }));
     let response = server.recv();
-    assert_eq!(response["id"], json!("ping-token"));
-    assert_eq!(response["result"], json!({"resultType": "complete"}));
+    assert_eq!(response["id"], json!("discovery-token"));
+    assert_eq!(response["result"]["resultType"], "complete");
+    assert_eq!(
+        response["result"]["supportedVersions"],
+        json!([MCP_PROTOCOL_VERSION])
+    );
 
     server.close();
     let _ = std::fs::remove_dir_all(&claude_home);
 }
 
 #[test]
-fn mcp_serve_request_with_null_id_receives_response() {
-    // Per JSON-RPC 2.0 section 4.1, a request with id:null is a valid request,
-    // not a notification. It must receive a response.
+fn mcp_serve_request_with_null_id_is_rejected() {
+    // MCP restricts request IDs to strings and integers, excluding JSON null.
     let claude_home = unique_temp_directory("id-null");
     let mut server = McpServerProcess::spawn(&claude_home);
 
     server.send(&json!({
         "jsonrpc": "2.0",
         "id": Value::Null,
-        "method": "ping"
+        "method": "server/discover"
     }));
     let response = server.recv();
     assert_eq!(response["jsonrpc"], "2.0");
@@ -445,11 +481,7 @@ fn mcp_serve_request_with_null_id_receives_response() {
         json!(Value::Null),
         "id must be null as sent"
     );
-    assert_eq!(
-        response["result"],
-        json!({"resultType": "complete"}),
-        "every result must carry the required resultType"
-    );
+    assert_eq!(response["error"]["code"], -32600);
 
     server.close();
     let _ = std::fs::remove_dir_all(&claude_home);
@@ -484,9 +516,8 @@ fn mcp_serve_tools_call_with_array_params_returns_invalid_params() {
 }
 
 #[test]
-fn mcp_serve_tools_call_with_omitted_params_returns_invalid_params() {
-    // Omitted params default to null; tools/call still needs a name, so this is
-    // Invalid params rather than a panic or a silent default tool.
+fn mcp_serve_tools_call_without_name_returns_invalid_params() {
+    // Required per-request metadata does not supply the missing tool name.
     let claude_home = unique_temp_directory("omitted-params");
     let mut server = McpServerProcess::spawn(&claude_home);
 
@@ -508,7 +539,7 @@ fn mcp_serve_tools_call_with_omitted_params_returns_invalid_params() {
 }
 
 #[test]
-fn mcp_http_initialize_handles_parallel_clients() {
+fn mcp_http_discover_handles_parallel_clients() {
     const CLIENT_COUNT: usize = 32;
     let claude_home = unique_temp_directory("http-parallel");
     let (mut server, address) = spawn_http_server(&claude_home);
@@ -518,7 +549,7 @@ fn mcp_http_initialize_handles_parallel_clients() {
             let barrier = Arc::clone(&barrier);
             thread::spawn(move || {
                 barrier.wait();
-                send_http_initialize(address, request_id)
+                send_http_discover(address, request_id)
             })
         })
         .collect();
@@ -527,10 +558,22 @@ fn mcp_http_initialize_handles_parallel_clients() {
         handle
             .join()
             .expect("parallel HTTP client thread")
-            .expect("parallel HTTP initialize response");
+            .expect("parallel HTTP discovery response");
     }
 
     let _ = server.kill();
     let _ = server.wait();
+    let _ = std::fs::remove_dir_all(&claude_home);
+}
+
+#[test]
+fn mcp_serve_rejects_legacy_initialize_and_missing_metadata() {
+    let claude_home = unique_temp_directory("legacy-metadata");
+    let mut server = McpServerProcess::spawn(&claude_home);
+    server.send_raw(&json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-11-25"}}));
+    assert_eq!(server.recv()["error"]["code"], -32022);
+    server.send_raw(&json!({"jsonrpc": "2.0", "id": 2, "method": "server/discover"}));
+    assert_eq!(server.recv()["error"]["code"], -32602);
+    server.close();
     let _ = std::fs::remove_dir_all(&claude_home);
 }

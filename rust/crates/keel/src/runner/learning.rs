@@ -66,6 +66,12 @@ const SKILL_MIN_INSTINCTS: usize = 2;
 /// instincts (`source != observed`) are never pruned regardless of confidence.
 const INSTINCT_PRUNE_FLOOR: i64 = 0;
 
+/// Bound the autonomous lesson archive. A full store refuses a new lesson and
+/// leaves existing evidence untouched; it never silently evicts a record.
+const MAX_LEARNING_INSTINCT_RECORDS: usize = 200;
+const MAX_LEARNING_INSTINCT_BYTES: usize = 64 * 1024;
+const MAX_LESSON_EVIDENCE_BYTES: usize = 4 * 1024;
+
 /// Group path for the shared instinct store, matching the manual
 /// `keel memory instincts` surface so auto-learned and hand-authored
 /// instincts live in one place. The loop only ever manages records it marks
@@ -128,6 +134,9 @@ pub struct CycleReport {
     pub agents_generated: usize,
     /// Auto-learned instincts decayed and removed because their pattern aged out.
     pub instincts_pruned: usize,
+    /// Auto-learned instincts whose evidence no longer met the trust bar and
+    /// were moved out of the active lane (without deleting their evidence).
+    pub instincts_demoted: usize,
     /// A2: generated skills rolled back because their promotion prediction was
     /// falsified — the behavior that justified the skill no longer recurs at the
     /// trust bar, and the skill was still at its template state (never a manual
@@ -160,7 +169,7 @@ pub fn run_learning_cycle(
             return report;
         }
     };
-    if observations.is_empty() {
+    if options.window_days == 0 {
         return report;
     }
 
@@ -178,11 +187,18 @@ pub fn run_learning_cycle(
         let confidence = (cluster.count as i64).min(INSTINCT_CONFIDENCE_CAP);
         let instinct_id = instinct_id(&cluster.project, &cluster.signature);
         live_ids.insert(instinct_id.clone());
-        if !options.dry_run {
+        let write_succeeded = if !options.dry_run {
             if let Err(error) = write_instinct(&store, &instinct_id, cluster, confidence) {
                 let _ = writeln!(log, "keel learn: write instinct failed: {error}");
-                continue;
+                false
+            } else {
+                true
             }
+        } else {
+            true
+        };
+        if !write_succeeded {
+            continue;
         }
         report.instincts_recorded += 1;
 
@@ -206,7 +222,9 @@ pub fn run_learning_cycle(
     // so the store reflects current behavior rather than an ever-growing archive.
     // Manual instincts are never touched. Skipped entirely on a dry run.
     if !options.dry_run {
-        report.instincts_pruned = decay_and_prune_instincts(&store, &live_ids, log);
+        let (pruned, demoted) = decay_and_prune_instincts(claude_home, &store, &live_ids, log);
+        report.instincts_pruned = pruned;
+        report.instincts_demoted = demoted;
     }
 
     // 3. Evolve trusted instinct clusters into generated skills + agents.
@@ -275,6 +293,8 @@ pub fn run_learning_cycle(
 
 const CONTINUOUS_LEARNING_INTERVAL: usize = 3;
 const CONTINUOUS_LEARNING_WINDOW_DAYS: u64 = OBSERVE_WINDOW_DAYS;
+const CONTINUOUS_LEARNING_WATERMARK_FILE: &str = "last-observation-at-ms";
+const CONTINUOUS_LEARNING_COUNT_FILE: &str = "last-observation-count";
 
 /// Run learning from the PostToolUse path after a small batch of new signals.
 ///
@@ -309,7 +329,9 @@ pub fn run_continuous_learning_if_due(claude_home: &Path, log: &mut dyn std::io:
     let state_directory = claude_home.join("state").join("learning");
     // Use an event-time watermark; rolling counts decrease when old rows expire
     // and otherwise delay the next cycle until the window fills again.
-    let marker_path = state_directory.join("last-observation-at-ms");
+    let marker_path = state_directory.join(CONTINUOUS_LEARNING_WATERMARK_FILE);
+    // why: keep the status-facing count marker while the event-time watermark owns scheduling.
+    let count_marker_path = state_directory.join(CONTINUOUS_LEARNING_COUNT_FILE);
     let lock_path = state_directory.join("cycle.lock");
     let previous_observation_at_ms = fs::read_to_string(&marker_path)
         .ok()
@@ -351,6 +373,12 @@ pub fn run_continuous_learning_if_due(claude_home: &Path, log: &mut dyn std::io:
     if let Err(error) = write_text(&marker_path, &newest_observation_at_ms.to_string()) {
         let _ = writeln!(log, "keel learn: continuous marker write failed: {error}");
     }
+    if let Err(error) = write_text(&count_marker_path, &new_observation_count.to_string()) {
+        let _ = writeln!(
+            log,
+            "keel learn: continuous count marker write failed: {error}"
+        );
+    }
     drop(lock);
     if let Err(error) = fs::remove_file(&lock_path) {
         let _ = writeln!(log, "keel learn: cycle lock cleanup failed: {error}");
@@ -362,9 +390,10 @@ pub fn run_continuous_learning_if_due(claude_home: &Path, log: &mut dyn std::io:
     {
         let _ = writeln!(
             log,
-            "keel learn: continuous cycle observations={} instincts={} skills={} agents={} rolled_back={}",
+            "keel learn: continuous cycle observations={} instincts={} demoted={} skills={} agents={} rolled_back={}",
             observations.len(),
             report.instincts_recorded,
+            report.instincts_demoted,
             report.skills_generated,
             report.agents_generated,
             report.skills_rolled_back
@@ -473,6 +502,9 @@ fn count_trusted_predicted_signatures(
         if field(record, "project") != Some(project) {
             continue;
         }
+        if !learning_record_is_active(record) || !learning_record_has_evidence(record) {
+            continue;
+        }
         let trigger = field(record, "trigger").unwrap_or("");
         if !predicted_set.contains(trigger) || !is_learning_worthy_signature(trigger) {
             continue;
@@ -503,6 +535,36 @@ fn is_trusted_habit(confidence: i64, distinct_sessions: usize) -> bool {
     confidence >= SKILL_SINGLE_SESSION_CONFIDENCE
 }
 
+/// A lesson is eligible for active recall only while its lifecycle is current
+/// and its record carries evidence. Legacy observed instincts are accepted when
+/// their observation/session counters are present; this keeps old evidence
+/// readable while preventing an unsubstantiated manual hunch from promoting.
+fn learning_record_is_active(record: &Record) -> bool {
+    !matches!(
+        field(record, "lifecycle")
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "candidate" | "demoted" | "questioned" | "quarantined" | "superseded" | "expired"
+    )
+}
+
+fn learning_record_has_evidence(record: &Record) -> bool {
+    let explicit_evidence = field(record, "evidence")
+        .map(str::trim)
+        .is_some_and(|value| !value.is_empty())
+        && field(record, "evidenceCount")
+            .and_then(|value| value.parse::<u64>().ok())
+            .is_some_and(|count| count > 0);
+    if explicit_evidence {
+        return true;
+    }
+    // Legacy auto-learned files use `source=observed` as migration evidence;
+    // newer records carry explicit evidence fields.
+    field(record, "source") == Some(SOURCE_OBSERVED)
+}
+
 /// Render a compact, always-on digest of the trusted instincts for the project
 /// rooted at `cwd`, for injection into SessionStart context. Empty string when
 /// there is nothing trusted to surface, so the caller can append unconditionally
@@ -528,7 +590,10 @@ pub fn project_instinct_digest(claude_home: &Path, cwd: &str) -> String {
         let confidence: i64 = field(record, "confidence")
             .and_then(|value| value.parse().ok())
             .unwrap_or(0);
-        if confidence < SKILL_MIN_CONFIDENCE {
+        if confidence < SKILL_MIN_CONFIDENCE
+            || !learning_record_is_active(record)
+            || !learning_record_has_evidence(record)
+        {
             continue;
         }
         let guidance = field(record, "guidance").unwrap_or("").trim();
@@ -697,6 +762,8 @@ pub fn run_learn_command(
                     "skillsGenerated": report.skills_generated,
                     "skillsRespected": report.skills_respected,
                     "skillsRolledBack": report.skills_rolled_back,
+                    "instinctsDemoted": report.instincts_demoted,
+                    "instinctsPruned": report.instincts_pruned,
                     "agentsGenerated": report.agents_generated,
                     "notes": report.notes,
                     "synthesisBriefs": briefs,
@@ -719,8 +786,10 @@ pub fn run_learn_command(
                 };
                 let _ = writeln!(
                     standard_output,
-                    "learn {action}: {verb} {} instinct(s); {} skill(s) generated, {} respected, {} rolled back, {} agent(s) generated",
+                    "learn {action}: {verb} {} instinct(s); {} demoted, {} pruned, {} skill(s) generated, {} respected, {} rolled back, {} agent(s) generated",
                     report.instincts_recorded,
+                    report.instincts_demoted,
+                    report.instincts_pruned,
                     report.skills_generated,
                     report.skills_respected,
                     report.skills_rolled_back,
@@ -825,7 +894,7 @@ fn learn_status(
     let marker_path = claude_home
         .join("state")
         .join("learning")
-        .join("last-observation-count");
+        .join(CONTINUOUS_LEARNING_COUNT_FILE);
     let last_continuous_count = fs::read_to_string(&marker_path)
         .ok()
         .and_then(|value| value.trim().parse::<usize>().ok())
@@ -1218,24 +1287,136 @@ fn write_instinct(
 ) -> Result<(), String> {
     // Respect provenance: never rewrite a manually-authored instinct that
     // happens to share this id. The loop only owns records it marked observed.
-    if let Some(existing) = store.read_record(id)? {
-        let source = field(&existing, "source").unwrap_or("");
+    let mut record = store.read_record(id)?.unwrap_or_default();
+    if !record.is_empty() {
+        let source = field(&record, "source").unwrap_or("");
         if source != SOURCE_OBSERVED {
             return Ok(());
         }
     }
-    let record: Record = vec![
+    if cluster.sample_detail.len() > MAX_LESSON_EVIDENCE_BYTES {
+        return Err(format!(
+            "lesson evidence is {} bytes, over the {MAX_LESSON_EVIDENCE_BYTES}-byte limit",
+            cluster.sample_detail.len()
+        ));
+    }
+    let guidance = guidance_for(cluster);
+    let evidence = format!(
+        "observation-store: signature={}; count={}; sessions={}",
+        cluster.signature, cluster.count, cluster.distinct_sessions
+    );
+    if evidence.len() > MAX_LESSON_EVIDENCE_BYTES {
+        return Err(format!(
+            "lesson evidence is {} bytes, over the {MAX_LESSON_EVIDENCE_BYTES}-byte limit",
+            evidence.len()
+        ));
+    }
+    let prior_observations = field(&record, "observations")
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(0);
+    let now = chrono::Utc::now().to_rfc3339();
+    let trusted = is_trusted_habit(confidence, cluster.distinct_sessions);
+    let refreshed: Record = vec![
         ("id".into(), id.to_string()),
         ("trigger".into(), cluster.signature.clone()),
-        ("guidance".into(), guidance_for(cluster)),
+        ("guidance".into(), guidance.clone()),
         ("confidence".into(), confidence.to_string()),
         ("observations".into(), cluster.count.to_string()),
         ("sessions".into(), cluster.distinct_sessions.to_string()),
         ("project".into(), cluster.project.clone()),
         ("source".into(), SOURCE_OBSERVED.to_string()),
         ("sample".into(), cluster.sample_detail.clone()),
+        ("scope".into(), "workspace".into()),
+        ("measurement".into(), "observed_frequency".into()),
+        ("problemPattern".into(), cluster.signature.clone()),
+        ("evidence".into(), evidence),
+        ("evidenceSource".into(), "observation-store".into()),
+        ("evidenceCount".into(), cluster.count.to_string()),
+        (
+            "causeHypothesis".into(),
+            if cluster
+                .signature
+                .ends_with(crate::runner::observation::FAILURE_SIGNATURE_SUFFIX)
+            {
+                "repeated failure observed for this command in the project"
+            } else {
+                "repeated project action observed at the same command boundary"
+            }
+            .into(),
+        ),
+        ("correctResponse".into(), guidance),
+        ("lastVerifiedAt".into(), now.clone()),
+        (
+            "evaluationStatus".into(),
+            if trusted { "supported" } else { "candidate" }.into(),
+        ),
+        ("evaluationMetric".into(), "observed_frequency".into()),
+        (
+            "baselineObservations".into(),
+            prior_observations.to_string(),
+        ),
+        ("currentObservations".into(), cluster.count.to_string()),
+        ("evaluatedAt".into(), now),
+        ("demotionCount".into(), "0".into()),
+        (
+            "lifecycle".into(),
+            if trusted { "promoted" } else { "candidate" }.into(),
+        ),
     ];
+    for (key, value) in refreshed {
+        if let Some(slot) = record.iter_mut().find(|(name, _)| name == &key) {
+            slot.1 = value;
+        } else {
+            record.push((key, value));
+        }
+    }
+    validate_learning_capacity(store, id, &record)?;
     store.write_record(id, &record)?;
+    Ok(())
+}
+
+/// Estimate the flat JSON storage footprint before a lesson reaches the shared
+/// record writer. The estimate includes a separator/quoting reserve and is
+/// deliberately conservative; it is a storage admission check, not an output
+/// formatter.
+fn learning_record_storage_bytes(record: &Record) -> usize {
+    record
+        .iter()
+        .map(|(key, value)| key.len().saturating_add(value.len()).saturating_add(8))
+        .sum()
+}
+
+fn validate_learning_capacity(
+    store: &RecordStore,
+    id: &str,
+    record: &Record,
+) -> Result<(), String> {
+    let record_bytes = learning_record_storage_bytes(record);
+    if record_bytes > MAX_LEARNING_INSTINCT_BYTES {
+        return Err(format!(
+            "learning instinct is {record_bytes} bytes, over the {MAX_LEARNING_INSTINCT_BYTES}-byte store limit"
+        ));
+    }
+    let records = store
+        .list_records()
+        .map_err(|error| format!("inspect learning capacity: {error}"))?;
+    let current_bytes: usize = records
+        .iter()
+        .filter(|(existing_id, _)| existing_id != id)
+        .map(|(_, existing)| learning_record_storage_bytes(existing))
+        .sum();
+    if current_bytes.saturating_add(record_bytes) > MAX_LEARNING_INSTINCT_BYTES {
+        return Err(format!(
+            "learning instinct store is over its {MAX_LEARNING_INSTINCT_BYTES}-byte limit; existing evidence was preserved"
+        ));
+    }
+    if !records.iter().any(|(existing_id, _)| existing_id == id)
+        && records.len() >= MAX_LEARNING_INSTINCT_RECORDS
+    {
+        return Err(format!(
+            "learning instinct store is at its {MAX_LEARNING_INSTINCT_RECORDS}-record limit; existing evidence was preserved"
+        ));
+    }
     Ok(())
 }
 
@@ -1246,20 +1427,23 @@ fn write_instinct(
 /// This is the natural counterpart to `write_instinct`: confidence rises while a
 /// habit recurs and falls once it stops, so the store self-trims to current
 /// behavior. Manual instincts (`source != observed`) are skipped entirely — the
-/// loop never deletes what a human authored.
+/// loop never deletes what a human authored. The second return value counts
+/// records moved out of the active lane; deletion is reported separately.
 fn decay_and_prune_instincts(
+    claude_home: &Path,
     store: &RecordStore,
     live_ids: &std::collections::BTreeSet<String>,
     log: &mut dyn std::io::Write,
-) -> usize {
+) -> (usize, usize) {
     let records = match store.list_records() {
         Ok(records) => records,
         Err(error) => {
             let _ = writeln!(log, "keel learn: list instincts failed: {error}");
-            return 0;
+            return (0, 0);
         }
     };
     let mut pruned = 0usize;
+    let mut demoted = 0usize;
     for (id, mut record) in records {
         if field(&record, "source") != Some(SOURCE_OBSERVED) {
             continue; // never decay or delete a manual instinct
@@ -1267,18 +1451,56 @@ fn decay_and_prune_instincts(
         if live_ids.contains(&id) {
             continue; // refreshed this cycle by write_instinct
         }
+        let now = chrono::Utc::now();
+        if field(&record, "lastDecayedAt")
+            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+            .is_some_and(|previous| now.signed_duration_since(previous) < chrono::Duration::days(1))
+        {
+            continue;
+        }
         let confidence: i64 = field(&record, "confidence")
             .and_then(|value| value.parse().ok())
             .unwrap_or(0);
-        let decayed = confidence - 1;
+        let decayed = confidence.saturating_sub(1);
         if decayed <= INSTINCT_PRUNE_FLOOR {
             match store.delete_record(&id) {
-                Ok(_) => pruned += 1,
+                Ok(true) => {
+                    pruned += 1;
+                    let path = store.record_path(&id);
+                    let _ = crate::utility::recall::reindex_after_write_paths(
+                        claude_home,
+                        &[path.as_path()],
+                    );
+                }
+                Ok(false) => {}
                 Err(error) => {
                     let _ = writeln!(log, "keel learn: prune instinct failed: {error}");
                 }
             }
         } else {
+            let previous_lifecycle = field(&record, "lifecycle").unwrap_or("");
+            let prior_demotions = field(&record, "demotionCount")
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(0);
+            let next_demotions = prior_demotions.saturating_add(1);
+            let lifecycle =
+                if matches!(previous_lifecycle, "demoted" | "questioned") || next_demotions >= 2 {
+                    "quarantined"
+                } else {
+                    "demoted"
+                };
+            for (key, value) in [
+                ("lastDecayedAt", now.to_rfc3339()),
+                ("lifecycle", lifecycle.to_string()),
+                ("evaluationStatus", "regressed".to_string()),
+                ("demotionCount", next_demotions.to_string()),
+            ] {
+                if let Some(slot) = record.iter_mut().find(|(name, _)| name == key) {
+                    slot.1 = value;
+                } else {
+                    record.push((key.to_string(), value));
+                }
+            }
             if let Some(slot) = record.iter_mut().find(|(key, _)| key == "confidence") {
                 slot.1 = decayed.to_string();
             } else {
@@ -1286,10 +1508,17 @@ fn decay_and_prune_instincts(
             }
             if let Err(error) = store.write_record(&id, &record) {
                 let _ = writeln!(log, "keel learn: decay instinct failed: {error}");
+            } else {
+                demoted += 1;
+                let path = store.record_path(&id);
+                let _ = crate::utility::recall::reindex_after_write_paths(
+                    claude_home,
+                    &[path.as_path()],
+                );
             }
         }
     }
-    pruned
+    (pruned, demoted)
 }
 
 enum EvolveOutcome {
@@ -1695,6 +1924,9 @@ fn trusted_instincts_for_project(
         if field(record, "project") != Some(project) {
             continue;
         }
+        if !learning_record_is_active(record) || !learning_record_has_evidence(record) {
+            continue;
+        }
         let confidence: i64 = field(record, "confidence")
             .and_then(|value| value.parse().ok())
             .unwrap_or(0);
@@ -1871,6 +2103,36 @@ mod tests {
     }
 
     #[test]
+    fn continuous_cycle_persists_count_for_status_surface() {
+        isolated_home("continuous-status", |root| {
+            seed_bash("status-project", "cargo test", 3, 2);
+            let mut log = Vec::new();
+            run_continuous_learning_if_due(root, &mut log);
+
+            let count_marker = root
+                .join("state")
+                .join("learning")
+                .join(CONTINUOUS_LEARNING_COUNT_FILE);
+            assert_eq!(
+                fs::read_to_string(&count_marker)
+                    .expect("continuous count marker")
+                    .trim(),
+                "3"
+            );
+
+            let mut output = Vec::new();
+            let mut error = Vec::new();
+            assert_eq!(
+                learn_status(root, OBSERVE_WINDOW_DAYS, true, &mut output, &mut error),
+                0
+            );
+            let payload: serde_json::Value = serde_json::from_slice(&output).expect("status JSON");
+            assert_eq!(payload["continuous"]["lastObservationCount"], 3);
+            assert_eq!(payload["continuous"]["marker"], display_path(&count_marker));
+        });
+    }
+
+    #[test]
     fn continuous_cycle_uses_event_watermark_after_window_count_drops() {
         isolated_home("continuous-watermark", |root| {
             seed_bash("watermark-project", "cargo test", 3, 2);
@@ -2019,6 +2281,37 @@ mod tests {
             let mut log = Vec::new();
             let report = run_learning_cycle(root, &CycleOptions::default(), &mut log);
             assert_eq!(report.instincts_recorded, 0);
+        });
+    }
+
+    #[test]
+    fn empty_window_decays_once_per_day_and_refresh_preserves_metadata() {
+        isolated_home("bounded-lifecycle", |root| {
+            let store = RecordStore::new(root, INSTINCT_GROUP);
+            let id = instinct_id("quiet", "cargo test");
+            store
+                .write_record(
+                    &id,
+                    &vec![
+                        ("id".into(), id.clone()),
+                        ("source".into(), SOURCE_OBSERVED.into()),
+                        ("confidence".into(), "5".into()),
+                        ("lessonEvidence".into(), "raw://proof".into()),
+                    ],
+                )
+                .expect("seed");
+            let mut log = Vec::new();
+            run_learning_cycle(root, &CycleOptions::default(), &mut log);
+            run_learning_cycle(root, &CycleOptions::default(), &mut log);
+            let record = store.read_record(&id).unwrap().unwrap();
+            assert_eq!(field(&record, "confidence"), Some("4"));
+            assert_eq!(field(&record, "lifecycle"), Some("demoted"));
+            seed_bash("quiet", "cargo test", 6, 2);
+            run_learning_cycle(root, &CycleOptions::default(), &mut log);
+            let record = store.read_record(&id).unwrap().unwrap();
+            assert_eq!(field(&record, "lessonEvidence"), Some("raw://proof"));
+            assert_eq!(field(&record, "lifecycle"), Some("promoted"));
+            assert_eq!(field(&record, "measurement"), Some("observed_frequency"));
         });
     }
 
@@ -2717,6 +3010,11 @@ mod tests {
                     )
                     .expect("seed trusted");
             }
+
+            // Keep predicted behavior in the current observation window so the
+            // fixture represents a prediction that still holds.
+            seed_bash("steadyproj", "cargo test", 4, 2);
+            seed_bash("steadyproj", "git commit", 4, 2);
 
             seed_bash("liveproj", "npm test", 4, 2);
             let mut log = Vec::new();

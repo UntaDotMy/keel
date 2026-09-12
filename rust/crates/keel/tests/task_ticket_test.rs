@@ -401,3 +401,207 @@ fn evidence_content_fingerprint_detects_tampering() {
         "content_hash does not match evidence artifact",
     );
 }
+
+#[test]
+fn plan_update_records_subtask_evidence_and_regenerates_aggregates() {
+    let tree = test_tree("governed-update");
+    let (plan_id, plan_path) = advance_to_tasks(&tree);
+    let ticket_path = plan_path.join("task-001.json");
+    let mut ticket = read_json(&ticket_path);
+    let subtask_id = ticket["layers"]["tests"][0]["id"]
+        .as_str()
+        .expect("tests subtask id")
+        .to_string();
+    let recorded_at = "2026-09-12T00:00:00Z";
+    let evidence = json!({
+        "schema_version": 1,
+        "artifact": "task_evidence",
+        "plan_id": plan_id,
+        "task_id": "TASK-001",
+        "subtask_id": subtask_id,
+        "evidence_type": "named_test",
+        "recorded_at": recorded_at,
+        "test_name": "governed plan update",
+        "result": "pass",
+        "output_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    });
+    let evidence_body = format!(
+        "{}\n",
+        serde_json::to_string_pretty(&evidence).expect("render evidence")
+    );
+    fs::create_dir_all(plan_path.join("evidence")).expect("create evidence directory");
+    fs::write(plan_path.join("evidence/tests.json"), &evidence_body)
+        .expect("write evidence artifact");
+
+    let update = plan_command(
+        &tree,
+        &[
+            "update",
+            "--plan",
+            &plan_id,
+            "--task",
+            "TASK-001",
+            "--subtask",
+            &subtask_id,
+            "--status",
+            "done",
+            "--evidence-path",
+            "evidence/tests.json",
+            "--verification-timestamp",
+            recorded_at,
+        ],
+    );
+    assert_success(&update, "plan update");
+
+    ticket = read_json(&ticket_path);
+    assert_eq!(ticket["layers"]["tests"][0]["status"], "done");
+    assert_eq!(
+        ticket["layers"]["tests"][0]["verification_timestamp"],
+        recorded_at
+    );
+    assert_eq!(
+        ticket["layers"]["tests"][0]["evidence_ref"]["path"],
+        "evidence/tests.json"
+    );
+    assert_eq!(
+        read_json(&plan_path.join("tasks.json"))["tasks"][0]["status"],
+        "in_progress"
+    );
+    let rtm = read_json(&plan_path.join("rtm.json"));
+    assert!(rtm["entries"][0]["evidenceRefs"]
+        .as_array()
+        .expect("RTM evidence refs")
+        .iter()
+        .any(|reference| reference["path"] == "evidence/tests.json"));
+    assert_success(
+        &plan_command(&tree, &["check", "--rtm", "--plan", &plan_id]),
+        "plan check after update",
+    );
+}
+
+#[test]
+fn plan_update_requires_reasons_and_rejects_traversal_without_mutation() {
+    let tree = test_tree("governed-update-validation");
+    let (plan_id, plan_path) = advance_to_tasks(&tree);
+    let ticket_path = plan_path.join("task-001.json");
+    let original_ticket = read_json(&ticket_path);
+    let original_tasks = read_json(&plan_path.join("tasks.json"));
+    let original_rtm = read_json(&plan_path.join("rtm.json"));
+    let original_status = read_json(&plan_path.join("status.json"));
+    let docs_id = original_ticket["layers"]["docs"][0]["id"]
+        .as_str()
+        .expect("docs subtask id")
+        .to_string();
+
+    let missing_reason = plan_command(
+        &tree,
+        &[
+            "update",
+            "--plan",
+            &plan_id,
+            "--task",
+            "TASK-001",
+            "--subtask",
+            &docs_id,
+            "--status",
+            "not_applicable",
+        ],
+    );
+    assert!(!missing_reason.status.success());
+    assert!(String::from_utf8_lossy(&missing_reason.stderr).contains("requires --reason"));
+    assert_eq!(read_json(&ticket_path), original_ticket);
+    assert_eq!(read_json(&plan_path.join("tasks.json")), original_tasks);
+    assert_eq!(read_json(&plan_path.join("rtm.json")), original_rtm);
+    assert_eq!(read_json(&plan_path.join("status.json")), original_status);
+
+    let tests_id = original_ticket["layers"]["tests"][0]["id"]
+        .as_str()
+        .expect("tests subtask id")
+        .to_string();
+    let traversal = plan_command(
+        &tree,
+        &[
+            "update",
+            "--plan",
+            &plan_id,
+            "--task",
+            "TASK-001",
+            "--subtask",
+            &tests_id,
+            "--status",
+            "done",
+            "--evidence-path",
+            "../outside.json",
+            "--verification-timestamp",
+            "2026-09-12T00:00:00Z",
+        ],
+    );
+    assert!(!traversal.status.success());
+    assert!(String::from_utf8_lossy(&traversal.stderr).contains("unsafe evidence path"));
+    assert_eq!(read_json(&ticket_path), original_ticket);
+    assert_eq!(read_json(&plan_path.join("tasks.json")), original_tasks);
+    assert_eq!(read_json(&plan_path.join("rtm.json")), original_rtm);
+    assert_eq!(read_json(&plan_path.join("status.json")), original_status);
+
+    let human = plan_command(
+        &tree,
+        &[
+            "update",
+            "--plan",
+            &plan_id,
+            "--task",
+            "TASK-001",
+            "--subtask",
+            &docs_id,
+            "--status",
+            "needs_human",
+            "--reason",
+            "documentation needs a human decision",
+        ],
+    );
+    assert_success(&human, "needs_human update");
+    assert_eq!(
+        read_json(&ticket_path)["layers"]["docs"][0]["reason"],
+        "documentation needs a human decision"
+    );
+    assert_eq!(
+        read_json(&plan_path.join("tasks.json"))["tasks"][0]["status"],
+        "blocked"
+    );
+}
+
+#[test]
+fn plan_update_parent_done_requires_terminal_subtasks() {
+    let tree = test_tree("governed-parent-update");
+    let (plan_id, plan_path) = advance_to_tasks(&tree);
+    let parent_done = plan_command(
+        &tree,
+        &[
+            "update", "--plan", &plan_id, "--task", "TASK-001", "--status", "done",
+        ],
+    );
+    assert!(!parent_done.status.success());
+    assert!(String::from_utf8_lossy(&parent_done.stderr).contains("subtasks are unfinished"));
+
+    let parent_progress = plan_command(
+        &tree,
+        &[
+            "update",
+            "--plan",
+            &plan_id,
+            "--task",
+            "TASK-001",
+            "--status",
+            "in_progress",
+        ],
+    );
+    assert_success(&parent_progress, "parent in_progress update");
+    assert_eq!(
+        read_json(&plan_path.join("task-001.json"))["status"],
+        "in_progress"
+    );
+    assert_eq!(
+        read_json(&plan_path.join("tasks.json"))["tasks"][0]["status"],
+        "in_progress"
+    );
+}

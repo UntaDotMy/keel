@@ -99,6 +99,25 @@ pub(crate) struct PreparedTaskArtifacts {
     pub tickets: Vec<TicketArtifact>,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct TaskUpdateRequest {
+    pub task_id: String,
+    pub subtask_id: Option<String>,
+    pub status: String,
+    pub evidence_path: Option<String>,
+    pub reason: Option<String>,
+    pub verification_timestamp: Option<String>,
+}
+
+#[derive(Debug)]
+pub(crate) struct PreparedTaskUpdate {
+    pub ticket_file: String,
+    pub ticket: Value,
+    pub tasks: Value,
+    pub rtm: Value,
+    pub task_status: String,
+}
+
 pub(crate) struct ValidationContext<'a> {
     pub plan_id: &'a str,
     pub plan_directory: &'a Path,
@@ -364,6 +383,311 @@ pub(crate) fn prepare_task_artifacts(
     }
 }
 
+/// Prepare one governed task or checklist-subtask update without publishing it.
+///
+/// The planner owns publication; this function keeps identity, evidence, layer,
+/// and RTM validation in the task-ticket owner so callers cannot update a ticket
+/// while leaving its aggregate artifacts out of sync.
+pub(crate) fn prepare_task_update(
+    context: &ValidationContext<'_>,
+    request: &TaskUpdateRequest,
+) -> Result<PreparedTaskUpdate, Vec<String>> {
+    let scopes = derive_scopes(context.specification, context.architecture);
+    let derived_layers = derived_layers(&scopes);
+    let mut tickets = Vec::new();
+    let mut issues = Vec::new();
+
+    for (index, _seed) in context.seeds.iter().enumerate() {
+        let file_name = format!("task-{:03}.json", index + 1);
+        let path = context.plan_directory.join(&file_name);
+        let value = read_bounded_json(&path, &file_name, &mut issues)
+            .unwrap_or_else(|| Value::Object(Map::new()));
+        tickets.push(TicketArtifact {
+            file_name,
+            value,
+            write_required: false,
+        });
+    }
+
+    validate_unindexed_ticket_files(context.plan_directory, &tickets, &mut issues);
+    validate_ticket_values(context, &tickets, &scopes, &derived_layers, &mut issues);
+    if !issues.is_empty() {
+        return Err(issues);
+    }
+
+    let Some(ticket_index) = context
+        .seeds
+        .iter()
+        .position(|seed| seed.id == request.task_id)
+    else {
+        return Err(vec![format!(
+            "unknown task id {}; expected a generated task id",
+            request.task_id
+        )]);
+    };
+    {
+        let ticket = &mut tickets[ticket_index];
+        if let Some(subtask_id) = request.subtask_id.as_deref() {
+            update_subtask(ticket, subtask_id, request, context, &mut issues);
+        } else {
+            update_task(ticket, request, &mut issues);
+        }
+    }
+    if !issues.is_empty() {
+        return Err(issues);
+    }
+
+    let (tasks, rtm) = build_aggregate_and_rtm(context.plan_id, context.seeds, &tickets);
+    validate_ticket_values(context, &tickets, &scopes, &derived_layers, &mut issues);
+    validate_rtm_links(context.seeds, &tickets, &rtm, &mut issues);
+    if issues.is_empty() {
+        let ticket = &tickets[ticket_index];
+        Ok(PreparedTaskUpdate {
+            ticket_file: ticket.file_name.clone(),
+            ticket: ticket.value.clone(),
+            task_status: string_field(&ticket.value, "status")
+                .unwrap_or("planned")
+                .to_string(),
+            tasks,
+            rtm,
+        })
+    } else {
+        Err(issues)
+    }
+}
+
+fn update_task(ticket: &mut TicketArtifact, request: &TaskUpdateRequest, issues: &mut Vec<String>) {
+    if !matches!(
+        request.status.as_str(),
+        "planned" | "in_progress" | "blocked" | "done"
+    ) {
+        issues.push(format!("{} has invalid task status", request.task_id));
+    }
+    if request.subtask_id.is_none()
+        && (request.evidence_path.is_some()
+            || request.reason.is_some()
+            || request.verification_timestamp.is_some())
+    {
+        issues.push("task status updates do not accept evidence, reason, or verification timestamp; target a subtask".to_string());
+    }
+    if request.status == "done" {
+        let unfinished: Vec<&str> = ticket_subtasks(&ticket.value)
+            .into_iter()
+            .filter_map(|(_, subtask)| {
+                let status = string_field(subtask, "status")?;
+                (!matches!(status, "done" | "not_applicable"))
+                    .then_some(string_field(subtask, "id").unwrap_or("subtask"))
+            })
+            .collect();
+        if !unfinished.is_empty() {
+            issues.push(format!(
+                "{} cannot be done while subtasks are unfinished: {}",
+                request.task_id,
+                unfinished.join(", ")
+            ));
+        }
+    }
+    if issues.is_empty() {
+        ticket
+            .value
+            .as_object_mut()
+            .expect("validated task ticket is an object")
+            .insert("status".to_string(), Value::String(request.status.clone()));
+    }
+}
+
+fn update_subtask(
+    ticket: &mut TicketArtifact,
+    subtask_id: &str,
+    request: &TaskUpdateRequest,
+    context: &ValidationContext<'_>,
+    issues: &mut Vec<String>,
+) {
+    let matches = ticket_subtasks(&ticket.value)
+        .into_iter()
+        .filter(|(_, subtask)| string_field(subtask, "id") == Some(subtask_id))
+        .count();
+    if matches == 0 {
+        issues.push(format!("unknown subtask id {subtask_id}"));
+        return;
+    }
+    if matches > 1 {
+        issues.push(format!("subtask id {subtask_id} is duplicated"));
+        return;
+    }
+    if !matches!(
+        request.status.as_str(),
+        "open" | "done" | "skipped" | "not_applicable" | "needs_human"
+    ) {
+        issues.push(format!("{subtask_id} has invalid subtask status"));
+    }
+    let reason_required = matches!(
+        request.status.as_str(),
+        "skipped" | "not_applicable" | "needs_human"
+    );
+    match (reason_required, request.reason.as_deref().map(str::trim)) {
+        (true, Some("")) => {
+            issues.push(format!(
+                "{subtask_id} status {} requires a non-empty reason",
+                request.status
+            ));
+        }
+        (true, None) => {
+            issues.push(format!(
+                "{subtask_id} status {} requires --reason",
+                request.status
+            ));
+        }
+        (false, Some(reason)) if !reason.is_empty() => {
+            issues.push(format!(
+                "{subtask_id} status {} does not accept --reason",
+                request.status
+            ));
+        }
+        _ => {}
+    }
+    if request.status == "done" {
+        if request
+            .evidence_path
+            .as_deref()
+            .unwrap_or_default()
+            .trim()
+            .is_empty()
+        {
+            issues.push(format!("{subtask_id} done status requires --evidence-path"));
+        }
+        if request
+            .verification_timestamp
+            .as_deref()
+            .unwrap_or_default()
+            .trim()
+            .is_empty()
+        {
+            issues.push(format!(
+                "{subtask_id} done status requires --verification-timestamp"
+            ));
+        }
+    } else {
+        if request.evidence_path.is_some() {
+            issues.push(format!(
+                "{subtask_id} status {} does not accept --evidence-path",
+                request.status
+            ));
+        }
+        if request.verification_timestamp.is_some() {
+            issues.push(format!(
+                "{subtask_id} status {} does not accept --verification-timestamp",
+                request.status
+            ));
+        }
+    }
+    if !issues.is_empty() {
+        return;
+    }
+
+    let evidence_ref = if request.status == "done" {
+        let relative = request
+            .evidence_path
+            .as_deref()
+            .expect("done update checked evidence path");
+        match evidence_reference(context.plan_directory, relative, issues) {
+            Some(reference) => reference,
+            None => return,
+        }
+    } else {
+        Value::Null
+    };
+    let target = find_subtask_mut(&mut ticket.value, subtask_id)
+        .expect("validated unique subtask exists in ticket");
+    target["status"] = Value::String(request.status.clone());
+    target["reason"] = request
+        .reason
+        .as_deref()
+        .filter(|reason| !reason.trim().is_empty())
+        .map(|reason| Value::String(reason.trim().to_string()))
+        .unwrap_or(Value::Null);
+    target["verification_timestamp"] = request
+        .verification_timestamp
+        .as_deref()
+        .map(|timestamp| Value::String(timestamp.to_string()))
+        .unwrap_or(Value::Null);
+    target["evidence_ref"] = evidence_ref;
+    if request.status != "done" {
+        target["verification_timestamp"] = Value::Null;
+    }
+    let task_status = derive_ticket_status(&ticket.value).to_string();
+    ticket.value["status"] = Value::String(task_status);
+}
+
+fn evidence_reference(
+    plan_directory: &Path,
+    relative: &str,
+    issues: &mut Vec<String>,
+) -> Option<Value> {
+    let path = resolve_regular_plan_file(plan_directory, relative, issues)?;
+    let body = read_bounded_text(&path, relative, issues)?;
+    if serde_json::from_str::<Value>(&body).is_err() {
+        issues.push(format!("parse evidence {relative}: expected a JSON object"));
+        return None;
+    }
+    Some(json!({
+        "path": relative,
+        "content_hash": format!("fnv1a64:{}", crate::utility::hashing::fnv1a64_hex(&body))
+    }))
+}
+
+fn find_subtask_mut<'a>(ticket: &'a mut Value, subtask_id: &str) -> Option<&'a mut Value> {
+    let layers = ticket.get_mut("layers")?.as_object_mut()?;
+    for values in layers.values_mut() {
+        let values = values.as_array_mut()?;
+        for node in values {
+            if string_field(node, "id") == Some(subtask_id) {
+                return Some(node);
+            }
+            if let Some(todos) = node.get_mut("todos").and_then(Value::as_array_mut) {
+                for todo in todos {
+                    if string_field(todo, "id") == Some(subtask_id) {
+                        return Some(todo);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn derive_ticket_status(ticket: &Value) -> &'static str {
+    let nodes = ticket_subtasks(ticket);
+    if nodes.iter().any(|(_, node)| {
+        matches!(
+            string_field(node, "status"),
+            Some("needs_human" | "skipped")
+        )
+    }) {
+        return "blocked";
+    }
+    if !nodes.is_empty()
+        && nodes.iter().all(|(_, node)| {
+            matches!(
+                string_field(node, "status"),
+                Some("done" | "not_applicable")
+            )
+        })
+    {
+        return "done";
+    }
+    if nodes.iter().any(|(_, node)| {
+        matches!(
+            string_field(node, "status"),
+            Some("done" | "not_applicable")
+        )
+    }) {
+        "in_progress"
+    } else {
+        "planned"
+    }
+}
+
 pub(crate) fn validate_task_artifacts(
     context: &ValidationContext<'_>,
     tasks: Option<&Value>,
@@ -581,6 +905,12 @@ fn ticket_template(
             (*layer).to_string(),
             json!([{
                 "id": subtask_id,
+                "parent_id": seed.id,
+                "dependencies": [],
+                "todos": [],
+                "objective": format!("Produce {layer} evidence for {}.", seed.id),
+                "expected_output": evidence_type_for_layer(layer),
+                "verification": seed.acceptance.iter().map(|criterion| criterion.verification_method.as_str()).collect::<Vec<_>>(),
                 "description": format!("Produce {layer} evidence for {}.", seed.id),
                 "requirement_refs": seed.requirement_refs,
                 "acceptance_refs": acceptance_refs,
@@ -599,6 +929,9 @@ fn ticket_template(
         "artifact": "task_ticket",
         "plan_id": plan_id,
         "id": seed.id,
+        "parent_id": plan_id,
+        "dependencies": [],
+        "goal": seed.title,
         "title": seed.title,
         "requirement_refs": seed.requirement_refs,
         "acceptance_refs": acceptance_refs,
@@ -661,13 +994,14 @@ fn build_aggregate_and_rtm(
             .collect();
         task_entries.push(json!({
             "taskId": seed.id,
+            "parentId": plan_id,
             "title": seed.title,
             "requirementIds": seed.requirement_refs,
             "acceptanceCriterionIds": criterion_ids,
             "verificationMethod": verification_methods.first().copied().unwrap_or_default(),
             "expectedEvidenceType": evidence_types.first().copied().unwrap_or_default(),
             "ownerRole": "implementer",
-            "status": "pending",
+            "status": aggregate_task_status(&ticket.value),
             "ticketFile": ticket.file_name
         }));
 
@@ -736,6 +1070,15 @@ fn build_aggregate_and_rtm(
     )
 }
 
+fn aggregate_task_status(ticket: &Value) -> &'static str {
+    match string_field(ticket, "status") {
+        Some("done") => "done",
+        Some("blocked") => "blocked",
+        Some("in_progress") => "in_progress",
+        _ => "pending",
+    }
+}
+
 fn validate_ticket_values(
     context: &ValidationContext<'_>,
     tickets: &[TicketArtifact],
@@ -758,6 +1101,7 @@ fn validate_ticket_values(
         };
         validate_ticket_identity(context.plan_id, seed, ticket, issues);
         validate_scope_contract(ticket, scopes, derived_layers, issues);
+        validate_task_tree(ticket, issues);
         validate_ticket_subtasks(
             context,
             seed,
@@ -894,105 +1238,97 @@ fn validate_ticket_subtasks(
     all_subtask_ids: &mut BTreeSet<String>,
     issues: &mut Vec<String>,
 ) {
-    let Some(layers) = ticket.value.get("layers").and_then(Value::as_object) else {
-        return;
-    };
-    for (layer, subtasks) in layers {
-        let Some(subtasks) = subtasks.as_array() else {
+    for (layer, subtask) in ticket_subtasks(&ticket.value) {
+        let id = string_field(subtask, "id").unwrap_or("subtask without id");
+        for field in [
+            "id",
+            "description",
+            "requirement_refs",
+            "acceptance_refs",
+            "status",
+            "expected_evidence_type",
+            "evidence_ref",
+            "reason",
+            "owner_role",
+            "verification_timestamp",
+        ] {
+            if subtask.get(field).is_none() {
+                issues.push(format!("{id} is missing field {field}"));
+            }
+        }
+        if id == "subtask without id" || !all_subtask_ids.insert(id.to_string()) {
+            issues.push(format!(
+                "{} has missing or duplicate subtask id {id}",
+                ticket.file_name
+            ));
+        }
+        if string_field(subtask, "description")
+            .unwrap_or_default()
+            .trim()
+            .is_empty()
+        {
+            issues.push(format!("{id} has no description"));
+        }
+        if sorted_strings(string_array(subtask, "requirement_refs"))
+            != sorted_strings(seed.requirement_refs.clone())
+        {
+            issues.push(format!("{id} requirement_refs do not match its task"));
+        }
+        let expected_acceptance: Vec<String> = seed
+            .acceptance
+            .iter()
+            .map(|criterion| criterion.id.clone())
+            .collect();
+        if sorted_strings(string_array(subtask, "acceptance_refs"))
+            != sorted_strings(expected_acceptance)
+        {
+            issues.push(format!("{id} acceptance_refs do not match its task"));
+        }
+        let evidence_type = string_field(subtask, "expected_evidence_type").unwrap_or_default();
+        if !EVIDENCE_TYPES.contains(&evidence_type) {
+            issues.push(format!("{id} has unsupported expected_evidence_type"));
+        }
+        if !matches!(
+            string_field(subtask, "owner_role"),
+            Some("implementer" | "verifier" | "reviewer" | "human")
+        ) {
+            issues.push(format!("{id} has invalid owner_role"));
+        }
+        let status = string_field(subtask, "status").unwrap_or_default();
+        if !matches!(
+            status,
+            "open" | "done" | "skipped" | "not_applicable" | "needs_human"
+        ) {
+            issues.push(format!("{id} has invalid subtask status"));
             continue;
-        };
-        for subtask in subtasks {
-            let id = string_field(subtask, "id").unwrap_or("subtask without id");
-            for field in [
-                "id",
-                "description",
-                "requirement_refs",
-                "acceptance_refs",
-                "status",
-                "expected_evidence_type",
-                "evidence_ref",
-                "reason",
-                "owner_role",
-                "verification_timestamp",
-            ] {
-                if subtask.get(field).is_none() {
-                    issues.push(format!("{id} is missing field {field}"));
-                }
-            }
-            if id == "subtask without id" || !all_subtask_ids.insert(id.to_string()) {
-                issues.push(format!(
-                    "{} has missing or duplicate subtask id {id}",
-                    ticket.file_name
-                ));
-            }
-            if string_field(subtask, "description")
+        }
+        if matches!(status, "skipped" | "not_applicable" | "needs_human")
+            && string_field(subtask, "reason")
                 .unwrap_or_default()
                 .trim()
                 .is_empty()
-            {
-                issues.push(format!("{id} has no description"));
+        {
+            issues.push(format!("{id} status {status} requires a non-empty reason"));
+        }
+        if derived_layers.contains(&layer)
+            && subtask.get("derived").and_then(Value::as_bool) != Some(true)
+        {
+            issues.push(format!("{id} must retain derived=true"));
+        }
+        if status == "done" {
+            if subtask.get("evidence_ref").map_or(true, Value::is_null) {
+                issues.push(format!("{id} is done without evidence_ref"));
             }
-            if sorted_strings(string_array(subtask, "requirement_refs"))
-                != sorted_strings(seed.requirement_refs.clone())
-            {
-                issues.push(format!("{id} requirement_refs do not match its task"));
+            validate_timestamp(subtask, id, issues);
+        }
+        if let Some(reference) = subtask
+            .get("evidence_ref")
+            .filter(|reference| !reference.is_null())
+        {
+            if status != "done" {
+                issues.push(format!("{id} has evidence_ref but status is not done"));
             }
-            let expected_acceptance: Vec<String> = seed
-                .acceptance
-                .iter()
-                .map(|criterion| criterion.id.clone())
-                .collect();
-            if sorted_strings(string_array(subtask, "acceptance_refs"))
-                != sorted_strings(expected_acceptance)
-            {
-                issues.push(format!("{id} acceptance_refs do not match its task"));
-            }
-            let evidence_type = string_field(subtask, "expected_evidence_type").unwrap_or_default();
-            if !EVIDENCE_TYPES.contains(&evidence_type) {
-                issues.push(format!("{id} has unsupported expected_evidence_type"));
-            }
-            if !matches!(
-                string_field(subtask, "owner_role"),
-                Some("implementer" | "verifier" | "reviewer" | "human")
-            ) {
-                issues.push(format!("{id} has invalid owner_role"));
-            }
-            let status = string_field(subtask, "status").unwrap_or_default();
-            if !matches!(
-                status,
-                "open" | "done" | "skipped" | "not_applicable" | "needs_human"
-            ) {
-                issues.push(format!("{id} has invalid subtask status"));
-                continue;
-            }
-            if matches!(status, "skipped" | "not_applicable" | "needs_human")
-                && string_field(subtask, "reason")
-                    .unwrap_or_default()
-                    .trim()
-                    .is_empty()
-            {
-                issues.push(format!("{id} status {status} requires a non-empty reason"));
-            }
-            if derived_layers.contains(&layer.as_str())
-                && subtask.get("derived").and_then(Value::as_bool) != Some(true)
-            {
-                issues.push(format!("{id} must retain derived=true"));
-            }
-            if status == "done" {
-                if subtask.get("evidence_ref").map_or(true, Value::is_null) {
-                    issues.push(format!("{id} is done without evidence_ref"));
-                }
-                validate_timestamp(subtask, id, issues);
-            }
-            if let Some(reference) = subtask
-                .get("evidence_ref")
-                .filter(|reference| !reference.is_null())
-            {
-                if status != "done" {
-                    issues.push(format!("{id} has evidence_ref but status is not done"));
-                }
-                validate_evidence_reference(context, seed, id, subtask, reference, issues);
-            }
+            validate_evidence_reference(context, seed, id, subtask, reference, issues);
         }
     }
 }
@@ -1511,10 +1847,108 @@ fn ticket_subtasks(ticket: &Value) -> Vec<(&str, &Value)> {
         if let Some(values) = values.as_array() {
             for value in values {
                 subtasks.push((layer.as_str(), value));
+                if let Some(todos) = value.get("todos").and_then(Value::as_array) {
+                    subtasks.extend(todos.iter().map(|todo| (layer.as_str(), todo)));
+                }
             }
         }
     }
     subtasks
+}
+
+fn validate_task_tree(ticket: &TicketArtifact, issues: &mut Vec<String>) {
+    let nodes = ticket_subtasks(&ticket.value);
+    let by_id: BTreeMap<&str, &Value> = nodes
+        .iter()
+        .filter_map(|(_, node)| string_field(node, "id").map(|id| (id, *node)))
+        .collect();
+    let task_id = string_field(&ticket.value, "id").unwrap_or_default();
+    for (_, node) in &nodes {
+        let id = string_field(node, "id").unwrap_or_default();
+        if let Some(dependencies) = node.get("dependencies") {
+            if !dependencies.as_array().is_some_and(|values| {
+                values
+                    .iter()
+                    .all(|value| value.as_str().is_some_and(|value| !value.trim().is_empty()))
+            }) {
+                issues.push(format!(
+                    "{id} dependencies must be an array of non-empty IDs"
+                ));
+            }
+        }
+        if let Some(todos) = node.get("todos") {
+            let Some(todos) = todos.as_array() else {
+                issues.push(format!("{id} todos must be an array"));
+                continue;
+            };
+            for todo in todos {
+                if string_field(todo, "parent_id") != Some(id) {
+                    issues.push(format!(
+                        "{id} todo parent_id must match its containing subtask"
+                    ));
+                }
+                if todo
+                    .get("todos")
+                    .and_then(Value::as_array)
+                    .is_some_and(|children| !children.is_empty())
+                {
+                    issues.push(format!(
+                        "{id} task hierarchy exceeds parent/subtask/todo depth"
+                    ));
+                }
+                if string_field(node, "status") == Some("done")
+                    && !matches!(
+                        string_field(todo, "status"),
+                        Some("done" | "not_applicable")
+                    )
+                {
+                    issues.push(format!("{id} is done with unfinished todos"));
+                }
+            }
+        }
+        if let Some(parent) = string_field(node, "parent_id") {
+            if parent != task_id && !by_id.contains_key(parent) {
+                issues.push(format!("{id} references unknown parent {parent}"));
+            }
+        }
+        let mut pending = string_array(node, "dependencies");
+        let mut visited = BTreeSet::new();
+        while let Some(dependency) = pending.pop() {
+            if dependency == id {
+                issues.push(format!("{id} has a dependency cycle"));
+                break;
+            }
+            if !visited.insert(dependency.clone()) {
+                continue;
+            }
+            match by_id.get(dependency.as_str()) {
+                Some(target) => {
+                    if string_field(node, "status") == Some("done")
+                        && !matches!(
+                            string_field(target, "status"),
+                            Some("done" | "not_applicable")
+                        )
+                    {
+                        issues.push(format!(
+                            "{id} is done with unfinished dependency {dependency}"
+                        ));
+                    }
+                    pending.extend(string_array(target, "dependencies"));
+                }
+                None => issues.push(format!("{id} references unknown dependency {dependency}")),
+            }
+        }
+    }
+    if string_field(&ticket.value, "status") == Some("done")
+        && nodes.iter().any(|(_, node)| {
+            !matches!(
+                string_field(node, "status"),
+                Some("done" | "not_applicable")
+            )
+        })
+    {
+        issues.push(format!("{task_id} is done with unfinished subtasks"));
+    }
 }
 
 fn validate_unindexed_ticket_files(
@@ -1683,6 +2117,102 @@ fn string_field<'a>(value: &'a Value, field: &str) -> Option<&'a str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nested_todos_participate_in_traceability_and_completion() {
+        let mut ticket = TicketArtifact {
+            file_name: "task-001.json".into(),
+            write_required: false,
+            value: json!({"id":"TASK-1", "status":"planned", "layers":{"tests":[{
+                "id":"SUB-1", "parent_id":"TASK-1", "status":"done", "todos":[{
+                    "id":"TODO-1", "parent_id":"SUB-1", "status":"open", "dependencies":[]
+                }]
+            }]}}),
+        };
+        assert_eq!(ticket_subtasks(&ticket.value).len(), 2);
+        let mut issues = Vec::new();
+        validate_task_tree(&ticket, &mut issues);
+        assert!(issues
+            .iter()
+            .any(|issue| issue.contains("unfinished todos")));
+        ticket.value["layers"]["tests"][0]["todos"][0]["status"] = json!("done");
+        issues.clear();
+        validate_task_tree(&ticket, &mut issues);
+        assert!(issues.is_empty(), "{issues:?}");
+    }
+
+    #[test]
+    fn task_tree_rejects_unknown_dependencies_and_cycles() {
+        let ticket = TicketArtifact {
+            file_name: "task-001.json".into(),
+            write_required: false,
+            value: json!({"id":"TASK-1", "layers":{"tests":[
+                {"id":"A", "dependencies":["B"]},
+                {"id":"B", "dependencies":["A", "missing"]}
+            ]}}),
+        };
+        let mut issues = Vec::new();
+        validate_task_tree(&ticket, &mut issues);
+        assert!(issues
+            .iter()
+            .any(|issue| issue.contains("dependency cycle")));
+        assert!(issues
+            .iter()
+            .any(|issue| issue.contains("unknown dependency missing")));
+    }
+
+    #[test]
+    fn todo_evidence_is_checked_by_the_existing_ticket_owner_and_rtm() {
+        let seed = TaskSeed {
+            id: "TASK-1".into(),
+            title: "Test behavior".into(),
+            requirement_refs: vec!["REQ-1".into()],
+            acceptance: vec![AcceptanceSeed {
+                id: "AC-1".into(),
+                verification_method: "named test".into(),
+                expected_evidence_type: "named_test".into(),
+            }],
+        };
+        let mut value = ticket_template("PLAN-1", &seed, &[], &["tests"]);
+        let mut todo = value["layers"]["tests"][0].clone();
+        todo["id"] = json!("TODO-1");
+        todo["parent_id"] = json!("TASK-1-TESTS-001");
+        todo["status"] = json!("done");
+        value["layers"]["tests"][0]["todos"] = json!([todo]);
+        let ticket = TicketArtifact {
+            file_name: "task-001.json".into(),
+            value,
+            write_required: false,
+        };
+        let seeds = vec![seed];
+        let context = ValidationContext {
+            plan_id: "PLAN-1",
+            plan_directory: Path::new("."),
+            keel_home: Path::new("."),
+            workspace_root: Path::new("."),
+            specification: "",
+            architecture: "",
+            seeds: &seeds,
+        };
+        let mut issues = Vec::new();
+        validate_ticket_subtasks(
+            &context,
+            &seeds[0],
+            &ticket,
+            &["tests"],
+            &mut BTreeSet::new(),
+            &mut issues,
+        );
+        assert!(issues
+            .iter()
+            .any(|issue| issue == "TODO-1 is done without evidence_ref"));
+        let (_, rtm) = build_aggregate_and_rtm("PLAN-1", &seeds, &[ticket]);
+        assert!(rtm["traces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|trace| trace["subtaskId"] == "TODO-1"));
+    }
 
     #[test]
     fn scope_derivation_does_not_read_unrelated_architecture_sections() {

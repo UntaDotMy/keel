@@ -479,6 +479,75 @@ fn fresh_research_cache_preserves_citation_metadata_and_is_reused() {
 }
 
 #[test]
+fn version_bound_research_requires_matching_version_metadata() {
+    let tree = isolated_tree("version-bound-research");
+    let (matching_id, matching_path) = specify(&tree, SPECIFIC_REQUEST);
+    let retrieved_at = chrono::Utc::now().to_rfc3339();
+    let matching = plan_command(
+        &tree,
+        &[
+            "research",
+            "--plan",
+            &matching_id,
+            "--claim",
+            "The released dependency exposes the required behavior.",
+            "--source-url",
+            "https://vendor.example/releases/2026-09",
+            "--source-type",
+            "official-doc",
+            "--source-version",
+            "2026-09",
+            "--required-version",
+            "2026-09",
+            "--retrieved-at",
+            &retrieved_at,
+            "--support",
+            "The release documentation describes the required behavior.",
+            "--freshness",
+            "version-bound",
+            "--used-by",
+            "REQ-001,AC-001",
+        ],
+    );
+    assert_success(&matching, "matching version-bound research");
+    assert_eq!(json_output(&matching)["grounding"], "version-bound");
+    let matching_source = &read_json(&matching_path.join("research.json"))["sources"][0];
+    assert_eq!(matching_source["sourceVersion"], "2026-09");
+    assert_eq!(matching_source["requiredVersion"], "2026-09");
+
+    let (mismatched_id, _) = specify(&tree, SPECIFIC_REQUEST);
+    let mismatched = plan_command(
+        &tree,
+        &[
+            "research",
+            "--plan",
+            &mismatched_id,
+            "--claim",
+            "The released dependency exposes the required behavior.",
+            "--source-url",
+            "https://vendor.example/releases/2026-08",
+            "--source-type",
+            "official-doc",
+            "--source-version",
+            "2026-08",
+            "--required-version",
+            "2026-09",
+            "--retrieved-at",
+            &retrieved_at,
+            "--support",
+            "The release documentation describes the required behavior.",
+            "--freshness",
+            "version-bound",
+            "--used-by",
+            "REQ-001,AC-001",
+        ],
+    );
+    assert!(!mismatched.status.success());
+    assert!(String::from_utf8_lossy(&mismatched.stderr)
+        .contains("sourceVersion does not match requiredVersion"));
+}
+
+#[test]
 fn research_cache_prefers_current_official_documentation() {
     let tree = isolated_tree("research-cache-precedence");
     let precedence_retrieved_at = chrono::Utc::now().to_rfc3339();

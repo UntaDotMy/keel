@@ -1280,10 +1280,53 @@ fn parse_frontmatter(frontmatter: &str) -> Vec<(String, String)> {
             fields.push((key, value));
             index += consumed;
         } else {
-            fields.push((key, rest.to_string()));
+            fields.push((key, normalize_yaml_scalar(rest)));
         }
     }
     fields
+}
+
+/// Decode the quoted scalar forms permitted by YAML frontmatter. The linter
+/// only needs scalar identity for routing fields such as `name`; retaining the
+/// surrounding quotes would make valid metadata fail directory-name checks.
+/// This deliberately handles only scalar quoting, not arbitrary YAML syntax.
+fn normalize_yaml_scalar(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.len() < 2 {
+        return trimmed.to_string();
+    }
+    let bytes = trimmed.as_bytes();
+    let quote = bytes[0];
+    if bytes[trimmed.len() - 1] != quote || !matches!(quote, b'\'' | b'"') {
+        return trimmed.to_string();
+    }
+    let inner = &trimmed[1..trimmed.len() - 1];
+    if quote == b'\'' {
+        return inner.replace("''", "'");
+    }
+    let mut normalized = String::with_capacity(inner.len());
+    let mut escaped = false;
+    for character in inner.chars() {
+        if escaped {
+            normalized.push(match character {
+                'n' => '\n',
+                'r' => '\r',
+                't' => '\t',
+                '"' => '"',
+                '\\' => '\\',
+                other => other,
+            });
+            escaped = false;
+        } else if character == '\\' {
+            escaped = true;
+        } else {
+            normalized.push(character);
+        }
+    }
+    if escaped {
+        normalized.push('\\');
+    }
+    normalized
 }
 
 /// YAML 1.2 block scalar: `|` literal / `>` folded, optional indent 1-9 and
@@ -1845,6 +1888,17 @@ mod tests {
         assert_eq!(field(&fields, "name").as_deref(), Some("x"));
         assert_eq!(field(&fields, "description").as_deref(), Some("hi"));
         assert!(field(&fields, "nested").is_none());
+    }
+
+    #[test]
+    fn parse_frontmatter_unquotes_yaml_scalar_values() {
+        let fm = "name: \"quoted-skill\"\ndescription: 'Use when reviewing code.'\n";
+        let fields = parse_frontmatter(fm);
+        assert_eq!(field(&fields, "name").as_deref(), Some("quoted-skill"));
+        assert_eq!(
+            field(&fields, "description").as_deref(),
+            Some("Use when reviewing code.")
+        );
     }
 
     #[test]

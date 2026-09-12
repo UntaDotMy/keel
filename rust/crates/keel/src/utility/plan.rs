@@ -55,8 +55,8 @@ const SPEC_SECTIONS: [&str; 22] = [
     "Verification strategy",
 ];
 
-const VAGUE_PREDICATES: [&str; 7] = [
-    "works", "correct", "nice", "good", "proper", "fast", "secure",
+const VAGUE_PREDICATES: [&str; 9] = [
+    "works", "correct", "nice", "good", "proper", "fast", "secure", "faster", "better",
 ];
 
 macro_rules! command_or_return {
@@ -83,6 +83,7 @@ enum PlanAction {
     Research,
     Design,
     Tasks,
+    Update,
     Check,
     Ready,
     Done,
@@ -95,6 +96,7 @@ impl PlanAction {
             Self::Research => "plan research",
             Self::Design => "plan design",
             Self::Tasks => "plan tasks",
+            Self::Update => "plan update",
             Self::Check => "plan check",
             Self::Ready => "plan ready",
             Self::Done => "plan done",
@@ -175,6 +177,8 @@ struct SubmittedResearch {
     claim: String,
     source_url: String,
     source_type: String,
+    source_version: Option<String>,
+    required_version: Option<String>,
     publication_date: Option<String>,
     retrieved_at: String,
     support: String,
@@ -205,6 +209,7 @@ pub fn run_plan_command(
         "research" => PlanAction::Research,
         "design" => PlanAction::Design,
         "tasks" => PlanAction::Tasks,
+        "update" => PlanAction::Update,
         "check" => PlanAction::Check,
         "ready" => PlanAction::Ready,
         "done" => PlanAction::Done,
@@ -223,6 +228,7 @@ pub fn run_plan_command(
         PlanAction::Research => run_research(flags, &mut streams),
         PlanAction::Design => run_design(flags, &mut streams),
         PlanAction::Tasks => run_tasks(flags, &mut streams),
+        PlanAction::Update => run_update(flags, &mut streams),
         PlanAction::Check => run_check(flags, &mut streams),
         PlanAction::Ready => run_ready(flags, &mut streams),
         PlanAction::Done => run_done(flags, &mut streams),
@@ -232,7 +238,7 @@ pub fn run_plan_command(
 fn usage(standard_error: Output<'_>) -> u8 {
     let _ = writeln!(
         standard_error,
-        "Usage: plan specify --request <text> | research --plan <id> [--claim <text> --source-url <url> --source-type <type> --retrieved-at <rfc3339> --support <text> --freshness <class> --used-by <ids>] | design --plan <id> | tasks --plan <id> | check [--rtm] --plan <id> | ready --plan <id> | done --plan <id>"
+        "Usage: plan specify --request <text> | research --plan <id> [--claim <text> --source-url <url> --source-type <type> [--source-version <version> --required-version <version>] --publication-date <date> --retrieved-at <rfc3339> --support <text> --freshness <class> --used-by <ids>] | design --plan <id> | tasks --plan <id> | update --plan <id> --task <task-id> [--subtask <subtask-id>] --status <status> [--evidence-path <plan-relative-json> --verification-timestamp <rfc3339> | --reason <text>] | check [--rtm] --plan <id> | ready --plan <id> | done --plan <id>"
     );
     1
 }
@@ -249,6 +255,8 @@ fn action_flags(action: PlanAction) -> FlagSet {
             flags.string_flag("claim", "");
             flags.string_flag("source-url", "");
             flags.string_flag("source-type", "");
+            flags.string_flag("source-version", "");
+            flags.string_flag("required-version", "");
             flags.string_flag("publication-date", "");
             flags.string_flag("retrieved-at", "");
             flags.string_flag("support", "");
@@ -257,6 +265,15 @@ fn action_flags(action: PlanAction) -> FlagSet {
         }
         PlanAction::Design | PlanAction::Tasks | PlanAction::Ready | PlanAction::Done => {
             flags.string_flag("plan", "");
+        }
+        PlanAction::Update => {
+            flags.string_flag("plan", "");
+            flags.string_flag("task", "");
+            flags.string_flag("subtask", "");
+            flags.string_flag("status", "");
+            flags.string_flag("evidence-path", "");
+            flags.string_flag("reason", "");
+            flags.string_flag("verification-timestamp", "");
         }
         PlanAction::Check => {
             flags.string_flag("plan", "");
@@ -334,8 +351,12 @@ fn run_specify(flags: FlagSet, streams: &mut CommandStreams<'_>) -> u8 {
     let context = command_or_return!(planner_context(&flags), streams.error);
     let plan_id = new_plan_id(request);
     let paths = command_or_return!(plan_paths(&context, &plan_id), streams.error);
-    let vague_terms = vague_terms(request);
     let complexity = classify_request(request);
+    let vague_terms = if complexity.planning_required {
+        vague_terms(request)
+    } else {
+        Vec::new()
+    };
     let clarification_required = !vague_terms.is_empty();
     let created_at = timestamp();
     let artifacts = initial_artifacts(
@@ -359,6 +380,7 @@ fn run_specify(flags: FlagSet, streams: &mut CommandStreams<'_>) -> u8 {
             "clarificationRequired": clarification_required,
             "complexityClass": complexity.label,
             "taskClass": complexity.label,
+            "requestClass": complexity.request_class,
             "planningRequired": complexity.planning_required,
             "complexitySignals": complexity.signals,
         }),
@@ -682,6 +704,191 @@ fn run_tasks(flags: FlagSet, streams: &mut CommandStreams<'_>) -> u8 {
     )
 }
 
+fn run_update(flags: FlagSet, streams: &mut CommandStreams<'_>) -> u8 {
+    let (context, plan_id, paths) = parsed_or_return!(existing_plan(&flags, streams.error));
+    let task_id = flags.string_value("task").trim().to_string();
+    if task_id.is_empty() {
+        return command_error(streams.error, "plan update requires --task");
+    }
+    let requested_status = flags.string_value("status").trim().to_string();
+    if requested_status.is_empty() {
+        return command_error(streams.error, "plan update requires --status");
+    }
+    let raw_subtask_id = flags.string_value("subtask").trim().to_string();
+    let subtask_id = (!raw_subtask_id.is_empty()).then_some(raw_subtask_id);
+    let raw_evidence_path = flags.string_value("evidence-path").trim().to_string();
+    let evidence_path = (!raw_evidence_path.is_empty()).then_some(raw_evidence_path);
+    let raw_reason = flags.string_value("reason").trim().to_string();
+    let reason = (!raw_reason.is_empty()).then_some(raw_reason);
+    let raw_verification_timestamp = flags
+        .string_value("verification-timestamp")
+        .trim()
+        .to_string();
+    let verification_timestamp =
+        (!raw_verification_timestamp.is_empty()).then_some(raw_verification_timestamp);
+
+    let spec = command_or_return!(read_text(&paths.spec, SPEC_FILE), streams.error);
+    let (parsed, mut issues) = validate_specification(&spec, &plan_id);
+    let research = load_json_artifact(&paths.research, RESEARCH_FILE, &plan_id, &mut issues);
+    validate_research(research.as_ref(), &parsed, context.workspace(), &mut issues);
+    let architecture = read_bounded_text_for_validation(
+        &paths.architecture,
+        ARCHITECTURE_FILE,
+        crate::utility::architecture::MAX_ARCHITECTURE_BYTES,
+        &mut issues,
+    );
+    if let Some(body) = architecture.as_deref() {
+        validate_markdown_header(
+            body,
+            ARCHITECTURE_FILE,
+            "architecture",
+            &plan_id,
+            &mut issues,
+        );
+        validate_architecture(body, &parsed, research.as_ref(), &mut issues);
+    }
+    let mut status_artifact = command_or_return!(load_status(&paths, &plan_id), streams.error);
+    if string_field(&status_artifact, "architectureStatus") != Some("complete") {
+        issues.push("status.json architectureStatus is not complete".to_string());
+    }
+    if string_field(&status_artifact, "researchStatus") != Some("complete") {
+        issues.push("status.json researchStatus is not complete".to_string());
+    }
+    let tasks = load_json_artifact(&paths.tasks, TASKS_FILE, &plan_id, &mut issues);
+    let rtm = load_json_artifact(&paths.rtm, RTM_FILE, &plan_id, &mut issues);
+    validate_tasks(tasks.as_ref(), &parsed, &mut issues);
+    validate_rtm(rtm.as_ref(), &parsed, &mut issues);
+    if let (Some(specification), Some(architecture)) =
+        (Some(spec.as_str()), architecture.as_deref())
+    {
+        let seeds = task_seeds(&parsed);
+        crate::utility::task_ticket::validate_task_artifacts(
+            &crate::utility::task_ticket::ValidationContext {
+                plan_id: &plan_id,
+                plan_directory: &paths.directory,
+                keel_home: &context.home,
+                workspace_root: context.workspace(),
+                specification,
+                architecture,
+                seeds: &seeds,
+            },
+            tasks.as_ref(),
+            rtm.as_ref(),
+            &mut issues,
+        );
+    }
+    if !issues.is_empty() {
+        return validation_errors("plan update", &issues, streams.error);
+    }
+    let architecture = architecture.expect("architecture exists after validation");
+    let seeds = task_seeds(&parsed);
+    let prepared = match crate::utility::task_ticket::prepare_task_update(
+        &crate::utility::task_ticket::ValidationContext {
+            plan_id: &plan_id,
+            plan_directory: &paths.directory,
+            keel_home: &context.home,
+            workspace_root: context.workspace(),
+            specification: &spec,
+            architecture: &architecture,
+            seeds: &seeds,
+        },
+        &crate::utility::task_ticket::TaskUpdateRequest {
+            task_id: task_id.clone(),
+            subtask_id: subtask_id.clone(),
+            status: requested_status.clone(),
+            evidence_path,
+            reason,
+            verification_timestamp,
+        },
+    ) {
+        Ok(prepared) => prepared,
+        Err(issues) => return validation_errors("plan update", &issues, streams.error),
+    };
+
+    let stage = status_string(&status_artifact, "stage", "tasked");
+    update_status(
+        &mut status_artifact,
+        &stage,
+        "complete".to_string(),
+        "complete".to_string(),
+        "ready".to_string(),
+        "valid",
+        Vec::new(),
+    );
+    command_or_return!(
+        write_task_update_bundle(&paths, &prepared, &status_artifact),
+        streams.error
+    );
+
+    let payload = plan_payload(
+        &plan_id,
+        &paths,
+        json!({
+            "taskId": task_id,
+            "subtaskId": subtask_id,
+            "status": requested_status,
+            "taskStatus": prepared.task_status,
+            "updatedFiles": [prepared.ticket_file, TASKS_FILE, RTM_FILE, STATUS_FILE],
+        }),
+    );
+    emit_success(
+        &flags,
+        streams,
+        &payload,
+        &format!(
+            "plan update: id={plan_id} task={} subtask={} status={} task_status={}",
+            payload["taskId"].as_str().unwrap_or_default(),
+            payload["subtaskId"].as_str().unwrap_or("task"),
+            payload["status"].as_str().unwrap_or_default(),
+            payload["taskStatus"].as_str().unwrap_or_default(),
+        ),
+    )
+}
+
+fn write_task_update_bundle(
+    paths: &PlanPaths,
+    prepared: &crate::utility::task_ticket::PreparedTaskUpdate,
+    status: &Value,
+) -> Result<(), String> {
+    let files = [
+        (
+            paths.directory.join(&prepared.ticket_file),
+            render_json(&prepared.ticket)?,
+        ),
+        (paths.tasks.clone(), render_json(&prepared.tasks)?),
+        (paths.rtm.clone(), render_json(&prepared.rtm)?),
+        (paths.status.clone(), render_json(status)?),
+    ];
+    let originals: Vec<String> = files
+        .iter()
+        .map(|(path, _)| {
+            fs::read_to_string(path)
+                .map_err(|error| format!("read {} before update: {error}", display_path(path)))
+        })
+        .collect::<Result<_, _>>()?;
+    for (index, (path, body)) in files.iter().enumerate() {
+        if let Err(error) = write_text(path, body) {
+            let mut rollback_errors = Vec::new();
+            for ((rollback_path, _), original) in files.iter().zip(&originals).take(index + 1) {
+                if let Err(rollback_error) = write_text(rollback_path, original) {
+                    rollback_errors
+                        .push(format!("{}: {rollback_error}", display_path(rollback_path)));
+                }
+            }
+            let rollback_suffix = if rollback_errors.is_empty() {
+                String::new()
+            } else {
+                format!("; rollback failed: {}", rollback_errors.join("; "))
+            };
+            return Err(format!(
+                "publish {}: {error}{rollback_suffix}",
+                display_path(path)
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn run_check(flags: FlagSet, streams: &mut CommandStreams<'_>) -> u8 {
     let (context, plan_id, paths) = parsed_or_return!(existing_plan(&flags, streams.error));
 
@@ -980,6 +1187,8 @@ fn submitted_research(flags: &FlagSet) -> Result<Option<SubmittedResearch>, Stri
         "claim",
         "source-url",
         "source-type",
+        "source-version",
+        "required-version",
         "publication-date",
         "retrieved-at",
         "support",
@@ -1018,6 +1227,10 @@ fn submitted_research(flags: &FlagSet) -> Result<Option<SubmittedResearch>, Stri
         claim: required("claim", claim)?,
         source_url: required("source-url", source_url)?,
         source_type: required("source-type", source_type)?,
+        source_version: Some(flags.string_value("source-version").trim().to_string())
+            .filter(|value| !value.is_empty()),
+        required_version: Some(flags.string_value("required-version").trim().to_string())
+            .filter(|value| !value.is_empty()),
         publication_date,
         retrieved_at: required("retrieved-at", retrieved_at)?,
         support: required("support", support)?,
@@ -1082,6 +1295,8 @@ fn submitted_research_bundle(submitted: SubmittedResearch) -> ResearchBundle {
         "sourceId": source_id,
         "sourceUrl": submitted.source_url,
         "sourceType": submitted.source_type,
+        "sourceVersion": submitted.source_version,
+        "requiredVersion": submitted.required_version,
         "publicationDate": publication_date,
         "retrievedAt": submitted.retrieved_at,
         "support": submitted.support,
@@ -1324,6 +1539,7 @@ fn vague_terms(request: &str) -> Vec<&'static str> {
 #[derive(Debug, Clone)]
 struct ComplexityClassification {
     label: &'static str,
+    request_class: &'static str,
     planning_required: bool,
     signals: Vec<String>,
 }
@@ -1371,6 +1587,54 @@ fn classify_request(request: &str) -> ComplexityClassification {
         "standard"
     };
     let mut signals = signals;
+    let has_word = |term: &str| {
+        normalized
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|word| word == term)
+    };
+    let critical = [
+        "auth",
+        "authentication",
+        "security",
+        "sandbox",
+        "credential",
+        "credentials",
+        "secret",
+        "delete",
+        "payment",
+    ]
+    .iter()
+    .any(|term| has_word(term));
+    let architectural = [
+        "protocol",
+        "api",
+        "schema",
+        "database",
+        "migration",
+        "architecture",
+        "persistence",
+        "memory",
+    ]
+    .iter()
+    .any(|term| has_word(term));
+    let request_class = if critical {
+        "CRITICAL"
+    } else if architectural {
+        "ARCHITECTURAL"
+    } else if signals.is_empty()
+        && words.len() <= 12
+        && ["typo", "formatting", "spelling"]
+            .iter()
+            .any(|term| has_word(term))
+    {
+        "TRIVIAL"
+    } else if !signals.is_empty() || !vague_terms(request).is_empty() || words.len() > 40 {
+        "NORMAL"
+    } else if words.len() <= 12 {
+        "SMALL"
+    } else {
+        "NORMAL"
+    };
     if words.len() > 40 {
         signals.push("scope:multi-step".to_string());
     } else if words.len() <= 12 {
@@ -1378,7 +1642,8 @@ fn classify_request(request: &str) -> ComplexityClassification {
     }
     ComplexityClassification {
         label,
-        planning_required: label != "trivial",
+        request_class,
+        planning_required: !matches!(request_class, "TRIVIAL" | "SMALL"),
         signals,
     }
 }
@@ -1441,6 +1706,7 @@ fn initial_artifacts(
             "clarificationRequired": clarification_required,
             "complexityClass": complexity.label,
             "taskClass": complexity.label,
+            "requestClass": complexity.request_class,
             "planningRequired": complexity.planning_required,
             "complexitySignals": complexity.signals,
             "researchStatus": "pending",
@@ -3206,6 +3472,24 @@ fn write_status(paths: &PlanPaths, status: &Value, stage: &str) -> Result<(), St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn request_classes_use_risk_before_length() {
+        for (request, expected) in [
+            ("Correct a spelling typo", "TRIVIAL"),
+            ("Fix the parser boundary", "SMALL"),
+            ("Make it fast", "NORMAL"),
+            ("Change the MCP protocol", "ARCHITECTURAL"),
+            ("Fix authentication", "CRITICAL"),
+        ] {
+            let class = classify_request(request);
+            assert_eq!(class.request_class, expected, "{request}");
+            assert_eq!(
+                class.planning_required,
+                !matches!(expected, "TRIVIAL" | "SMALL")
+            );
+        }
+    }
 
     #[test]
     fn vague_terms_match_whole_words_only() {

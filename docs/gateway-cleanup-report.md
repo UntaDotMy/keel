@@ -1,13 +1,14 @@
 <!--
 Purpose: Record the repository cleanup performed for the production context gateway work, per the implementation plan's cleanup-report requirement.
 Caller: Operators and reviewers validating that dead and duplicate material was removed rather than documented.
-Dependencies: The gateway implementation commits on task/production-context-gateway-v4.
+Dependencies: The gateway implementation and host-conformance commits on the
+final-agent-operating-system delivery branch.
 Main Functions: None; this file is a report.
 Side Effects: None.
 -->
 # Gateway Cleanup Report
 
-Scope: the production context gateway hardening on `task/production-context-gateway-v4`,
+Scope: the production context gateway hardening on `task/final-agent-operating-system`,
 compared against `origin/main`. Everything below was verified by running the named
 command, not by reading and assuming.
 
@@ -48,7 +49,7 @@ These were found by the new tests and benchmarks, not by reading and assuming.
 | A rejected research submission destroyed a complete bundle | A stale source submission replaced 7 sources with 1 and reset the architecture note | Validation runs before the write; a rejected submission leaves the bundle byte-identical. |
 | A non-lock index failure whose text merely said "busy" was downgraded to a degraded lock state | `lock_classification_uses_the_typed_code_not_the_message_text` | The lock decision reads the typed SQLite error code. |
 | Freshness used one universal 90-day window for every source type | Plan §22 forbids this; `per_source_type_windows_reject_fast_moving_evidence_sooner` | Per-source-type windows: issue 7 days, repository 30 days, official-doc 90 days. |
-| The catalog ledger reported the emitted handshake cost as the full-catalog cost | The default handshake measures 671 tokens while the ledger reported 1240 | Both numbers are now labelled for what each measures. |
+| The catalog ledger reported the emitted handshake cost as the full-catalog cost | The default handshake measures 711 tokens while the ledger reports 1240 | Both numbers are now labelled for what each measures. |
 
 ## Removed code
 
@@ -99,8 +100,30 @@ One canonical owner per responsibility holds. Verified by inspection, not by ass
 
 ## Updated host adapters
 
-None. No adapter contract changed. `bun test tests/host-adapter-contracts.test.ts`
-remains green (13 pass).
+No adapter contract changed. `bun test tests/host-adapter-contracts.test.ts`
+remains green (13 pass). The native `keel host conformance --json` command now
+exercises every `GOVERNED` matrix row through the shared command-proxy owner;
+it intentionally leaves partial/unsupported rows as `not_run`.
+
+## Packaged release evidence
+
+Phase 10's packaged-release obligation is **NotRun** for this source snapshot.
+
+- The local verification used `target/debug/keel.exe`; no packaged archive or
+  `target/release/keel(.exe)` smoke result was produced in this audit.
+- `.github/release-smoke.mjs` and the `release-smoke` matrix in
+  `.github/workflows/release.yml` define the six-platform packaged install and
+  MCP restart/recovery checks, but the current PR's exact-head `Validate` run is
+  not a substitute for a terminal `Release` run.
+- The release proof workflow currently snapshots `docs/benchmark-scorecard.json`.
+  That scorecard is the historical workflow suite, so a release must also carry
+  the current gateway benchmark block from
+  `bench/competitor/comparative-compaction.json` (or an equivalent generated
+  artifact) before its benchmark archive can be treated as current.
+
+Do not report the packaged-release or full-release gate as **Pass** until the
+release workflow has completed all six smoke lanes and published the required
+proof bundle.
 
 ## Updated docs
 
@@ -111,8 +134,13 @@ remains green (13 pass).
 - `bench/competitor/comparative-compaction.json`: adds the reliability metrics, the
   five-profile catalog benchmark, and the fifth skill profile.
 - `bench/competitor/skill-selection-benchmark.json` and
-  `bench/competitor/eval-compaction-report.json`: regenerated from the current binary so
-  the artifacts match the code that produces them.
+  `bench/competitor/eval-compaction-report.json`: retained Phase 12 snapshots;
+  their stable aggregate metrics still match the current `keel eval --json` and
+  `keel skill-eval --benchmark --json` output, while runtime-dependent latency
+  fields are not treated as fixed claims.
+- `bench/competitor/comparative-compaction.json`: retains the Phase 12 snapshot
+  and adds a labelled `current_runtime_verification` block from source commit
+  `30ecfe2`.
 
 ## New tests
 
@@ -163,6 +191,8 @@ remains green (13 pass).
   `reacquisitionCalls`, `resourceCostTokensMeasured`, `localRoutingCpuMs`,
   `wrongActivationRate`, and `missedActivationRate`.
 - `keel host matrix [--host] [--json]`: the §18 machine-readable host capability matrix.
+- `keel host conformance [--host] [--recovery-dir] [--json]`: the native eight-stage
+  evidence-chain check used by the integration test and CI release gate.
 
 ## Module-size decision (plan §26)
 
@@ -195,22 +225,17 @@ change can revisit it with the same evidence.
 
 ## Remaining known limitations
 
-1. **Keel is a legacy-era MCP server, not a dual-era one.** The current MCP
-   revision (`2026-07-28`) names three implementation eras: *modern* (per-request
-   `_meta` version, `server/discover`, `resultType`, and `ttlMs`/`cacheScope` on
-   list results), *legacy* (`initialize` handshake, `2025-11-25` and earlier), and
-   *dual-era* (both). Keel implements `2025-11-25` plus the earlier `2024-11-05`,
-   which it rejects on Streamable HTTP with an explicit migration message rather
-   than mis-serving. Per that revision's own compatibility matrix, a legacy client
-   interoperates with Keel and a modern `2026-07-28` client does not. Becoming
-   dual-era is a scoped feature, not a defect fix; it is recorded as verified
-   research `CLM-007` in the plan evidence.
-   Keel does now emit the modern *result* fields (`resultType` on every result and
-   `ttlMs`/`cacheScope` on `tools/list`), so a peer that reads those fields sees the
-   shape it expects. That narrows the gap but does not close it: era membership is
-   decided by the handshake and per-request versioning, neither of which keel has.
+1. **Historical protocol note (superseded by the modern transport change).** This
+   report captured the pre-modern baseline: an MCP `2025-11-25` initialize-based
+   server with modern-looking result fields but no per-request versioning. The
+   current owner in `mcp/mod.rs` and `mcp/http.rs` targets `2026-07-28` only,
+   rejects the retired handshake/session path, validates request metadata and
+   HTTP routing headers, and has focused modern conformance tests. Keep this
+   paragraph as baseline evidence; use `docs/context-gateway.md` and
+   `docs/plan-traceability.md` for current behavior and the remaining hosted
+   release gates.
 2. **The fixed-context ledger now reports the emitted handshake separately.**
-   `mcp.tools_list.handshake` measures the dispatcher's own default response (687
+   `mcp.tools_list.handshake` measures the dispatcher's own default response (711
    tokens against the packer's 1200-token hard limit), and `mcp.tools_list.catalog`
    keeps the complete-catalog cost (1240 against its ratified 1364) as its own
    labelled row. The two are no longer conflated. Changing the ratified catalog
@@ -229,10 +254,13 @@ change can revisit it with the same evidence.
    cursors, catalog mutation between pages, cursor expiry, duplicate request ids,
    transport header and media-type abuse, and contended index writes. The transport and
    session concurrency matrix beyond those cases is not exhaustively enumerated.
-7. **Per-host conformance runs are still source-level.** The host capability matrix is
-   machine-readable and the adapter contracts are covered by
-   `tests/host-adapter-contracts.test.ts`, but there is no live conformance run against
-   a host that lacks the interception surface.
+7. **Per-host conformance is native-fixture proof, not live host proof.** The host
+   capability matrix is machine-readable; `tests/host-adapter-contracts.test.ts`
+   covers adapter contracts; and `tests/host_conformance.rs` plus CI run the
+   governed command-proxy fixture through all eight evidence stages. There is
+   still no live conformance run against a third-party host process or a host
+   that lacks the interception surface, so those rows remain explicitly
+   `not_run` rather than passing by declaration.
 8. **Performance is measured across ten declared pipeline stages.** Catalog build latency
    is recorded per profile, and per-case reduce cost in microseconds is recorded for the
    reducers. In addition, `keel stats latency --json` separately measures all ten §33

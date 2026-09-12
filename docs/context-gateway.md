@@ -28,13 +28,15 @@ as one unbounded response. `keel/discover` returns ranked compact metadata and
 `keel/activate` writes a session/workspace activation receipt. The default profile
 is `core`; `full` remains an explicit compatibility/debug choice.
 
-Every result carries the `resultType` that revision `2026-07-28` requires, and
-`tools/list` pages additionally carry the caching hints that revision requires of
-list results: `ttlMs` (fresh for as long as the cursor walk the page belongs to
-is valid, so there is one TTL notion in the system) and `cacheScope: "public"`
-(the catalog is identical for every caller; keel exposes no per-caller tool
-filtering). Both fields are inside the payload the packer measures, so a page
-that only fits without them is paginated instead of emitted over budget.
+Every modern result carries the `resultType` and server identity metadata that
+revision `2026-07-28` requires. `tools/list` pages additionally carry the
+caching hints required of list results: `ttlMs` (fresh for as long as the cursor
+walk the page belongs to is valid, so there is one TTL notion in the system)
+and `cacheScope: "private"` because cursors are bound to the authoritative
+workspace/session context. Resource list/read results carry bounded private
+cache hints as well. These fields are inside the payload each owner measures,
+so a page that only fits without them is paginated instead of emitted over
+budget.
 
 The current ratified `core` profile advertises 17 stable tools and defers 20
 specialized tools. The live catalog count and exact `o200k_base` footprint are
@@ -48,6 +50,15 @@ Every governed command receives an immutable execution identity and one of
 `failed`, or `unknown`. Only `executed` and `reduced` are successful states.
 Host capability declarations are attached to JSON results; an unregistered host
 cannot claim interception.
+
+The operator conformance surface is `keel host conformance --json`. It runs a
+bounded platform fixture through this same proxy owner for each `GOVERNED` row
+in the host matrix and requires all eight stages (`host_action` through
+`bounded_result_returned`) to pass. `PARTIALLY_GOVERNED` and `UNSUPPORTED`
+rows remain `not_run` and return a non-zero exit, so a capability declaration
+cannot be mistaken for live third-party-host proof. The recovery directory and
+raw artifact ids in each report keep the evidence inspectable after the compact
+report is returned.
 
 RawStore entries are atomic, capped, namespace-capable, and contain a versioned
 integrity manifest. Reads reject traversal and symlink artifacts and verify the
@@ -86,12 +97,12 @@ adapters still expose only the capabilities they can prove; unsupported host
 boundaries remain explicitly unprotected rather than being represented as a
 successful governed path.
 
-Protocol era is stated the same way. The MCP revision in force (`2026-07-28`)
-distinguishes *modern* servers (per-request `_meta` version, `server/discover`,
-`resultType`, `ttlMs`/`cacheScope` on list results), *legacy* servers
-(`initialize` handshake), and *dual-era* servers that serve both. Keel is a
-legacy-era server speaking `2025-11-25`, and it rejects the older `2024-11-05`
-initialize on Streamable HTTP with an explicit migration message instead of
-mis-serving it. A legacy client therefore interoperates and a modern one does
-not; no request silently mixes the two eras. Cleanup status and the full
-limitation list are in [`gateway-cleanup-report.md`](gateway-cleanup-report.md).
+Protocol era is enforced at one owner. Keel targets MCP `2026-07-28`: every
+request with an id must carry the version and client-capability metadata, HTTP
+requests must carry matching routing headers, `server/discover` is handshake-free,
+and results expose the required completion/cache fields. The retired
+`initialize` handshake, `MCP-Session-Id`, SSE state, and silent protocol
+downgrade are not accepted; unsupported revisions receive an explicit error.
+Stdio and HTTP share the same dispatcher and context firewall, while HTTP
+remains stateless per request. The broader cleanup status and remaining
+limitations are in [`gateway-cleanup-report.md`](gateway-cleanup-report.md).

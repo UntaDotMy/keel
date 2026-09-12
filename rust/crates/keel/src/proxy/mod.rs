@@ -12,6 +12,7 @@ pub mod context;
 pub mod event_log;
 pub mod execution;
 pub mod filters;
+pub mod host_conformance;
 pub mod injection_guard;
 pub mod raw_store;
 pub mod registry;

@@ -77,7 +77,8 @@ In addition to workflow scenarios, the repository measures token efficiency at r
 - Comparative analysis metrics: [`bench/competitor/comparative-compaction.json`](../bench/competitor/comparative-compaction.json)
 - Measured compaction savings across 7 genuine toolchain fixtures: **27.28% overall** (with `cargo test` pass achieving **79.26%** savings).
 - Reducer reliability over the same fixtures: **100% critical-evidence retention**, **100% failure-evidence retention**, and a **0% reacquisition rate**, so the saving does not cost the model the evidence it needs to act.
-- Tiered MCP catalog profile: reduces discovery footprint from 2,929 tokens down to **1,240 tokens** (**57.66% reduction**), while retaining direct dispatchability for all 37 tools.
+- Historical Phase 12 MCP catalog snapshot: 2,929 complete-catalog tokens down to **1,240** (**57.66% reduction**), while retaining direct dispatchability for all 37 tools. The historical values remain in the comparison artifact for auditability.
+- Current target-runtime MCP verification: 2,944 complete-catalog tokens down to **1,240** (**57.88% reduction**, 1,704 tokens saved); emitted default first pages are 1,483 down to **711** (**52.06% reduction**, 772 tokens saved). The current measurements and source commit are recorded in [`bench/competitor/comparative-compaction.json`](../bench/competitor/comparative-compaction.json) under `current_runtime_verification`.
 
 `keel eval --json` reports per-case `evidenceRetained`/`evidenceTotal`, `outcomeVisible`,
 `reacquisitionRequired`, and `reduceMicros` alongside the token counts, plus the
@@ -100,10 +101,11 @@ reports the exact first-page cost, pages to traverse, unique tools reached, and
 discovery coverage across twelve representative task families. It fails closed when a
 page exceeds its budget, traversal duplicates or omits a tool, or discovery misses a task.
 
-The current gateway baseline is archived in
-[`docs/benchmarks/context-gateway-baseline.json`](./benchmarks/context-gateway-baseline.json).
-Reproduce the context and catalog measurements with `keel stats context --json` and
-`keel stats tools --json`; the artifact deliberately records quality, latency,
+The 2026-09-09 gateway baseline is retained in
+[`docs/benchmarks/context-gateway-baseline.json`](./benchmarks/context-gateway-baseline.json),
+with a clearly labelled current-runtime verification block for source commit
+`30ecfe2`. Reproduce the context and catalog measurements with `keel stats context --json` and
+`keel stats tools --benchmark --json`; the artifact deliberately records quality, latency,
 turn-count, and provider-cache gates that must be ratified before changing the
 catalog profile. A catalog footprint alone is not evidence of a successful
 profile transition.

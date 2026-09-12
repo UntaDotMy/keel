@@ -19,6 +19,33 @@
     "latency_and_turns_required": true,
     "cached_input_required_when_provider_reports": true
   },
+  "currentRuntimeVerification": {
+    "verifiedAt": "2026-09-12T00:06:08Z",
+    "sourceCommit": "30ecfe278b9f5e519e5bcd3a39cff9188973cb82",
+    "binary": "target/debug/keel.exe",
+    "commands": [
+      "keel stats context --json",
+      "keel stats tools --benchmark --json"
+    ],
+    "status": "passed",
+    "measurements": {
+      "mcp_tool_count": 37,
+      "mcp_eager_tool_count": 17,
+      "mcp_deferred_tool_count": 20,
+      "mcp_handshake_tokens": 711,
+      "mcp_handshake_budget_tokens": 1200,
+      "mcp_catalog_tokens": 1240,
+      "mcp_catalog_budget_tokens": 1364,
+      "mcp_full_complete_catalog_tokens": 2944,
+      "mcp_full_first_page_tokens": 1483,
+      "mcp_tiered_first_page_tokens": 711,
+      "mcp_complete_catalog_reduction_tokens": 1704,
+      "mcp_complete_catalog_reduction_percent": 57.88,
+      "mcp_emitted_first_page_reduction_tokens": 772,
+      "mcp_emitted_first_page_reduction_percent": 52.06
+    },
+    "claim_boundary": "This is a local runtime verification of source commit 30ecfe2 using the debug binary. It is not hosted provider billing, a packaged release smoke result, or a replacement for the historical baseline above."
+  },
   "host_capabilities": {
     "claude-code": {
       "pre_tool_intercept": true,

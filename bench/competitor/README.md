@@ -44,12 +44,12 @@ cargo run --locked --bin keel -- eval --json
 
 Keel provides 37 Model Context Protocol tools. To prevent large initial discovery payloads from exhausting host context windows and triggering transport timeouts, Keel implements a tiered catalog profile:
 
-- **Tiered Profile (Default)**: Advertises 17 core eager tools in `tools/list`. The emitted handshake consumes **671 tokens**; the fixed-context ledger ratifies **1,364 tokens** for the complete tiered catalog at full schema depth.
-- **Full Profile (`KEEL_MCP_CATALOG_PROFILE=full`)**: Advertises all 37 tools. The emitted handshake consumes **1,443 tokens**; the ratified budget for the complete full-schema catalog is **3,222 tokens**.
+- **Tiered Profile (Default)**: Advertises 17 core eager tools in `tools/list`. The current target runtime emits a **711-token** handshake; the fixed-context ledger ratifies **1,364 tokens** for the complete tiered catalog at full schema depth.
+- **Full Profile (`KEEL_MCP_CATALOG_PROFILE=full`)**: Advertises all 37 tools. The current target runtime emits a **1,483-token** handshake and measures **2,944 tokens** for the complete full-schema catalog. The current fixed-context ledger has no separate full-profile ratified row; the historical comparison artifact's 3,222-token value is retained only as a Phase 12 snapshot.
 - **Deferred tools stay reachable**: a client that needs a deferred tool either pages through `nextCursor` or names it through `keel/discover`, which covers all 12 representative task families.
 - **Execution Parity**: All 37 tools remain registered, valid, and directly dispatchable through `tools/call` in both profiles.
 
-The two numbers measure different things on purpose: the emitted handshake is what a client actually receives, while the ledger budget bounds the complete catalog the packer may ever emit. Reproduce the emitted cost per profile with `keel stats tools --benchmark --json`, and the ratified ledger with `keel stats context --json`.
+The two numbers measure different things on purpose: the emitted handshake is what a client actually receives, while the ledger budget bounds the complete tiered catalog the packer may ever emit. Reproduce the emitted cost per profile with `keel stats tools --benchmark --json`, and the ratified ledger with `keel stats context --json`. The previous Phase 12 671/1,443 measurements remain in `comparative-compaction.json`'s historical snapshot; current measurements are recorded in its `current_runtime_verification` block. Pagination profiles include an expiry-bearing opaque cursor, so their first-page token count is reported as observed samples/ranges rather than a falsely fixed constant.
 
 Reproduction command:
 ```powershell

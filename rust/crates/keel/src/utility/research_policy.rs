@@ -15,6 +15,98 @@ use serde_json::Value;
 /// Fallback window for an externally fresh source whose type declares none.
 pub(crate) const DEFAULT_MAX_AGE_DAYS: i64 = 90;
 
+/// Hard bounds for the compact research artifact. These mirror the existing
+/// recall input/result limits: research may retain the evidence needed to
+/// explain a decision, but cannot turn a plan artifact into a raw source dump.
+pub(crate) const MAX_RESEARCH_ARTIFACT_BYTES: usize = 32 * 1024;
+pub(crate) const MAX_RESEARCH_QUERY_BYTES: usize = 4 * 1024;
+pub(crate) const MAX_RESEARCH_SOURCES: usize = 8;
+pub(crate) const MAX_RESEARCH_CLAIMS: usize = 16;
+pub(crate) const MAX_RESEARCH_CONFLICTS: usize = 8;
+pub(crate) const MAX_RESEARCH_USED_BY: usize = 32;
+pub(crate) const MAX_RESEARCH_REFERENCES: usize = 32;
+pub(crate) const MAX_RESEARCH_ID_BYTES: usize = 128;
+pub(crate) const MAX_RESEARCH_URL_BYTES: usize = 2 * 1024;
+pub(crate) const MAX_RESEARCH_EVIDENCE_BYTES: usize = 4 * 1024;
+pub(crate) const MAX_RESEARCH_CLAIM_BYTES: usize = 4 * 1024;
+pub(crate) const MAX_RESEARCH_RATIONALE_BYTES: usize = 4 * 1024;
+
+/// The evidence class required by the submitted research query.
+///
+/// This is intentionally a small, exact-token classifier. It does not claim
+/// to understand arbitrary natural language; it provides a conservative
+/// admission boundary so local checkout evidence cannot masquerade as current
+/// external evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ResearchRequirement {
+    ExternalCurrent,
+    LocalCurrent,
+    Stable,
+}
+
+pub(crate) fn classify_research_requirement(request: &str) -> ResearchRequirement {
+    let words: BTreeSet<String> = request
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(|word| word.to_ascii_lowercase())
+        .collect();
+    let has_any = |terms: &[&str]| terms.iter().any(|term| words.contains(*term));
+    let external_terms = [
+        "advisory",
+        "api",
+        "cloud",
+        "dependency",
+        "endpoint",
+        "external",
+        "library",
+        "mcp",
+        "package",
+        "platform",
+        "product",
+        "protocol",
+        "release",
+        "sdk",
+        "security",
+        "service",
+        "specification",
+        "standard",
+        "vendor",
+        "version",
+        "vulnerability",
+        "web",
+    ];
+    let local_terms = [
+        "branch",
+        "checkout",
+        "code",
+        "crate",
+        "file",
+        "filesystem",
+        "implementation",
+        "local",
+        "path",
+        "repo",
+        "repository",
+        "source",
+        "test",
+        "tests",
+        "workspace",
+    ];
+    let current_terms = [
+        "current", "latest", "live", "newest", "now", "recent", "today",
+    ];
+
+    // Explicit external nouns win over local wording (for example, "current
+    // repository dependency state" still depends on external package facts).
+    if has_any(&external_terms) || (has_any(&current_terms) && !has_any(&local_terms)) {
+        ResearchRequirement::ExternalCurrent
+    } else if has_any(&local_terms) || has_any(&current_terms) {
+        ResearchRequirement::LocalCurrent
+    } else {
+        ResearchRequirement::Stable
+    }
+}
+
 /// Per-source-type freshness windows. The plan forbids one universal window for
 /// every fact: evidence whose subject changes fast must be re-checked sooner
 /// than evidence that describes a released artifact.
@@ -101,19 +193,52 @@ pub(crate) fn validate_research_artifact(
     now: DateTime<Utc>,
 ) -> Issues {
     let mut issues = Vec::new();
+    validate_artifact_bounds(research, &mut issues);
     if string_field(research, "status") != Some("complete") {
         issues.push("research.json status is not complete".to_string());
     }
 
+    let query = required_field(research, "query", "research.json", &mut issues);
+    let research_source = required_field(research, "researchSource", "research.json", &mut issues);
+    validate_bounded_text(
+        research,
+        "researchSource",
+        "research.json",
+        MAX_RESEARCH_ID_BYTES,
+        &mut issues,
+    );
+    let truncated = match research.get("truncated") {
+        Some(Value::Bool(value)) => Some(*value),
+        Some(_) => {
+            issues.push("research.json truncated must be a boolean".to_string());
+            None
+        }
+        None => {
+            issues.push("research.json has no truncated flag".to_string());
+            None
+        }
+    };
+    if truncated == Some(true) {
+        issues.push("research.json is truncated; complete research must be refreshed".to_string());
+    }
+
     let mut source_ids = BTreeSet::new();
-    match value_array(research, "sources") {
+    let sources = match value_array(research, "sources") {
         Some(sources) if !sources.is_empty() => {
-            for source in sources {
+            for source in sources.iter().take(MAX_RESEARCH_SOURCES) {
                 validate_source(source, uses, policy, now, &mut source_ids, &mut issues);
             }
+            Some(&sources[..sources.len().min(MAX_RESEARCH_SOURCES)])
         }
-        _ => issues.push("research.json has no source records".to_string()),
-    }
+        Some(_) => {
+            issues.push("research.json has no source records".to_string());
+            Some(&[] as &[Value])
+        }
+        None => {
+            issues.push("research.json has no source records".to_string());
+            None
+        }
+    };
     if let Some(request_source) = research.get("requestSource") {
         validate_source(
             request_source,
@@ -125,6 +250,15 @@ pub(crate) fn validate_research_artifact(
         );
     }
 
+    if let (Some(query), Some(research_source), Some(sources)) = (query, research_source, sources) {
+        validate_research_origin(
+            research_source,
+            classify_research_requirement(query),
+            sources,
+            &mut issues,
+        );
+    }
+
     let Some(claims) = value_array(research, "claims") else {
         issues.push("research.json has no claims array".to_string());
         return issues;
@@ -132,11 +266,248 @@ pub(crate) fn validate_research_artifact(
     if claims.is_empty() {
         issues.push("research.json has no factual claims".to_string());
     }
+    let bounded_claims = &claims[..claims.len().min(MAX_RESEARCH_CLAIMS)];
     let mut claim_ids = BTreeSet::new();
-    for claim in claims {
+    for claim in bounded_claims {
         validate_claim(claim, uses, &source_ids, &mut claim_ids, &mut issues);
     }
+    validate_claim_relations(research, bounded_claims, &claim_ids, &mut issues);
     issues
+}
+
+fn validate_artifact_bounds(research: &Value, issues: &mut Issues) {
+    match serde_json::to_vec(research) {
+        Ok(serialized) if serialized.len() > MAX_RESEARCH_ARTIFACT_BYTES => issues.push(format!(
+            "research.json exceeds the {MAX_RESEARCH_ARTIFACT_BYTES}-byte compact-artifact bound"
+        )),
+        Err(error) => issues.push(format!(
+            "research.json cannot be serialized for bounds: {error}"
+        )),
+        Ok(_) => {}
+    }
+    validate_optional_bounded_text(
+        research,
+        "query",
+        "research.json",
+        MAX_RESEARCH_QUERY_BYTES,
+        issues,
+    );
+    for (field_name, maximum) in [
+        ("sources", MAX_RESEARCH_SOURCES),
+        ("claims", MAX_RESEARCH_CLAIMS),
+        ("conflicts", MAX_RESEARCH_CONFLICTS),
+    ] {
+        if let Some(value) = research.get(field_name) {
+            match value.as_array() {
+                Some(values) if values.len() > maximum => issues.push(format!(
+                    "research.json {field_name} count {} exceeds the {maximum}-item bound",
+                    values.len()
+                )),
+                Some(_) => {}
+                None => issues.push(format!("research.json {field_name} must be an array")),
+            }
+        }
+    }
+}
+
+fn validate_research_origin(
+    origin: &str,
+    requirement: ResearchRequirement,
+    sources: &[Value],
+    issues: &mut Issues,
+) {
+    if !matches!(origin, "host" | "cache" | "local-index") {
+        issues.push(format!(
+            "research.json researchSource {origin:?} is unsupported; expected host, cache, or local-index"
+        ));
+        return;
+    }
+
+    let external_sources = sources
+        .iter()
+        .filter(|source| {
+            !matches!(
+                string_field(source, "sourceType"),
+                Some("local-code" | "user-request")
+            )
+        })
+        .count();
+    match origin {
+        "local-index" => {
+            if sources.iter().any(|source| {
+                string_field(source, "sourceType") != Some("local-code")
+                    || string_field(source, "freshness") != Some("local-only")
+            }) {
+                issues.push(
+                    "research.json local-index origin requires only local-code/local-only sources"
+                        .to_string(),
+                );
+            }
+            if requirement == ResearchRequirement::ExternalCurrent {
+                issues.push(
+                    "current external research cannot use local-index evidence; host research or a fresh cache record is required"
+                        .to_string(),
+                );
+            }
+        }
+        "cache" => {
+            for source in sources {
+                if string_field(source, "cacheId").is_none() {
+                    issues.push(format!(
+                        "{} cache-origin source has no cacheId",
+                        string_field(source, "sourceId").unwrap_or("research source")
+                    ));
+                }
+            }
+            if requirement == ResearchRequirement::ExternalCurrent && external_sources == 0 {
+                issues.push(
+                    "current external research cache evidence must include an external source"
+                        .to_string(),
+                );
+            }
+        }
+        "host" if requirement == ResearchRequirement::ExternalCurrent && external_sources == 0 => {
+            issues.push(
+                "current external research requires an external host source; local-only evidence is insufficient"
+                    .to_string(),
+            );
+        }
+        "host" => {}
+        _ => unreachable!("research origin was checked above"),
+    }
+}
+
+fn validate_bounded_text(
+    value: &Value,
+    field_name: &str,
+    id: &str,
+    maximum_bytes: usize,
+    issues: &mut Issues,
+) {
+    if let Some(field) = value.get(field_name) {
+        match field.as_str() {
+            Some(text) if text.len() > maximum_bytes => issues.push(format!(
+                "{id} {field_name} exceeds the {maximum_bytes}-byte bound"
+            )),
+            Some(_) => {}
+            None => issues.push(format!("{id} {field_name} must be a string")),
+        }
+    }
+}
+
+fn validate_optional_bounded_text(
+    value: &Value,
+    field_name: &str,
+    id: &str,
+    maximum_bytes: usize,
+    issues: &mut Issues,
+) {
+    if value.get(field_name).is_some_and(|field| !field.is_null()) {
+        validate_bounded_text(value, field_name, id, maximum_bytes, issues);
+    }
+}
+
+fn validate_bounded_string_array(
+    value: &Value,
+    field_name: &str,
+    id: &str,
+    maximum_items: usize,
+    maximum_item_bytes: usize,
+    issues: &mut Issues,
+) {
+    let Some(field) = value.get(field_name) else {
+        return;
+    };
+    let Some(items) = field.as_array() else {
+        issues.push(format!("{id} {field_name} must be an array"));
+        return;
+    };
+    if items.len() > maximum_items {
+        issues.push(format!(
+            "{id} {field_name} count {} exceeds the {maximum_items}-item bound",
+            items.len()
+        ));
+    }
+    for item in items {
+        match item.as_str() {
+            Some(text) if text.len() > maximum_item_bytes => issues.push(format!(
+                "{id} {field_name} item exceeds the {maximum_item_bytes}-byte bound"
+            )),
+            Some(_) => {}
+            None => issues.push(format!("{id} {field_name} items must be strings")),
+        }
+    }
+}
+
+fn validate_claim_relations(
+    research: &Value,
+    claims: &[Value],
+    ids: &BTreeSet<&str>,
+    issues: &mut Issues,
+) {
+    for claim in claims {
+        let id = string_field(claim, "claimId").unwrap_or_default();
+        let mut next = string_field(claim, "supersedes");
+        let mut visited = BTreeSet::from([id]);
+        while let Some(previous) = next {
+            if !ids.contains(previous) {
+                issues.push(format!("{id} supersedes unknown claim {previous}"));
+                break;
+            }
+            if !visited.insert(previous) {
+                issues.push(format!("{id} has a supersession cycle"));
+                break;
+            }
+            next = claims
+                .iter()
+                .find(|item| string_field(item, "claimId") == Some(previous))
+                .and_then(|item| string_field(item, "supersedes"));
+        }
+    }
+    let Some(conflicts) = research.get("conflicts") else {
+        return;
+    };
+    let Some(conflicts) = conflicts.as_array() else {
+        issues.push("research conflicts must be an array".into());
+        return;
+    };
+    for conflict in conflicts.iter().take(MAX_RESEARCH_CONFLICTS) {
+        validate_bounded_string_array(
+            conflict,
+            "claimIds",
+            "research conflict",
+            MAX_RESEARCH_REFERENCES,
+            MAX_RESEARCH_ID_BYTES,
+            issues,
+        );
+        let references = string_array(conflict, "claimIds");
+        let distinct: BTreeSet<&str> = references.iter().map(String::as_str).collect();
+        if distinct.len() < 2 || distinct.iter().any(|id| !ids.contains(id)) {
+            issues.push("research conflict requires at least two distinct known claimIds".into());
+        }
+        if string_field(conflict, "status") != Some("resolved") {
+            issues.push("research has an unresolved claim conflict".into());
+            continue;
+        }
+        required_field(conflict, "rationale", "research conflict", issues);
+        validate_optional_bounded_text(
+            conflict,
+            "rationale",
+            "research conflict",
+            MAX_RESEARCH_RATIONALE_BYTES,
+            issues,
+        );
+        let selected = required_field(conflict, "resolvedByClaimId", "research conflict", issues);
+        if !selected.is_some_and(|id| {
+            ids.contains(id)
+                && claims.iter().any(|claim| {
+                    string_field(claim, "claimId") == Some(id)
+                        && string_field(claim, "classification") == Some("verified")
+                })
+        }) {
+            issues.push("research conflict resolution requires a verified claim".into());
+        }
+    }
 }
 
 fn validate_source<'a>(
@@ -158,11 +529,29 @@ fn validate_source<'a>(
     let source_url = required_field(source, "sourceUrl", id, issues);
     required_field(source, "support", id, issues);
     let freshness = required_field(source, "freshness", id, issues);
+    validate_bounded_text(source, "sourceId", id, MAX_RESEARCH_ID_BYTES, issues);
+    validate_bounded_text(source, "sourceType", id, MAX_RESEARCH_ID_BYTES, issues);
+    validate_bounded_text(source, "sourceUrl", id, MAX_RESEARCH_URL_BYTES, issues);
+    validate_bounded_text(source, "support", id, MAX_RESEARCH_EVIDENCE_BYTES, issues);
+    validate_optional_bounded_text(source, "sourceVersion", id, MAX_RESEARCH_ID_BYTES, issues);
+    validate_optional_bounded_text(source, "requiredVersion", id, MAX_RESEARCH_ID_BYTES, issues);
+    validate_optional_bounded_text(source, "cacheId", id, MAX_RESEARCH_ID_BYTES, issues);
+    validate_bounded_string_array(
+        source,
+        "usedBy",
+        id,
+        MAX_RESEARCH_USED_BY,
+        MAX_RESEARCH_ID_BYTES,
+        issues,
+    );
     validate_used_by(source, id, uses, issues);
     validate_publication_date(source, id, issues);
 
     let retrieved_at = required_field(source, "retrievedAt", id, issues)
         .and_then(|value| parse_retrieved_at(value, id, issues));
+    if retrieved_at.is_some_and(|retrieved| retrieved > now + chrono::Duration::minutes(5)) {
+        issues.push(format!("{id} retrievedAt is in the future"));
+    }
     if let (Some(kind), Some(url)) = (source_type, source_url) {
         validate_source_location(kind, url, id, issues);
     }
@@ -196,6 +585,25 @@ fn validate_claim<'a>(
         issues.push(format!("research claim ID {id} is duplicated"));
     }
     required_field(claim, "claim", id, issues);
+    validate_bounded_text(claim, "claimId", id, MAX_RESEARCH_ID_BYTES, issues);
+    validate_bounded_text(claim, "claim", id, MAX_RESEARCH_CLAIM_BYTES, issues);
+    validate_optional_bounded_text(claim, "supersedes", id, MAX_RESEARCH_ID_BYTES, issues);
+    validate_bounded_string_array(
+        claim,
+        "sourceIds",
+        id,
+        MAX_RESEARCH_REFERENCES,
+        MAX_RESEARCH_ID_BYTES,
+        issues,
+    );
+    validate_bounded_string_array(
+        claim,
+        "usedBy",
+        id,
+        MAX_RESEARCH_USED_BY,
+        MAX_RESEARCH_ID_BYTES,
+        issues,
+    );
     let classification = required_field(claim, "classification", id, issues).unwrap_or_default();
     if !matches!(classification, "verified" | "assumption" | "derived") {
         issues.push(format!(
@@ -290,9 +698,7 @@ fn validate_freshness_class(check: FreshnessCheck<'_>, issues: &mut Issues) {
             if let Some(retrieved_at) = check.retrieved_at {
                 let age = check.now.signed_duration_since(retrieved_at);
                 let window_days = check.policy.window_days_for(check.source_type);
-                if age.num_minutes() < -5 {
-                    issues.push(format!("{} retrievedAt is in the future", check.id));
-                } else if age.num_days() > window_days {
+                if age > chrono::Duration::days(window_days) {
                     issues.push(format!(
                         "{} is stale for sourceType {} (older than {} days); re-search required",
                         check.id, check.source_type, window_days
@@ -300,8 +706,27 @@ fn validate_freshness_class(check: FreshnessCheck<'_>, issues: &mut Issues) {
                 }
             }
         }
+        "version-bound" => {
+            if !matches!(
+                check.source_type,
+                "official-doc" | "standard" | "repository"
+            ) {
+                issues.push(format!(
+                    "{} version-bound evidence requires documentation, standard, or repository",
+                    check.id
+                ));
+            }
+            let version = required_field(check.source, "sourceVersion", check.id, issues);
+            let required = required_field(check.source, "requiredVersion", check.id, issues);
+            if version != required {
+                issues.push(format!(
+                    "{} sourceVersion does not match requiredVersion",
+                    check.id
+                ));
+            }
+        }
         _ => issues.push(format!(
-            "{} has unsupported freshness {:?}; expected fresh, historical, or local-only",
+            "{} has unsupported freshness {:?}; expected fresh, historical, version-bound, or local-only",
             check.id, check.freshness
         )),
     }
@@ -374,6 +799,165 @@ fn string_field<'a>(value: &'a Value, field_name: &str) -> Option<&'a str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    fn valid_artifact(origin: &str, query: &str, source: Value) -> Value {
+        json!({
+            "status": "complete",
+            "query": query,
+            "truncated": false,
+            "researchSource": origin,
+            "sources": [source],
+            "claims": [{
+                "claimId": "CLM-001",
+                "claim": "The source supports the requested behavior.",
+                "classification": "verified",
+                "sourceIds": ["SRC-001"],
+                "usedBy": ["REQ-001"]
+            }]
+        })
+    }
+
+    fn valid_source(source_type: &str, freshness: &str) -> Value {
+        json!({
+            "sourceId": "SRC-001",
+            "sourceUrl": if source_type == "local-code" {
+                "local-code://README.md#L1-L2"
+            } else {
+                "https://example.invalid/evidence"
+            },
+            "sourceType": source_type,
+            "retrievedAt": "2026-09-11T00:00:00Z",
+            "support": "A bounded evidence snippet.",
+            "freshness": freshness,
+            "usedBy": ["REQ-001"]
+        })
+    }
+
+    #[test]
+    fn research_requirement_uses_exact_tokens_and_prioritizes_external_facts() {
+        assert_eq!(
+            classify_research_requirement("Check current MCP protocol behavior"),
+            ResearchRequirement::ExternalCurrent
+        );
+        assert_eq!(
+            classify_research_requirement("Inspect current repository code"),
+            ResearchRequirement::LocalCurrent
+        );
+        assert_eq!(
+            classify_research_requirement("Add a sample JSON command"),
+            ResearchRequirement::Stable
+        );
+        assert_eq!(
+            classify_research_requirement("Fix apiary documentation typo"),
+            ResearchRequirement::Stable
+        );
+    }
+
+    #[test]
+    fn local_index_cannot_satisfy_current_external_research() {
+        let research = valid_artifact(
+            "local-index",
+            "Check current MCP protocol behavior",
+            valid_source("local-code", "local-only"),
+        );
+        let uses = BTreeSet::from(["REQ-001"]);
+        let issues = validate_research_artifact(
+            &research,
+            &uses,
+            ResearchPolicy::default(),
+            DateTime::parse_from_rfc3339("2026-09-12T00:00:00Z")
+                .expect("now")
+                .with_timezone(&Utc),
+        );
+        assert!(
+            issues
+                .iter()
+                .any(|issue| issue.contains("cannot use local-index")),
+            "external-current local fallback must fail closed: {issues:?}"
+        );
+    }
+
+    #[test]
+    fn cache_origin_requires_cache_identity_and_external_evidence() {
+        let research = valid_artifact(
+            "cache",
+            "Check current API behavior",
+            valid_source("local-code", "local-only"),
+        );
+        let uses = BTreeSet::from(["REQ-001"]);
+        let issues =
+            validate_research_artifact(&research, &uses, ResearchPolicy::default(), Utc::now());
+        assert!(
+            issues.iter().any(|issue| issue.contains("cacheId")),
+            "{issues:?}"
+        );
+        assert!(
+            issues.iter().any(|issue| issue.contains("external source")),
+            "cache evidence must remain external for current API facts: {issues:?}"
+        );
+    }
+
+    #[test]
+    fn oversized_research_projection_is_rejected_without_trimming() {
+        let mut source = valid_source("official-doc", "fresh");
+        source["support"] = Value::String("x".repeat(MAX_RESEARCH_EVIDENCE_BYTES + 1));
+        let research = valid_artifact("host", "Check current API behavior", source);
+        let uses = BTreeSet::from(["REQ-001"]);
+        let issues =
+            validate_research_artifact(&research, &uses, ResearchPolicy::default(), Utc::now());
+        assert!(
+            issues
+                .iter()
+                .any(|issue| issue.contains("support") && issue.contains("bound")),
+            "oversized support must be rejected rather than silently clipped: {issues:?}"
+        );
+    }
+
+    #[test]
+    fn research_conflicts_require_a_verified_resolution_and_preserve_supersession() {
+        let mut research =
+            serde_json::json!({"conflicts":[{"claimIds":["A", "B"], "status":"open"}]});
+        let claims = vec![
+            serde_json::json!({"claimId":"A", "classification":"verified"}),
+            serde_json::json!({"claimId":"B", "classification":"verified", "supersedes":"A"}),
+        ];
+        let ids = BTreeSet::from(["A", "B"]);
+        let mut issues = Vec::new();
+        validate_claim_relations(&research, &claims, &ids, &mut issues);
+        assert!(issues.iter().any(|issue| issue.contains("unresolved")));
+        research["conflicts"][0] = serde_json::json!({"claimIds":["A", "B"], "status":"resolved", "resolvedByClaimId":"B", "rationale":"Current official source supersedes historical evidence"});
+        issues.clear();
+        validate_claim_relations(&research, &claims, &ids, &mut issues);
+        assert!(issues.is_empty(), "{issues:?}");
+        let cyclic = vec![
+            serde_json::json!({"claimId":"A", "supersedes":"B"}),
+            claims[1].clone(),
+        ];
+        validate_claim_relations(&research, &cyclic, &ids, &mut issues);
+        assert!(issues
+            .iter()
+            .any(|issue| issue.contains("supersession cycle")));
+    }
+
+    #[test]
+    fn version_bound_sources_require_the_exact_requested_version() {
+        let source = serde_json::json!({"sourceVersion":"1", "requiredVersion":"2"});
+        let mut issues = Vec::new();
+        validate_freshness_class(
+            FreshnessCheck {
+                source_type: "standard",
+                freshness: "version-bound",
+                source: &source,
+                retrieved_at: None,
+                policy: ResearchPolicy::default(),
+                now: Utc::now(),
+                id: "SRC-1",
+            },
+            &mut issues,
+        );
+        assert!(issues.iter().any(|issue| issue.contains("does not match")));
+    }
 
     #[test]
     fn project_freshness_defers_to_the_per_source_type_window() {
