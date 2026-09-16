@@ -244,3 +244,96 @@ fn shared_gateway_applies_the_current_surface_budget() {
         .expect("the later command surface should use its own budget");
     assert!(projection.token_count <= 24);
 }
+
+#[test]
+fn research_and_task_projections_respect_surface_budgets() {
+    let mut firewall = ContextFirewall::default();
+    let research = ProjectionInput::new(
+        ContextSource::Research,
+        "verified claim: API version 2026-07-28 is active and supported",
+        None::<String>,
+        "workspace-research",
+        "session-research",
+    );
+    let proj = firewall
+        .project(research)
+        .expect("research projection must succeed");
+    assert_eq!(proj.source, ContextSource::Research);
+    assert_eq!(proj.source.priority_tier(), 4);
+
+    let task = ProjectionInput::new(
+        ContextSource::Task,
+        "task PLAN-123 TODO-1: implement modern MCP request header routing",
+        None::<String>,
+        "workspace-task",
+        "session-task",
+    );
+    let proj_task = firewall
+        .project(task)
+        .expect("task projection must succeed");
+    assert_eq!(proj_task.source, ContextSource::Task);
+    assert_eq!(proj_task.source.priority_tier(), 6);
+}
+
+#[test]
+fn nine_tier_priority_scheduler_prioritizes_higher_tier_and_omits_lower() {
+    let mut firewall = ContextFirewall::new(ContextPolicy::with_max_tokens(100));
+
+    let tier1_warning = ProjectionInput::new(
+        ContextSource::Warning,
+        "SECURITY: sandbox access denied for path /etc/passwd",
+        None::<String>,
+        "workspace-sched",
+        "session-sched",
+    );
+    let tier2_error = ProjectionInput::new(
+        ContextSource::Error,
+        "FATAL: build failed with 2 compilation errors in src/main.rs",
+        None::<String>,
+        "workspace-sched",
+        "session-sched",
+    );
+    let tier4_research = ProjectionInput::new(
+        ContextSource::Research,
+        "Research finding: official documentation states header Mcp-Method is mandatory",
+        None::<String>,
+        "workspace-sched",
+        "session-sched",
+    );
+    let tier9_instruction = ProjectionInput::new(
+        ContextSource::Instruction,
+        "Optional repetitive advice: remember to write tests and keep diffs small and clean",
+        None::<String>,
+        "workspace-sched",
+        "session-sched",
+    );
+
+    // Candidates presented out of priority order
+    let candidates = vec![
+        tier9_instruction,
+        tier4_research,
+        tier1_warning,
+        tier2_error,
+    ];
+
+    // Schedule with generous budget: all 4 scheduled in priority order (1, 2, 4, 9)
+    let res = firewall
+        .schedule_turn(candidates.clone(), 500)
+        .expect("schedule turn must succeed");
+    assert_eq!(res.projections.len(), 4);
+    assert_eq!(res.projections[0].source, ContextSource::Warning);
+    assert_eq!(res.projections[1].source, ContextSource::Error);
+    assert_eq!(res.projections[2].source, ContextSource::Research);
+    assert_eq!(res.projections[3].source, ContextSource::Instruction);
+    assert_eq!(res.omitted_count, 0);
+
+    // Schedule with tight budget: higher tiers included, lower omitted
+    let mut tight_firewall = ContextFirewall::new(ContextPolicy::with_max_tokens(30));
+    let tight_res = tight_firewall
+        .schedule_turn(candidates, 30)
+        .expect("tight schedule must succeed");
+    assert!(tight_res.omitted_count > 0);
+    assert!(tight_res.total_visible_tokens <= 30);
+    // Highest priority tier (Warning, tier 1) must be in the projections
+    assert_eq!(tight_res.projections[0].source, ContextSource::Warning);
+}

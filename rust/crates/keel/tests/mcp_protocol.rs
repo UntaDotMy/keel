@@ -152,7 +152,7 @@ fn send_http_initialize(address: SocketAddr, request_id: usize) -> Result<(), St
         "id": request_id,
         "method": "initialize",
         "params": {
-            "protocolVersion": "2025-03-26",
+            "protocolVersion": "2026-07-28",
             "capabilities": {},
             "clientInfo": { "name": "mcp-protocol-test", "version": "1.0.0" }
         }
@@ -160,7 +160,7 @@ fn send_http_initialize(address: SocketAddr, request_id: usize) -> Result<(), St
     .map_err(|error| format!("serialize request: {error}"))?;
     let request = format!(
         "POST /mcp HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/json\r\n\
-         Accept: application/json, text/event-stream\r\nMCP-Protocol-Version: 2025-03-26\r\n\
+         Accept: application/json, text/event-stream\r\nMCP-Protocol-Version: 2026-07-28\r\nMcp-Method: initialize\r\n\
          Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     );
@@ -205,7 +205,7 @@ fn mcp_serve_initialize_then_tools_list_round_trip() {
     // negotiation path is unit-tested in mcp/mod.rs.)
     assert_eq!(
         initialize_response["result"]["protocolVersion"],
-        json!("2025-11-25")
+        json!("2026-07-28")
     );
     assert_eq!(
         initialize_response["result"]["serverInfo"]["name"],
@@ -529,6 +529,40 @@ fn mcp_http_initialize_handles_parallel_clients() {
             .expect("parallel HTTP client thread")
             .expect("parallel HTTP initialize response");
     }
+
+    let _ = server.kill();
+    let _ = server.wait();
+    let _ = std::fs::remove_dir_all(&claude_home);
+}
+
+#[test]
+fn mcp_http_legacy_2025_handshake_is_rejected() {
+    let claude_home = unique_temp_directory("http-legacy-reject");
+    let (mut server, address) = spawn_http_server(&claude_home);
+
+    let body = serde_json::to_string(&json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {}
+    }))
+    .unwrap();
+
+    let request = format!(
+        "POST /mcp HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/json\r\n\
+         MCP-Protocol-Version: 2025-03-26\r\nMcp-Method: initialize\r\n\
+         Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+
+    let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(2)).unwrap();
+    stream.write_all(request.as_bytes()).unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).unwrap();
+
+    assert!(response.contains("400 Bad Request"));
+    assert!(response.contains("unsupported_protocol"));
+    assert!(response.contains("legacy protocol version is deprecated"));
 
     let _ = server.kill();
     let _ = server.wait();

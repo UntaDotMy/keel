@@ -136,6 +136,7 @@ pub(crate) fn validate_research_artifact(
     for claim in claims {
         validate_claim(claim, uses, &source_ids, &mut claim_ids, &mut issues);
     }
+    issues.extend(detect_research_conflicts(research));
     issues
 }
 
@@ -224,6 +225,76 @@ fn validate_used_by(value: &Value, id: &str, uses: &Uses<'_>, issues: &mut Issue
             issues.push(format!("{id} references unknown usedBy ID {usage_id}"));
         }
     }
+}
+
+/// Detect contradictory verified claims instead of silently keeping the first
+/// source. A conflict is never `verified`: the gate reports it so the agent
+/// resolves it explicitly and persists the decision as evidence.
+pub(crate) fn detect_research_conflicts(research: &Value) -> Vec<String> {
+    let Some(claims) = value_array(research, "claims") else {
+        return Vec::new();
+    };
+    let verified: Vec<(String, String)> = claims
+        .iter()
+        .filter_map(|claim| {
+            if string_field(claim, "classification")? != "verified" {
+                return None;
+            }
+            let text = string_field(claim, "claim").unwrap_or("").to_string();
+            let used_by = string_array(claim, "usedBy").join(",");
+            Some((text, used_by))
+        })
+        .collect();
+    let mut conflicts = Vec::new();
+    // why: compare every pair sharing a requirement, not just adjacent
+    // claims; insertion order must never hide a contradiction.
+    for (index, (first_text, first_used)) in verified.iter().enumerate() {
+        for (second_text, second_used) in verified.iter().skip(index + 1) {
+            // why: contradictory evidence asserts an incompatible direction.
+            // Surface it rather than silently picking one.
+            if first_used == second_used
+                && !first_used.is_empty()
+                && contradicts(first_text, second_text)
+            {
+                conflicts.push(format!(
+                    "research conflict on {first_used}: contradictory verified claims must be resolved explicitly, never treated as verified"
+                ));
+                break;
+            }
+        }
+    }
+    conflicts
+}
+
+fn contradicts(first: &str, second: &str) -> bool {
+    // why: deterministic negation markers beat an LLM judge for the gate.
+    // Keep the signal narrow so unrelated claims never conflict.
+    const NEGATIONS: [&str; 8] = [
+        " not ",
+        " never ",
+        " no longer ",
+        " removed ",
+        " deprecated ",
+        " unavailable ",
+        " unsupported ",
+        " incompatible ",
+    ];
+    let first_lower = format!(" {} ", first.to_ascii_lowercase());
+    let second_lower = format!(" {} ", second.to_ascii_lowercase());
+    let first_negative = NEGATIONS.iter().any(|marker| first_lower.contains(marker));
+    let second_negative = NEGATIONS.iter().any(|marker| second_lower.contains(marker));
+    first_negative != second_negative && overlap(&first_lower, &second_lower) >= 2
+}
+
+fn overlap(first: &str, second: &str) -> usize {
+    use std::collections::BTreeSet;
+    let words = |text: &str| {
+        text.split(|c: char| !c.is_ascii_alphanumeric())
+            .filter(|word| word.len() > 3)
+            .map(str::to_string)
+            .collect::<BTreeSet<_>>()
+    };
+    words(first).intersection(&words(second)).count()
 }
 
 fn validate_source_location(source_type: &str, source_url: &str, id: &str, issues: &mut Issues) {
@@ -419,6 +490,110 @@ mod tests {
         assert!(ResearchPolicy::load(&workspace)
             .expect_err("zero-day policy must fail")
             .contains("cannot be disabled"));
+    }
+    #[test]
+    fn contradictory_verified_claims_are_never_silent() {
+        use serde_json::json;
+        let research = json!({
+            "status": "complete",
+            "sources": [
+                {
+                    "sourceId": "SRC-001",
+                    "sourceType": "official-doc",
+                    "sourceUrl": "https://example.com/docs",
+                    "support": "session id is supported",
+                    "freshness": "fresh",
+                    "retrievedAt": "2026-09-01T00:00:00Z",
+                    "usedBy": ["REQ-001"]
+                }
+            ],
+            "claims": [
+                {
+                    "claimId": "CLM-001",
+                    "claim": "the session protocol requires the session identifier header",
+                    "classification": "verified",
+                    "sourceIds": ["SRC-001"],
+                    "usedBy": ["REQ-001"]
+                },
+                {
+                    "claimId": "CLM-002",
+                    "claim": "the session protocol removed the session identifier header and it is unsupported",
+                    "classification": "verified",
+                    "sourceIds": ["SRC-001"],
+                    "usedBy": ["REQ-001"]
+                }
+            ]
+        });
+        let mut uses = std::collections::BTreeSet::new();
+        uses.insert("REQ-001");
+        let issues = validate_research_artifact(
+            &research,
+            &uses,
+            ResearchPolicy::default(),
+            chrono::Utc::now(),
+        );
+        assert!(
+            issues
+                .iter()
+                .any(|issue| issue.contains("research conflict")),
+            "conflicting verified claims must surface: {issues:?}"
+        );
+    }
+
+    #[test]
+    fn non_adjacent_contradictions_are_never_silent() {
+        use serde_json::json;
+        let research = json!({
+            "status": "complete",
+            "sources": [
+                {
+                    "sourceId": "SRC-001",
+                    "sourceType": "official-doc",
+                    "sourceUrl": "https://example.com/docs",
+                    "support": "session id is supported",
+                    "freshness": "fresh",
+                    "retrievedAt": "2026-09-01T00:00:00Z",
+                    "usedBy": ["REQ-001"]
+                }
+            ],
+            "claims": [
+                {
+                    "claimId": "CLM-001",
+                    "claim": "the session protocol requires the session identifier header",
+                    "classification": "verified",
+                    "sourceIds": ["SRC-001"],
+                    "usedBy": ["REQ-001"]
+                },
+                {
+                    "claimId": "CLM-002",
+                    "claim": "the session protocol header uses bearer tokens",
+                    "classification": "verified",
+                    "sourceIds": ["SRC-001"],
+                    "usedBy": ["REQ-001"]
+                },
+                {
+                    "claimId": "CLM-003",
+                    "claim": "the session protocol removed the session identifier header and it is unsupported",
+                    "classification": "verified",
+                    "sourceIds": ["SRC-001"],
+                    "usedBy": ["REQ-001"]
+                }
+            ]
+        });
+        let mut uses = std::collections::BTreeSet::new();
+        uses.insert("REQ-001");
+        let issues = validate_research_artifact(
+            &research,
+            &uses,
+            ResearchPolicy::default(),
+            chrono::Utc::now(),
+        );
+        assert!(
+            issues
+                .iter()
+                .any(|issue| issue.contains("research conflict")),
+            "non-adjacent contradictions must surface: {issues:?}"
+        );
     }
 
     /// The window is enforced per source type, so evidence whose subject moves

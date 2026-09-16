@@ -24,6 +24,45 @@ pub enum KeelError {
     #[error("sqlite: {0}")]
     Sqlite(#[from] rusqlite::Error),
 
+    #[error("validation: {0}")]
+    Validation(String),
+
+    #[error("policy denied: {0}")]
+    PolicyDenied(String),
+
+    #[error("tool error: {0}")]
+    Tool(String),
+
+    #[error("research error: {0}")]
+    Research(String),
+
+    #[error("memory unavailable: {0}")]
+    MemoryUnavailable(String),
+
+    #[error("transport: {0}")]
+    Transport(String),
+
+    #[error("timeout: {0}")]
+    Timeout(String),
+
+    #[error("budget exhausted: {0}")]
+    BudgetExhausted(String),
+
+    #[error("configuration: {0}")]
+    Configuration(String),
+
+    #[error("unsupported protocol: {0}")]
+    UnsupportedProtocol(String),
+
+    #[error("unsupported host: {0}")]
+    UnsupportedHost(String),
+
+    #[error("needs human: {0}")]
+    NeedsHuman(String),
+
+    #[error("internal: {0}")]
+    Internal(String),
+
     #[error("{0}")]
     Custom(String),
 }
@@ -50,5 +89,58 @@ impl From<&str> for KeelError {
 impl From<KeelError> for String {
     fn from(source: KeelError) -> Self {
         source.to_string()
+    }
+}
+
+impl KeelError {
+    /// Plan §33 failure semantics: retryable only for transport/timeout and
+    /// explicitly retryable tool faults. Validation, policy, budget,
+    /// unsupported, and needs-human outcomes never retry implicitly.
+    pub fn retryable(&self) -> bool {
+        matches!(self, Self::Transport(_) | Self::Timeout(_))
+    }
+
+    /// Map the typed variant back to the plan §33 taxonomy string so telemetry
+    /// and review gates share one vocabulary.
+    pub fn taxonomy(&self) -> &'static str {
+        match self {
+            Self::Validation(_) => "validation_error",
+            Self::PolicyDenied(_) => "policy_denial",
+            Self::Tool(_) => "tool_error",
+            Self::Research(_) => "research_error",
+            Self::MemoryUnavailable(_) => "memory_unavailable",
+            Self::Transport(_) => "transport_error",
+            Self::Timeout(_) => "timeout",
+            Self::BudgetExhausted(_) => "budget_exhausted",
+            Self::Configuration(_) => "configuration_error",
+            Self::UnsupportedProtocol(_) => "unsupported_protocol",
+            Self::UnsupportedHost(_) => "unsupported_host",
+            Self::NeedsHuman(_) => "needs_human",
+            Self::Internal(_) => "internal_error",
+            Self::Io(_) | Self::Json(_) | Self::Sqlite(_) | Self::Custom(_) => "unknown",
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn taxonomy_covers_plan_failure_classes() {
+        assert_eq!(
+            KeelError::Validation("bad".to_string()).taxonomy(),
+            "validation_error"
+        );
+        assert_eq!(
+            KeelError::BudgetExhausted("over".to_string()).taxonomy(),
+            "budget_exhausted"
+        );
+        assert_eq!(
+            KeelError::NeedsHuman("ambiguous".to_string()).taxonomy(),
+            "needs_human"
+        );
+        assert!(!KeelError::Validation("bad".to_string()).retryable());
+        assert!(KeelError::Timeout("slow".to_string()).retryable());
     }
 }

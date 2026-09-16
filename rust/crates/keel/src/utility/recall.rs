@@ -1426,6 +1426,7 @@ fn memory_source_kind(path: &str) -> String {
         "graph",
         "agent-packets",
         "instincts",
+        "lessons",
         "anvil",
     ] {
         if path.contains(&format!("\\{kind}\\"))

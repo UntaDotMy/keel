@@ -65,8 +65,22 @@ impl ExecutionStatus {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostCapabilities {
+    pub host: String,
+    pub protocol: String,
+    pub request_interception: bool,
+    pub pre_tool_interception: bool,
+    pub post_tool_interception: bool,
+    pub context_rewrite: bool,
+    pub mcp_transport: String,
+    pub mcp_2026_07_28_support: bool,
+    pub skill_wiring: bool,
+    pub memory_wiring: bool,
+    pub known_bypasses: Vec<String>,
+    pub support_state: HostGovernanceState,
+
+    // Legacy fields for backward compatibility
     pub pre_tool_intercept: bool,
     pub post_tool_reduce: bool,
     pub permission_gate: bool,
@@ -98,8 +112,21 @@ impl HostCapabilities {
 
     /// No proven interception surface at all. Unknown names resolve here too;
     /// [`Self::is_claimed_host`] is what tells the two apart.
-    const fn ungoverned() -> Self {
+    pub fn ungoverned(host: &str) -> Self {
         Self {
+            host: host.to_string(),
+            protocol: "unsupported".to_string(),
+            request_interception: false,
+            pre_tool_interception: false,
+            post_tool_interception: false,
+            context_rewrite: false,
+            mcp_transport: "none".to_string(),
+            mcp_2026_07_28_support: false,
+            skill_wiring: false,
+            memory_wiring: false,
+            known_bypasses: vec!["all".to_string()],
+            support_state: HostGovernanceState::Unsupported,
+
             pre_tool_intercept: false,
             post_tool_reduce: false,
             permission_gate: false,
@@ -125,6 +152,19 @@ impl HostCapabilities {
         match normalized.as_str() {
             "claude" | "claude-code" | "claude_code" | "codex" | "codex-cli" | "codex_cli" => {
                 Self {
+                    host: normalized,
+                    protocol: "mcp/2026-07-28".to_string(),
+                    request_interception: true,
+                    pre_tool_interception: true,
+                    post_tool_interception: true,
+                    context_rewrite: true,
+                    mcp_transport: "stdio".to_string(),
+                    mcp_2026_07_28_support: true,
+                    skill_wiring: true,
+                    memory_wiring: true,
+                    known_bypasses: Vec::new(),
+                    support_state: HostGovernanceState::Governed,
+
                     pre_tool_intercept: true,
                     post_tool_reduce: true,
                     permission_gate: true,
@@ -137,6 +177,19 @@ impl HostCapabilities {
             // Cursor's hooks (`cursor/hooks/hooks.json`) return permission
             // decisions, so interception and the gate are proven; rewrite is not.
             "cursor" => Self {
+                host: normalized,
+                protocol: "mcp/2026-07-28".to_string(),
+                request_interception: true,
+                pre_tool_interception: true,
+                post_tool_interception: true,
+                context_rewrite: false,
+                mcp_transport: "stdio".to_string(),
+                mcp_2026_07_28_support: true,
+                skill_wiring: true,
+                memory_wiring: false,
+                known_bypasses: vec!["direct_terminal_execution".to_string()],
+                support_state: HostGovernanceState::PartiallyGoverned,
+
                 pre_tool_intercept: true,
                 post_tool_reduce: true,
                 permission_gate: true,
@@ -148,6 +201,19 @@ impl HostCapabilities {
             // OMP is wired at its own `~/.omp/agent` tree through the same
             // `keel-pi.ts` extension seam as Pi, so it shares Pi's proven surface.
             "zcode" | "antigravity" | "grok" | "opencode" | "pi" | "omp" | "commandcode" => Self {
+                host: normalized,
+                protocol: "mcp/2026-07-28".to_string(),
+                request_interception: true,
+                pre_tool_interception: true,
+                post_tool_interception: true,
+                context_rewrite: false,
+                mcp_transport: "stdio".to_string(),
+                mcp_2026_07_28_support: true,
+                skill_wiring: true,
+                memory_wiring: false,
+                known_bypasses: vec!["direct_terminal_execution".to_string()],
+                support_state: HostGovernanceState::PartiallyGoverned,
+
                 pre_tool_intercept: true,
                 post_tool_reduce: true,
                 permission_gate: false,
@@ -158,13 +224,45 @@ impl HostCapabilities {
             },
             // Claude Desktop has no hook system or plugin API, so keel registers
             // MCP only and every interception surface stays unproven.
-            "cowork" | "desktop" => Self::ungoverned(),
-            _ => Self::ungoverned(),
+            _ => Self {
+                host: normalized,
+                protocol: "unsupported".to_string(),
+                request_interception: false,
+                pre_tool_interception: false,
+                post_tool_interception: false,
+                context_rewrite: false,
+                mcp_transport: "none".to_string(),
+                mcp_2026_07_28_support: false,
+                skill_wiring: false,
+                memory_wiring: false,
+                known_bypasses: vec!["all".to_string()],
+                support_state: HostGovernanceState::Unsupported,
+
+                pre_tool_intercept: false,
+                post_tool_reduce: false,
+                permission_gate: false,
+                dynamic_tool_exposure: false,
+                context_injection_control: false,
+                session_identity: false,
+                execution_receipt: false,
+            },
         }
     }
 
-    pub fn as_json(self) -> serde_json::Value {
+    pub fn as_json(&self) -> serde_json::Value {
         serde_json::json!({
+            "host": self.host,
+            "protocol": self.protocol,
+            "requestInterception": self.request_interception,
+            "preToolInterception": self.pre_tool_interception,
+            "postToolInterception": self.post_tool_interception,
+            "contextRewrite": self.context_rewrite,
+            "mcpTransport": self.mcp_transport,
+            "mcp20260728Support": self.mcp_2026_07_28_support,
+            "skillWiring": self.skill_wiring,
+            "memoryWiring": self.memory_wiring,
+            "knownBypasses": self.known_bypasses,
+            "supportState": self.support_state.as_str(),
             "state": self.governance_state().as_str(),
             "preToolIntercept": self.pre_tool_intercept,
             "postToolReduce": self.post_tool_reduce,
@@ -174,6 +272,10 @@ impl HostCapabilities {
             "sessionIdentity": self.session_identity,
             "executionReceipt": self.execution_receipt,
         })
+    }
+
+    pub fn governance_state(&self) -> HostGovernanceState {
+        self.support_state
     }
 
     /// Attach the machine-readable host matrix to the legacy capability
@@ -254,19 +356,6 @@ impl HostCapabilities {
             "transport": "host-adapter",
             "hosts": hosts,
         })
-    }
-
-    pub fn governance_state(self) -> HostGovernanceState {
-        if !self.session_identity && !self.execution_receipt {
-            return HostGovernanceState::Unsupported;
-        }
-        if self.pre_tool_intercept && self.post_tool_reduce && self.context_injection_control {
-            HostGovernanceState::Governed
-        } else if self.pre_tool_intercept || self.post_tool_reduce {
-            HostGovernanceState::PartiallyGoverned
-        } else {
-            HostGovernanceState::Observed
-        }
     }
 }
 

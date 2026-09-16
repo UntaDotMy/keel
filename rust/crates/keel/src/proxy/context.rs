@@ -34,6 +34,8 @@ pub const DEFAULT_MAX_MEMORY_PROJECTION_TOKENS: usize = 900;
 pub const DEFAULT_MAX_WARNING_POINTER_TOKENS: usize = 30;
 pub const DEFAULT_MAX_DISCOVERY_RESULT_TOKENS: usize = 300;
 pub const DEFAULT_MAX_SINGLE_RESULT_TOKENS: usize = 1_800;
+pub const DEFAULT_MAX_RESEARCH_PROJECTION_TOKENS: usize = 1_000;
+pub const DEFAULT_MAX_TASK_PROJECTION_TOKENS: usize = 800;
 
 /// The owner that produced a dynamic context payload.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -76,7 +78,33 @@ impl ContextSource {
             Self::Memory => DEFAULT_MAX_MEMORY_PROJECTION_TOKENS,
             Self::Warning => DEFAULT_MAX_WARNING_POINTER_TOKENS,
             Self::Recovery => DEFAULT_MAX_DISCOVERY_RESULT_TOKENS,
+            Self::Research => DEFAULT_MAX_RESEARCH_PROJECTION_TOKENS,
+            Self::Task => DEFAULT_MAX_TASK_PROJECTION_TOKENS,
             _ => DEFAULT_MAX_DYNAMIC_TOKENS,
+        }
+    }
+
+    /// 9-tier priority cross-source turn scheduler (Plan §15).
+    /// Tier 1: security/policy decisions
+    /// Tier 2: direct task failure evidence
+    /// Tier 3: current repository facts
+    /// Tier 4: current research evidence
+    /// Tier 5: immediate execution state
+    /// Tier 6: relevant task plan state
+    /// Tier 7: concise relevant memory
+    /// Tier 8: optional metadata
+    /// Tier 9: repetitive/low-value context
+    pub fn priority_tier(&self) -> u8 {
+        match self {
+            Self::Warning => 1,
+            Self::Error => 2,
+            Self::CommandOutput => 3,
+            Self::Research => 4,
+            Self::McpTool | Self::UiVerification => 5,
+            Self::Task => 6,
+            Self::Memory => 7,
+            Self::Recovery => 8,
+            Self::Instruction => 9,
         }
     }
 }
@@ -610,6 +638,19 @@ pub fn project_scoped(
     entry.gateway.project(input)
 }
 
+/// Test-only: drop one scoped session gateway so a test can re-project the
+/// same payload without tripping duplicate suppression. Production code never
+/// clears dedupe; the TTL/eviction path owns that lifecycle.
+#[cfg(test)]
+pub(crate) fn clear_scoped_gateway_for_test() {
+    let mut gateways = SESSION_GATEWAYS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(key) = gateways.order.pop_back() {
+        gateways.entries.remove(&key);
+    }
+}
+
 impl ContextFirewall {
     pub fn new(policy: ContextPolicy) -> Self {
         Self {
@@ -874,6 +915,74 @@ impl ContextFirewall {
             session_id,
         ))
     }
+
+    /// 9-tier priority cross-source turn scheduler (Plan §15).
+    /// Sorts candidate items by priority tier (Tier 1 first), projects them
+    /// through the firewall within the turn budget, and omits lower-priority
+    /// items once the hard budget is reached.
+    pub fn schedule_turn(
+        &mut self,
+        mut candidates: Vec<ProjectionInput>,
+        turn_budget: usize,
+    ) -> Result<TurnScheduleResult, ContextFirewallError> {
+        self.begin_turn();
+        // Stably sort by priority tier ascending (tier 1 before tier 9).
+        candidates.sort_by_key(|c| c.source.priority_tier());
+
+        let mut projections = Vec::new();
+        let mut total_tokens = 0usize;
+        let mut omitted_count = 0usize;
+
+        for item in candidates {
+            if total_tokens >= turn_budget {
+                omitted_count = omitted_count.saturating_add(1);
+                continue;
+            }
+            let remaining = turn_budget - total_tokens;
+            let item_budget = item.source.default_budget().min(remaining);
+            if item_budget == 0 {
+                omitted_count = omitted_count.saturating_add(1);
+                continue;
+            }
+            let mut scoped_policy = self.policy.clone();
+            scoped_policy.max_tokens = item_budget;
+            let original_policy = self.policy.clone();
+            self.policy = scoped_policy;
+            match self.project(item) {
+                Ok(proj) => {
+                    total_tokens = total_tokens.saturating_add(proj.visible_tokens as usize);
+                    projections.push(proj);
+                }
+                Err(ContextFirewallError::DuplicateSuppressed) => {
+                    // Suppressed duplicates do not consume budget or count as omitted.
+                }
+                Err(ContextFirewallError::BudgetExceeded { .. }) => {
+                    omitted_count = omitted_count.saturating_add(1);
+                }
+                Err(err) => {
+                    self.policy = original_policy;
+                    return Err(err);
+                }
+            }
+            self.policy = original_policy;
+        }
+
+        Ok(TurnScheduleResult {
+            projections,
+            total_visible_tokens: total_tokens,
+            omitted_count,
+            budget_tokens: turn_budget,
+        })
+    }
+}
+
+/// Output of the 9-tier priority turn scheduler.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnScheduleResult {
+    pub projections: Vec<ContextProjection>,
+    pub total_visible_tokens: usize,
+    pub omitted_count: usize,
+    pub budget_tokens: usize,
 }
 
 impl Default for ContextFirewall {

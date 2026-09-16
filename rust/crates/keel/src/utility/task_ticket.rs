@@ -919,6 +919,9 @@ fn validate_ticket_subtasks(
                     issues.push(format!("{id} is missing field {field}"));
                 }
             }
+            // why: plan §§9-10: subtodos are optional leaves that must be
+            // traceable (id/objective/owner/status + evidence when done).
+            validate_subtodos(seed, id, subtask, issues);
             if id == "subtask without id" || !all_subtask_ids.insert(id.to_string()) {
                 issues.push(format!(
                     "{} has missing or duplicate subtask id {id}",
@@ -1006,6 +1009,62 @@ fn validate_timestamp(subtask: &Value, id: &str, issues: &mut Vec<String>) {
     }
 }
 
+fn validate_subtodos(seed: &TaskSeed, subtask_id: &str, subtask: &Value, issues: &mut Vec<String>) {
+    let Some(subtodos) = subtask.get("subtodos") else {
+        return;
+    };
+    let Some(subtodos) = subtodos.as_array() else {
+        issues.push(format!("{subtask_id} subtodos is not an array"));
+        return;
+    };
+    let mut seen = BTreeSet::new();
+    for subtodo in subtodos {
+        let id = string_field(subtodo, "id").unwrap_or("subtodo without id");
+        for field in ["id", "objective", "owner", "status"] {
+            if subtodo.get(field).is_none() {
+                issues.push(format!("{id} is missing subtodo field {field}"));
+            }
+        }
+        if id == "subtodo without id" || !seen.insert(id.to_string()) {
+            issues.push(format!(
+                "{subtask_id} has missing or duplicate subtodo id {id}"
+            ));
+        }
+        if string_field(subtodo, "objective")
+            .unwrap_or_default()
+            .trim()
+            .is_empty()
+        {
+            issues.push(format!("{id} has no subtodo objective"));
+        }
+        if !matches!(
+            string_field(subtodo, "owner"),
+            Some("implementer" | "verifier" | "reviewer" | "human")
+        ) {
+            issues.push(format!("{id} has invalid subtodo owner"));
+        }
+        let status = string_field(subtodo, "status").unwrap_or_default();
+        if !matches!(status, "open" | "done" | "skipped" | "needs_human") {
+            issues.push(format!("{id} has invalid subtodo status"));
+            continue;
+        }
+        if status == "done" {
+            if subtodo.get("evidence_ref").map_or(true, Value::is_null) {
+                issues.push(format!("{id} is done without subtodo evidence_ref"));
+            }
+            if string_field(subtodo, "verification_timestamp")
+                .unwrap_or_default()
+                .is_empty()
+            {
+                issues.push(format!(
+                    "{id} done status requires a subtodo verification_timestamp"
+                ));
+            }
+        }
+        let _ = seed;
+    }
+}
+
 fn validate_evidence_reference(
     context: &ValidationContext<'_>,
     seed: &TaskSeed,
@@ -1034,8 +1093,14 @@ fn validate_evidence_reference(
         Some(body) => body,
         None => return,
     };
-    let actual_hash = format!("fnv1a64:{}", crate::utility::hashing::fnv1a64_hex(&body));
-    if expected_hash != actual_hash {
+    // why: evidence binding is tamper-evident; accept sha256 and legacy FNV
+    // fingerprint so existing tickets keep validating without breakage.
+    let actual_sha = format!(
+        "sha256:{}",
+        crate::utility::hashing::sha256_hex(body.as_bytes())
+    );
+    let actual_fnv = format!("fnv1a64:{}", crate::utility::hashing::fnv1a64_hex(&body));
+    if expected_hash != actual_sha && expected_hash != actual_fnv {
         issues.push(format!(
             "{subtask_id} content_hash does not match evidence artifact"
         ));
@@ -1683,6 +1748,53 @@ fn string_field<'a>(value: &'a Value, field: &str) -> Option<&'a str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn subtodos_are_optional_but_validated_when_present() {
+        let seed = TaskSeed {
+            id: "TASK-1".to_string(),
+            title: "task".to_string(),
+            requirement_refs: vec!["REQ-001".to_string()],
+            acceptance: vec![],
+        };
+        let mut issues = Vec::new();
+        validate_subtodos(
+            &seed,
+            "TASK-1-TESTS-001",
+            &serde_json::json!({
+                "id": "TASK-1-TESTS-001",
+                "subtodos": [
+                    {
+                        "id": "TASK-1-TESTS-001-a",
+                        "objective": "Run the focused test file",
+                        "owner": "verifier",
+                        "status": "done",
+                        "evidence_ref": {"path": "evidence/tests.json"},
+                        "verification_timestamp": "2026-09-01T00:00:00Z"
+                    }
+                ]
+            }),
+            &mut issues,
+        );
+        assert!(issues.is_empty(), "valid subtodos must pass: {issues:?}");
+
+        let mut bad = Vec::new();
+        validate_subtodos(
+            &seed,
+            "TASK-1-TESTS-001",
+            &serde_json::json!({
+                "id": "TASK-1-TESTS-001",
+                "subtodos": [
+                    {"id": "dup", "objective": "", "owner": "bot", "status": "done"}
+                ]
+            }),
+            &mut bad,
+        );
+        assert!(
+            bad.len() >= 3,
+            "invalid subtodos must surface objective/owner/evidence issues: {bad:?}"
+        );
+    }
 
     #[test]
     fn scope_derivation_does_not_read_unrelated_architecture_sections() {

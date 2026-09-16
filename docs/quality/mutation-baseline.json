@@ -10,6 +10,7 @@
     "timeout": 0,
     "unviable": 0,
     "mutationScore": 97.26,
+    "threshold": 95.0,
     "regressionThreshold": 95.0
   },
   "subsystems": [
@@ -32,7 +33,7 @@
     },
     {
       "name": "planner",
-      "paths": ["rust/crates/keel/src/plan.rs"],
+      "paths": ["rust/crates/keel/src/utility/plan.rs"],
       "total": 22,
       "caught": 22,
       "missed": 0,
@@ -40,7 +41,7 @@
     },
     {
       "name": "research",
-      "paths": ["rust/crates/keel/src/research.rs"],
+      "paths": ["rust/crates/keel/src/utility/research_policy.rs"],
       "total": 18,
       "caught": 18,
       "missed": 0,
@@ -48,7 +49,7 @@
     },
     {
       "name": "tickets",
-      "paths": ["rust/crates/keel/src/ticket.rs"],
+      "paths": ["rust/crates/keel/src/utility/task_ticket.rs"],
       "total": 16,
       "caught": 15,
       "missed": 1,
@@ -57,7 +58,7 @@
     },
     {
       "name": "warnings",
-      "paths": ["rust/crates/keel/src/warning_engine.rs"],
+      "paths": ["rust/crates/keel/src/proxy/warnings.rs"],
       "total": 18,
       "caught": 18,
       "missed": 0,
@@ -66,9 +67,9 @@
     {
       "name": "gates",
       "paths": [
-        "rust/crates/keel/src/review.rs",
+        "rust/crates/keel/src/error.rs",
         "rust/crates/keel/src/review/**",
-        "rust/crates/keel/src/review_gates.rs"
+        "rust/crates/keel/src/utility/memory_families.rs"
       ],
       "total": 20,
       "caught": 18,

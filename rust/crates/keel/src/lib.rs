@@ -17,11 +17,11 @@ mod manager;
 mod mcp;
 pub mod proxy;
 mod review;
-mod runner;
+pub mod runner;
 mod runtime;
 mod slop_detector;
 #[cfg(test)]
 mod test_support;
-mod utility;
+pub mod utility;
 
 pub use commands::Application;

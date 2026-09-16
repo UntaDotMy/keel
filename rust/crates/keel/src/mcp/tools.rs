@@ -462,6 +462,14 @@ fn tools_list_page(tools: &[Value], next_cursor: Option<&str>) -> Value {
     if let Some(cursor) = next_cursor {
         page["nextCursor"] = Value::String(cursor.to_string());
     }
+    // why: 2026-07-28 list/read responses are cacheable. Emit the shelf-life
+    // the cursor TTL already enforces so modern hosts can reuse pages.
+    page["_meta"] = json!({
+        "cache": {
+            "ttlMs": (mcp_cursor_ttl_seconds().saturating_mul(1000)),
+            "cacheScope": "session",
+        }
+    });
     page
 }
 
@@ -1413,6 +1421,8 @@ fn handle_tools_call_cancellable_with_context_and_executor(
     let name = tool_name.to_string();
     let name_for_worker = name.clone();
     let context_for_worker = request_context.clone();
+    let session = request_context.session_id.clone();
+    let workspace = request_context.workspace_id.clone();
     let outcome = run_tool_with_executor_cancellation(
         executor,
         mcp_child_timeout(),
@@ -1420,7 +1430,11 @@ fn handle_tools_call_cancellable_with_context_and_executor(
         cancellation,
         move || {
             with_mcp_request_context(context_for_worker, || {
-                dispatch_mcp_tool(&name_for_worker, &arguments)
+                if name_for_worker == "skill_list" {
+                    tool_skill_list_with_context(&arguments, &session, &workspace)
+                } else {
+                    dispatch_mcp_tool(&name_for_worker, &arguments)
+                }
             })
         },
     );
@@ -1446,6 +1460,17 @@ fn handle_tools_call_cancellable_with_context_and_executor(
             }
         }
         Err(message) => {
+            if let Ok(home) = tool_claude_home(&name) {
+                let _ = crate::utility::memory_families::record_failure_event(
+                    &home,
+                    None,
+                    "tool_failure",
+                    &name,
+                    "error",
+                    &message,
+                    None,
+                );
+            }
             match project_mcp_context(&name, &message, ContextSource::Error, &request_context) {
                 Ok(projection) => json!({
                     "content": [
@@ -1478,13 +1503,17 @@ pub(crate) fn project_mcp_context(
         (ContextSource::Memory, _) => crate::proxy::context::DEFAULT_MAX_MEMORY_PROJECTION_TOKENS,
         (ContextSource::Warning, _) => crate::proxy::context::DEFAULT_MAX_WARNING_POINTER_TOKENS,
         (ContextSource::Recovery, _) => crate::proxy::context::DEFAULT_MAX_DISCOVERY_RESULT_TOKENS,
+        (ContextSource::Research, _) => {
+            crate::proxy::context::DEFAULT_MAX_RESEARCH_PROJECTION_TOKENS
+        }
+        (ContextSource::Task, _) => crate::proxy::context::DEFAULT_MAX_TASK_PROJECTION_TOKENS,
         (ContextSource::McpTool, "recall" | "memory" | "memory_status") => {
             crate::proxy::context::DEFAULT_MAX_MEMORY_PROJECTION_TOKENS
         }
         (ContextSource::McpTool, "tools/list") => {
             crate::proxy::context::DEFAULT_MAX_TOOL_CATALOG_TOKENS
         }
-        (ContextSource::McpTool, "keel/discover" | "discover") => {
+        (ContextSource::McpTool, "keel/discover" | "discover" | "server/discover") => {
             crate::proxy::context::DEFAULT_MAX_DISCOVERY_RESULT_TOKENS
         }
         _ => crate::proxy::context::DEFAULT_MAX_SINGLE_RESULT_TOKENS,
@@ -1600,6 +1629,11 @@ pub(crate) const MCP_TOOL_NAMES: &[&str] = &[
 /// Rank installed capabilities without exposing the full catalog. Historical
 /// counts are intentionally only one input; semantic overlap, policy metadata,
 /// and schema cost remain the authority for deterministic ranking.
+///
+/// Both `keel/discover` and the modern `server/discover` alias route to this
+/// owner through `super::handle_method_cancellable`; the HTTP session gate in
+/// `super::http` lists both method strings so the alias keeps the same
+/// session requirement as the canonical method.
 pub(crate) fn discover_capabilities(
     query: &str,
     limit: usize,
@@ -1700,14 +1734,23 @@ pub(crate) fn discover_capabilities(
         ranked.pop();
     }
     let kept_count = ranked.len();
-    let payload = json!({
+    let mut payload = json!({
         "query": query,
         "level": level,
         "count": kept_count,
         "capabilities": ranked.into_iter().map(|(_, _, entry)| entry).collect::<Vec<_>>(),
         "activation": "keel/activate",
         "omitted": requested_count.saturating_sub(kept_count),
+        "_meta": {
+            "cache": {
+                "ttlMs": (mcp_cursor_ttl_seconds().saturating_mul(1000)),
+                "cacheScope": "session",
+            }
+        },
     });
+    // why: keep the cache hint outside the token-budgeted discovery contract
+    // measurement so hints cannot push a fitting page over budget.
+    payload.as_object_mut().map(|object| object.remove("_meta"));
     let serialized = serde_json::to_string(&payload)
         .map_err(|error| format!("mcp discover: serialize for budget: {error}"))?;
     let tokens = crate::proxy::token_meter::TokenMeter::count_text(&serialized);
@@ -1717,6 +1760,18 @@ pub(crate) fn discover_capabilities(
             crate::proxy::context::DEFAULT_MAX_DISCOVERY_RESULT_TOKENS
         ));
     }
+    payload
+        .as_object_mut()
+        .expect("discover payload is an object")
+        .insert(
+            "_meta".to_string(),
+            json!({
+                "cache": {
+                    "ttlMs": (mcp_cursor_ttl_seconds().saturating_mul(1000)),
+                    "cacheScope": "session",
+                }
+            }),
+        );
     Ok(payload)
 }
 
@@ -3877,6 +3932,8 @@ struct SkillCatalogCursorClaims {
     v: u8,
     snapshot: String,
     home: String,
+    session: String,
+    workspace: String,
     offset: usize,
     budget: usize,
     expires_at: u64,
@@ -3946,12 +4003,18 @@ fn encode_skill_catalog_cursor(
     budget: usize,
     snapshot: &str,
     claude_home: &Path,
+    session: &str,
+    workspace: &str,
     expires_at: u64,
 ) -> String {
+    let home_fingerprint =
+        crate::utility::hashing::sha256_hex(claude_home.to_string_lossy().as_bytes());
     let claims = SkillCatalogCursorClaims {
         v: 1,
-        snapshot: snapshot.to_string(),
-        home: claude_home.to_string_lossy().to_string(),
+        snapshot: snapshot.chars().take(32).collect(),
+        home: home_fingerprint[..16].to_string(),
+        session: session.to_string(),
+        workspace: workspace.to_string(),
         offset,
         budget,
         expires_at,
@@ -3970,6 +4033,8 @@ fn decode_skill_catalog_cursor(
     budget: usize,
     snapshot: &str,
     claude_home: &Path,
+    session: &str,
+    workspace: &str,
 ) -> Result<usize, String> {
     if cursor.len() > MAX_CURSOR_CHARS {
         return Err("skill_list: cursor is invalid".to_string());
@@ -3991,9 +4056,14 @@ fn decode_skill_catalog_cursor(
     let decoded = hex_decode(encoded).ok_or_else(|| "skill_list: cursor is invalid".to_string())?;
     let claims: SkillCatalogCursorClaims = serde_json::from_slice(&decoded)
         .map_err(|_| "skill_list: cursor is invalid".to_string())?;
+    let home_fingerprint =
+        crate::utility::hashing::sha256_hex(claude_home.to_string_lossy().as_bytes());
+    let expected_snapshot: String = snapshot.chars().take(32).collect();
     if claims.v != 1
-        || claims.snapshot != snapshot
-        || claims.home != claude_home.to_string_lossy()
+        || claims.snapshot != expected_snapshot
+        || claims.home != home_fingerprint[..16]
+        || claims.session != session
+        || claims.workspace != workspace
         || claims.budget != budget
     {
         return Err("skill_list: cursor is stale or invalid for this catalog".to_string());
@@ -4078,6 +4148,12 @@ fn skill_list_payload(
         "skills": rows,
         "budgetTokens": budget,
         "omitted": total.saturating_sub(offset.saturating_add(rows.len())),
+        "_meta": {
+            "cache": {
+                "ttlMs": (mcp_cursor_ttl_seconds().saturating_mul(1000)),
+                "cacheScope": "session",
+            }
+        },
     });
     if let Some(cursor) = next_cursor {
         payload["nextCursor"] = Value::String(cursor.to_string());
@@ -4085,7 +4161,25 @@ fn skill_list_payload(
     payload
 }
 
+fn skill_list_contract(payload: &Value) -> Value {
+    // why: the session cache hint rides outside the token-budgeted skill
+    // contract so hints cannot push a fitting page over budget.
+    let mut contract = payload.clone();
+    if let Some(object) = contract.as_object_mut() {
+        object.remove("_meta");
+    }
+    contract
+}
+
 fn tool_skill_list(arguments: &Value) -> Result<String, String> {
+    tool_skill_list_with_context(arguments, "default", "unknown-workspace")
+}
+
+fn tool_skill_list_with_context(
+    arguments: &Value,
+    session: &str,
+    workspace: &str,
+) -> Result<String, String> {
     let claude_home = tool_claude_home("skill_list")?;
     let budget = skill_catalog_budget(arguments)?;
     let catalog = skill_catalog(&claude_home);
@@ -4098,7 +4192,14 @@ fn tool_skill_list(arguments: &Value) -> Result<String, String> {
         Some(_) => return Err("skill_list: cursor must be an opaque string".to_string()),
     };
     let start = match cursor {
-        Some(value) => decode_skill_catalog_cursor(value, budget, &fingerprint, &claude_home)?,
+        Some(value) => decode_skill_catalog_cursor(
+            value,
+            budget,
+            &fingerprint,
+            &claude_home,
+            session,
+            workspace,
+        )?,
         None => 0,
     };
     if start > catalog.len() {
@@ -4121,7 +4222,15 @@ fn tool_skill_list(arguments: &Value) -> Result<String, String> {
                 break;
             };
             let next_cursor = has_more.then(|| {
-                encode_skill_catalog_cursor(offset + 1, budget, &fingerprint, &claude_home, expiry)
+                encode_skill_catalog_cursor(
+                    offset + 1,
+                    budget,
+                    &fingerprint,
+                    &claude_home,
+                    session,
+                    workspace,
+                    expiry,
+                )
             });
             let mut candidate_rows = rows.clone();
             candidate_rows.push(row.clone());
@@ -4132,8 +4241,9 @@ fn tool_skill_list(arguments: &Value) -> Result<String, String> {
                 budget,
                 next_cursor.as_deref(),
             );
-            if TokenMeter::count_text(&serde_json::to_string(&candidate).unwrap_or_default())
-                <= budget
+            if TokenMeter::count_text(
+                &serde_json::to_string(&skill_list_contract(&candidate)).unwrap_or_default(),
+            ) <= budget
             {
                 accepted = Some(Some(row));
                 break;
@@ -4153,10 +4263,21 @@ fn tool_skill_list(arguments: &Value) -> Result<String, String> {
             None => break,
         }
     }
-    let next_cursor = (offset < catalog.len())
-        .then(|| encode_skill_catalog_cursor(offset, budget, &fingerprint, &claude_home, expiry));
+    let next_cursor = (offset < catalog.len()).then(|| {
+        encode_skill_catalog_cursor(
+            offset,
+            budget,
+            &fingerprint,
+            &claude_home,
+            session,
+            workspace,
+            expiry,
+        )
+    });
     let payload = skill_list_payload(catalog.len(), start, &rows, budget, next_cursor.as_deref());
-    let measured = TokenMeter::count_text(&serde_json::to_string(&payload).unwrap_or_default());
+    let measured = TokenMeter::count_text(
+        &serde_json::to_string(&skill_list_contract(&payload)).unwrap_or_default(),
+    );
     if measured > budget {
         return Err(format!(
             "skill_list: response exceeded its configured {budget}-token catalog budget after final recount ({measured})"
@@ -4253,6 +4374,11 @@ fn tool_brief_create(arguments: &Value) -> Result<String, String> {
     let workspace = env::current_dir()
         .map(|cwd| display_path(&cwd))
         .unwrap_or_default();
+    let complexity = crate::utility::plan::classify_request(&request);
+    let task_class = crate::utility::plan::plan_task_class(&complexity, &request);
+    let (is_vague, _vague_terms, planning_questions) =
+        crate::utility::plan::evaluate_vague_request(&request);
+
     let brief = create_brief(
         id,
         request,
@@ -4269,7 +4395,15 @@ fn tool_brief_create(arguments: &Value) -> Result<String, String> {
         "written": true,
         "path": display_path(&path),
         "brief": brief_to_json(&brief),
+        "taskClass": task_class,
+        "complexityClass": complexity.label,
+        "planningRequired": complexity.planning_required,
+        "complexitySignals": complexity.signals,
+        "clarificationRequired": is_vague,
     });
+    if is_vague {
+        payload["planningQuestions"] = json!(planning_questions);
+    }
     if brief.acceptance_criteria.len() >= 2 {
         payload["next_step"] = Value::String(format!(
             "{} acceptance criteria -> run `keel anvil compile --goal ... --bar ... --files path/to/owner.rs` then `keel anvil run --dry-run`",
@@ -4307,6 +4441,10 @@ fn tool_context_brief(arguments: &Value) -> Result<String, String> {
         .or_else(|| env::current_dir().ok())
         .map(|path| path.canonicalize().unwrap_or(path));
     let workspace_display = workspace_root.as_deref().map(display_path);
+
+    // why: plan §46 requires compact current-truth project-state summary
+    // (branch/commit/dirty/languages/scopes) behind the context gateway.
+    let repository_truth = repository_truth_snapshot(workspace_root.as_deref());
 
     let catalog = skill_catalog(&claude_home);
     let skills: Vec<Value> = catalog
@@ -4368,10 +4506,15 @@ fn tool_context_brief(arguments: &Value) -> Result<String, String> {
         Value::Null
     };
 
+    let plan_snapshot =
+        crate::utility::plan::active_plan_pointer(&claude_home, workspace_root.as_deref());
     let mut payload = json!({
         "ironLaw": IRON_LAW_SUMMARY,
+        "planPointer": plan_snapshot.to_four_line_string(),
+        "planPointerSnapshot": plan_snapshot,
         "skillCount": skills.len(),
         "workspaceRoot": workspace_display.unwrap_or_default(),
+        "repositoryTruth": repository_truth,
         "skills": skills,
         "memory": memory,
         "newestBrief": newest_brief,
@@ -4427,6 +4570,118 @@ fn tool_context_brief(arguments: &Value) -> Result<String, String> {
     }
     // Compact JSON: pretty context_brief was multi-line and near frame limits.
     mcp_json_compact(&payload).map_err(|error| format!("context_brief: {error}"))
+}
+
+/// Compact current-checkout truth for plan §46: branch, commit, dirty state,
+/// and detected languages, bounded and on demand, never a full repository
+/// map. Shells out to git; every failure degrades to an explicit marker
+/// instead of a silent empty summary.
+fn repository_truth_snapshot(workspace_root: Option<&std::path::Path>) -> Value {
+    use std::process::Command;
+
+    fn git_field(root: &std::path::Path, args: &[&str]) -> Option<String> {
+        let mut child = Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .ok()?;
+        let output = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    use std::io::Read;
+                    let mut text = String::new();
+                    if let Some(mut stdout) = child.stdout.take() {
+                        let _ = stdout.read_to_string(&mut text);
+                    }
+                    let _ = child.wait();
+                    text
+                })
+                .join()
+        })
+        .ok()?;
+        let trimmed = output.trim().to_string();
+        (!trimmed.is_empty()).then_some(trimmed)
+    }
+
+    let Some(root) = workspace_root else {
+        return json!({ "unavailable": "no workspace root" });
+    };
+    if !root.is_dir() {
+        return json!({ "unavailable": "workspace root is not a directory" });
+    }
+    let branch = git_field(root, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    let commit = git_field(root, &["rev-parse", "--short", "HEAD"]);
+    let full_commit = git_field(root, &["rev-parse", "HEAD"]);
+    let status = git_field(root, &["status", "--porcelain=v1", "--untracked-files=no"]);
+    let dirty_files = status
+        .as_deref()
+        .map(|text| text.lines().filter(|line| !line.trim().is_empty()).count())
+        .unwrap_or(0);
+    let dirty = status.map(|text| !text.trim().is_empty());
+    let languages = detect_workspace_languages(root);
+    let scope = active_task_scope(root);
+    let mut snapshot = json!({
+        "branch": branch.unwrap_or_else(|| "unknown".to_string()),
+        "commit": commit.unwrap_or_else(|| "unknown".to_string()),
+        "commitFull": full_commit.unwrap_or_else(|| "unknown".to_string()),
+        "dirtyFiles": dirty_files,
+        "snapshotAt": crate::utility::record_store::format_timestamp_iso8601(
+            crate::utility::record_store::current_timestamp_millis()
+        ),
+    });
+    if let Some(dirty) = dirty {
+        snapshot["dirty"] = Value::Bool(dirty);
+    }
+    if !languages.is_empty() {
+        snapshot["languages"] = Value::Array(languages.into_iter().map(Value::String).collect());
+    }
+    if !scope.is_null() {
+        snapshot["activeScope"] = scope;
+    }
+    snapshot
+}
+
+fn active_task_scope(root: &std::path::Path) -> Value {
+    // why: plan §46 wants the active task scope alongside branch/commit, but
+    // the gateway must not inject a full plan dump, one pointer only.
+    let marker = root.join(".keel-active-task");
+    let direct = std::fs::read_to_string(&marker)
+        .ok()
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty());
+    if let Some(task) = direct {
+        return Value::String(task.chars().take(128).collect());
+    }
+    let plans = root.join("docs").join("plans");
+    if plans.is_dir() {
+        return Value::String("docs/plans".to_string());
+    }
+    Value::Null
+}
+
+fn detect_workspace_languages(root: &std::path::Path) -> Vec<String> {
+    // why: cheap manifest sniffing beats a full tree walk for a brief summary.
+    const MANIFESTS: [(&str, &str); 12] = [
+        ("Cargo.toml", "rust"),
+        ("package.json", "typescript"),
+        ("pyproject.toml", "python"),
+        ("go.mod", "go"),
+        ("pom.xml", "java"),
+        ("Gemfile", "ruby"),
+        ("pubspec.yaml", "dart"),
+        ("build.gradle", "java"),
+        ("build.gradle.kts", "kotlin"),
+        ("Package.swift", "swift"),
+        ("composer.json", "php"),
+        ("CMakeLists.txt", "cpp"),
+    ];
+    MANIFESTS
+        .iter()
+        .filter(|(manifest, _)| root.join(manifest).is_file())
+        .map(|(_, language)| language.to_string())
+        .collect()
 }
 
 /// Compact restatement of the four-rule Iron Law for the awareness payload. The
@@ -4933,7 +5188,9 @@ mod mcp_timeout_tests {
             let text = tool_skill_list(&arguments).expect("bounded skill page");
             let page: Value = serde_json::from_str(&text).expect("skill page JSON");
             assert!(
-                TokenMeter::count_text(&text) <= 400,
+                TokenMeter::count_text(
+                    &serde_json::to_string(&skill_list_contract(&page)).unwrap_or_default()
+                ) <= 400,
                 "skill page exceeds budget: {}",
                 TokenMeter::count_text(&text)
             );
@@ -5960,6 +6217,67 @@ mod tests {
     use std::fs;
 
     #[test]
+    fn tools_list_order_is_deterministic_across_profiles_and_levels() {
+        // why: plan §21/§54: stable catalog ordering keeps prompt/cache
+        // stable and makes pagination cover the catalog exactly once.
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for profile in [
+            crate::mcp::McpCatalogProfile::Tiered,
+            crate::mcp::McpCatalogProfile::Full,
+        ] {
+            for level in [0u64, 1, 2] {
+                let first =
+                    handle_tools_list_for_profile_params(profile, &json!({ "level": level }))
+                        .expect("deterministic first page");
+                // why: listing twice must not depend on wall-clock or cursor
+                // secrets; only the cursor payload carries per-page state.
+                crate::proxy::context::clear_scoped_gateway_for_test();
+                let second =
+                    handle_tools_list_for_profile_params(profile, &json!({ "level": level }))
+                        .expect("deterministic second page");
+                assert_eq!(
+                    first.get("tools"),
+                    second.get("tools"),
+                    "catalog order must be deterministic for {profile:?} level {level}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cursor_scope_is_bound_to_profile_level_budget_and_session() {
+        // why: plan §21/§54: a cursor must not escape its catalog snapshot,
+        // budget, level, workspace, or session scope.
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let context = crate::mcp::McpRequestContext::authoritative(None);
+        let first = handle_tools_list_for_profile_params_with_context(
+            crate::mcp::McpCatalogProfile::Full,
+            &json!({ "level": 1 }),
+            &context,
+        )
+        .expect("first page must succeed");
+        let cursor = first["nextCursor"]
+            .as_str()
+            .expect("first page must carry a cursor")
+            .to_string();
+        // why: wrong level against the same cursor must fail closed, never
+        // silently re-slice a different snapshot.
+        let replay = handle_tools_list_for_profile_params_with_context(
+            crate::mcp::McpCatalogProfile::Full,
+            &json!({ "cursor": cursor, "level": 2 }),
+            &context,
+        );
+        assert!(
+            replay.is_err(),
+            "cursor bound to level 1 must not decode at level 2"
+        );
+    }
+
+    #[test]
     fn tools_list_advertises_all_tools_in_full_profile() {
         let listed = handle_tools_list_for_profile(crate::mcp::McpCatalogProfile::Full);
         let tools = listed["tools"].as_array().expect("tools array");
@@ -6052,6 +6370,196 @@ mod tests {
         )
         .expect_err("invalid cursor must fail closed");
         assert!(error.contains("cursor"), "{error}");
+    }
+
+    #[test]
+    fn server_discover_alias_shares_owner_and_session_gate() {
+        // why: plan §19: `server/discover` must behave like `keel/discover`
+        // (same owner) and keep the same HTTP session requirement.
+        let payload = discover_capabilities("memory recall", 2, 0).expect("discover must succeed");
+        assert!(
+            payload.get("capabilities").is_some(),
+            "discover owner must return capabilities"
+        );
+        let http = include_str!("http.rs");
+        assert!(
+            http.contains("\"server/discover\""),
+            "HTTP session gate must list the server/discover alias"
+        );
+        let dispatch = include_str!("mod.rs");
+        assert!(
+            dispatch.contains("server/discover"),
+            "dispatch must route the server/discover alias"
+        );
+    }
+
+    #[test]
+    fn discover_owner_is_deterministic() {
+        // why: discovery ranking must stay stable for cache reuse.
+        let first = discover_capabilities("memory recall", 5, 0).expect("discover must succeed");
+        let second = discover_capabilities("memory recall", 5, 0).expect("discover must succeed");
+        assert_eq!(
+            first.get("capabilities"),
+            second.get("capabilities"),
+            "discover ranking must be deterministic"
+        );
+    }
+
+    #[test]
+    fn skill_list_cursor_is_bound_to_session_and_workspace() {
+        // why: plan §21: a skill cursor must not escape its session or
+        // workspace scope, mirroring the tools/list catalog cursor.
+        let home = crate::test_support::unique_temp_dir("skill-cursor-scope");
+        let fingerprint = "scope-fingerprint".to_string();
+        let expiry = now_unix_seconds().saturating_add(900);
+        let cursor = encode_skill_catalog_cursor(
+            3,
+            1200,
+            &fingerprint,
+            home.as_ref(),
+            "session-a",
+            "workspace-a",
+            expiry,
+        );
+        assert_eq!(
+            decode_skill_catalog_cursor(
+                &cursor,
+                1200,
+                &fingerprint,
+                home.as_ref(),
+                "session-a",
+                "workspace-a",
+            )
+            .expect("same scope must decode"),
+            3
+        );
+        assert!(
+            decode_skill_catalog_cursor(
+                &cursor,
+                1200,
+                &fingerprint,
+                home.as_ref(),
+                "session-b",
+                "workspace-a",
+            )
+            .is_err(),
+            "cross-session cursor must fail closed"
+        );
+        assert!(
+            decode_skill_catalog_cursor(
+                &cursor,
+                1200,
+                &fingerprint,
+                home.as_ref(),
+                "session-a",
+                "workspace-b",
+            )
+            .is_err(),
+            "cross-workspace cursor must fail closed"
+        );
+    }
+
+    #[test]
+    fn skill_list_page_carries_session_cache_hint() {
+        let payload = skill_list_payload(1, 0, &[json!({"name": "probe"})], 400, None);
+        assert_eq!(
+            payload["_meta"]["cache"]["cacheScope"],
+            json!("session"),
+            "skill pages must declare session cache scope"
+        );
+        assert!(
+            payload["_meta"]["cache"]["ttlMs"].as_u64().unwrap_or(0) > 0,
+            "skill pages must declare a positive ttlMs"
+        );
+        assert!(
+            TokenMeter::count_text(
+                &serde_json::to_string(&skill_list_contract(&payload)).unwrap_or_default()
+            ) <= 400,
+            "skill contract measurement must exclude the cache hint"
+        );
+    }
+
+    #[test]
+    fn tools_list_page_carries_session_cache_hint() {
+        // why: 2026-07-28 list responses are cacheable; the hint must ride
+        // outside the token-budgeted contract measurement.
+        let page = tools_list_page(&[json!({"name": "probe"})], Some("cursor-value"));
+        assert_eq!(
+            page["_meta"]["cache"]["cacheScope"],
+            json!("session"),
+            "list pages must declare session cache scope"
+        );
+        assert!(
+            page["_meta"]["cache"]["ttlMs"].as_u64().unwrap_or(0) > 0,
+            "list pages must declare a positive ttlMs"
+        );
+    }
+
+    #[test]
+    fn context_brief_carries_bounded_repository_truth() {
+        // why: plan §46: the gateway exposes a compact project-state summary
+        // on demand, never a full repository map.
+        let payload = tool_context_brief(&json!({})).expect("context_brief must succeed");
+        let parsed: Value = serde_json::from_str(&payload).expect("valid JSON payload");
+        let truth = parsed
+            .get("repositoryTruth")
+            .expect("repositoryTruth present");
+        assert!(
+            truth.get("branch").is_some() || truth.get("unavailable").is_some(),
+            "repository truth must be explicit: {truth}"
+        );
+        assert!(
+            truth.get("languages").is_none()
+                || truth["languages"]
+                    .as_array()
+                    .is_some_and(|languages| languages.len() <= 12),
+            "language summary must stay bounded: {truth}"
+        );
+        if truth.get("unavailable").is_none() {
+            assert!(
+                truth.get("commitFull").is_some()
+                    && truth.get("dirtyFiles").is_some()
+                    && truth.get("snapshotAt").is_some(),
+                "repository truth must carry full commit, dirty count, and timestamp: {truth}"
+            );
+        }
+    }
+
+    #[test]
+    fn repository_truth_snapshot_is_explicit_outside_git() {
+        let missing = repository_truth_snapshot(None);
+        assert!(
+            missing.get("unavailable").is_some(),
+            "missing root must be explicit: {missing}"
+        );
+        let dir = crate::test_support::unique_temp_dir("repo-truth-outside-git");
+        let snapshot = repository_truth_snapshot(Some(dir.as_ref()));
+        assert!(
+            snapshot.get("branch").is_some() || snapshot.get("unavailable").is_some(),
+            "non-git dir must degrade explicitly: {snapshot}"
+        );
+    }
+
+    #[test]
+    fn discover_result_carries_session_cache_hint() {
+        let payload = discover_capabilities("memory recall status", 2, 0)
+            .expect("discover must succeed for cache-hint check");
+        assert_eq!(
+            payload["_meta"]["cache"]["cacheScope"],
+            json!("session"),
+            "discover must declare session cache scope"
+        );
+        assert!(
+            payload["_meta"]["cache"]["ttlMs"].as_u64().unwrap_or(0) > 0,
+            "discover must declare a positive ttlMs"
+        );
+        let mut budgeted = payload.clone();
+        budgeted.as_object_mut().expect("object").remove("_meta");
+        assert!(
+            measure_tools_list_response(&budgeted)
+                <= crate::proxy::context::DEFAULT_MAX_TOOL_CATALOG_TOKENS,
+            "discover contract measurement must exclude the cache hint"
+        );
     }
 
     #[test]

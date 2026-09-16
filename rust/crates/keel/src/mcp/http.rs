@@ -1,8 +1,8 @@
 //! Purpose: Streamable HTTP transport for the keel MCP server — multi-client
 //!   concurrent connections on one process (MCP 2025-11-25 transports).
 //! Caller: `run_mcp_command` `serve-http` arm.
-//! Dependencies: std::net only (no async runtime); reuses `super::dispatch` /
-//!   `dispatch_body` for JSON-RPC semantics.
+//! Dependencies: std::net only (no async runtime); reuses
+//!   `super::dispatch_for_test` / `dispatch_body` for JSON-RPC semantics.
 //! Side Effects: Binds a TCP listener (default 127.0.0.1:3920), accepts bounded
 //!   concurrent clients, writes responses, and tracks sessions/cancellation.
 
@@ -630,6 +630,8 @@ struct HttpHeaders {
     authorization: Option<String>,
     protocol_version: Option<String>,
     session_id: Option<String>,
+    mcp_method: Option<String>,
+    mcp_name: Option<String>,
     singleton_headers_valid: bool,
 }
 
@@ -654,6 +656,8 @@ fn parse_headers(text: &str) -> HttpHeaders {
     let mut authorization = None;
     let mut protocol_version = None;
     let mut session_id = None;
+    let mut mcp_method = None;
+    let mut mcp_name = None;
     let mut singleton_headers_valid = true;
     for line in lines {
         if let Some((name, value)) = line.split_once(':') {
@@ -692,6 +696,12 @@ fn parse_headers(text: &str) -> HttpHeaders {
                 "mcp-session-id" => {
                     singleton_headers_valid &= session_id.replace(value.to_string()).is_none();
                 }
+                "mcp-method" => {
+                    singleton_headers_valid &= mcp_method.replace(value.to_string()).is_none();
+                }
+                "mcp-name" => {
+                    singleton_headers_valid &= mcp_name.replace(value.to_string()).is_none();
+                }
                 _ => {}
             }
         }
@@ -707,6 +717,8 @@ fn parse_headers(text: &str) -> HttpHeaders {
         authorization,
         protocol_version,
         session_id,
+        mcp_method,
+        mcp_name,
         singleton_headers_valid,
     }
 }
@@ -734,7 +746,7 @@ fn is_json_content_type(content_type: &str) -> bool {
 }
 
 fn supported_http_protocol_version(version: &str) -> bool {
-    matches!(version, "2025-03-26" | "2025-11-25")
+    matches!(version, "2026-07-28")
 }
 
 fn exact_origin_host(origin: &str) -> Option<String> {
@@ -874,12 +886,32 @@ fn respond(
     }
 
     let path = headers.path.split('?').next().unwrap_or("/");
+    if path == "/sse" || path == "/sse/" {
+        return write_http(
+            stream,
+            400,
+            "application/json",
+            None,
+            br#"{"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"unsupported_protocol: legacy SSE fallback is deprecated; streamable HTTP required"}}"#,
+        );
+    }
     if path != "/mcp" && path != "/mcp/" {
         return write_http(stream, 404, "text/plain; charset=utf-8", None, b"not found");
     }
 
     match headers.method.to_ascii_uppercase().as_str() {
         "GET" => {
+            if media_type_list_contains(&headers.accept, "text/event-stream")
+                || headers.accept.contains("text/event-stream")
+            {
+                return write_http(
+                    stream,
+                    400,
+                    "application/json",
+                    None,
+                    br#"{"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"unsupported_protocol: legacy SSE fallback is deprecated; streamable HTTP required"}}"#,
+                );
+            }
             if let Err(error) = validate_http_session(
                 state,
                 headers.session_id.as_deref(),
@@ -887,17 +919,6 @@ fn respond(
                 false,
             ) {
                 return write_http_session_validation_error(stream, error);
-            }
-            // Optional SSE listen; we offer a minimal open stream then close.
-            if media_type_list_contains(&headers.accept, "text/event-stream") {
-                let priming = "id: 0\ndata: \n\n";
-                return write_http(
-                    stream,
-                    200,
-                    "text/event-stream",
-                    headers.session_id.as_deref(),
-                    priming.as_bytes(),
-                );
             }
             write_http(
                 stream,
@@ -965,25 +986,25 @@ fn handle_post(
             b"Content-Type must be application/json",
         );
     }
-    if !accepts_streamable_http(&headers.accept) {
-        return write_http(
-            stream,
-            406,
-            "text/plain; charset=utf-8",
-            None,
-            b"Accept must include application/json and text/event-stream",
-        );
-    }
     if let Some(version) = headers.protocol_version.as_deref() {
         if !supported_http_protocol_version(version) {
             return write_http(
                 stream,
                 400,
-                "text/plain; charset=utf-8",
+                "application/json",
                 None,
-                b"Unsupported MCP-Protocol-Version",
+                br#"{"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"unsupported_protocol: legacy protocol version is deprecated; MCP 2026-07-28 required"}}"#,
             );
         }
+    }
+    if !accepts_streamable_http(&headers.accept) {
+        return write_http(
+            stream,
+            400,
+            "application/json",
+            None,
+            br#"{"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"unsupported_protocol: legacy SSE fallback is deprecated; streamable HTTP required"}}"#,
+        );
     }
     if body.is_empty() {
         return write_http(
@@ -1009,8 +1030,47 @@ fn handle_post(
         }
     };
 
-    let method = value.get("method").and_then(Value::as_str);
-    let is_initialize = method == Some("initialize");
+    // Header routing and consistency check (Plan §18)
+    let body_method = value.get("method").and_then(Value::as_str);
+    if let Some(header_method) = headers.mcp_method.as_deref() {
+        if let Some(b_method) = body_method {
+            if b_method != header_method {
+                let err = super::error_response(
+                    value.get("id").cloned().unwrap_or(Value::Null),
+                    JSON_RPC_INVALID_REQUEST,
+                    &format!(
+                        "Mcp-Method header '{header_method}' does not match request body method '{b_method}'"
+                    ),
+                );
+                let bytes = serde_json::to_vec(&err).unwrap_or_default();
+                return write_http(stream, 400, "application/json", None, &bytes);
+            }
+        }
+    }
+    let effective_method = headers.mcp_method.as_deref().or(body_method);
+    if let Some(header_name) = headers.mcp_name.as_deref() {
+        if effective_method == Some("tools/call") {
+            if let Some(param_name) = value
+                .get("params")
+                .and_then(|p| p.get("name"))
+                .and_then(Value::as_str)
+            {
+                if param_name != header_name {
+                    let err = super::error_response(
+                        value.get("id").cloned().unwrap_or(Value::Null),
+                        JSON_RPC_INVALID_REQUEST,
+                        &format!(
+                            "Mcp-Name header '{header_name}' does not match params.name '{param_name}'"
+                        ),
+                    );
+                    let bytes = serde_json::to_vec(&err).unwrap_or_default();
+                    return write_http(stream, 400, "application/json", None, &bytes);
+                }
+            }
+        }
+    }
+
+    let is_initialize = effective_method == Some("initialize");
     if value
         .as_array()
         .is_some_and(|items| items.iter().any(is_initialize_message))
@@ -1054,6 +1114,25 @@ fn handle_post(
             br#"{"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"initialize must be a request with a string or integer id"}}"#,
         );
     }
+
+    // Deprecate legacy 2025 handshakes (Plan §17.1)
+    if is_initialize {
+        let requested_proto = value
+            .get("params")
+            .and_then(|p| p.get("protocolVersion"))
+            .and_then(Value::as_str);
+        if let Some(proto) = requested_proto {
+            if proto != "2026-07-28" {
+                let err = super::error_response(
+                    value.get("id").cloned().unwrap_or(Value::Null),
+                    JSON_RPC_INVALID_REQUEST,
+                    "unsupported_protocol: legacy 2025 handshake is deprecated; modern MCP 2026-07-28 required",
+                );
+                let bytes = serde_json::to_vec(&err).unwrap_or_default();
+                return write_http(stream, 400, "application/json", None, &bytes);
+            }
+        }
+    }
     if !is_initialize {
         if let Err(error) = validate_http_session(
             state,
@@ -1074,7 +1153,7 @@ fn handle_post(
         );
     }
     if matches!(
-        method,
+        effective_method,
         Some("notifications/initialized" | "notifications/cancelled")
     ) && value.get("id").is_some()
     {
@@ -1171,6 +1250,9 @@ fn is_legacy_http_initialize(value: &Value) -> bool {
         == Some(super::MCP_LEGACY_PROTOCOL_VERSION)
 }
 
+/// Determines if a request requires an established HTTP session.
+/// Non-session requests are limited to "initialize" and "ping".
+/// All other methods, including "keel/discover" and "server/discover", require a session.
 fn request_requires_http_session(value: &Value) -> bool {
     match value {
         Value::Array(items) => items.iter().any(request_requires_http_session),
@@ -1556,8 +1638,9 @@ mod tests {
         assert!(is_json_content_type("Application/JSON; charset=utf-8"));
         assert!(!is_json_content_type("application/json-seq"));
         assert!(!is_json_content_type("application/jsonp"));
-        assert!(supported_http_protocol_version("2025-03-26"));
-        assert!(supported_http_protocol_version("2025-11-25"));
+        assert!(supported_http_protocol_version("2026-07-28"));
+        assert!(!supported_http_protocol_version("2025-03-26"));
+        assert!(!supported_http_protocol_version("2025-11-25"));
         assert!(!supported_http_protocol_version("2099-01-01"));
     }
 
@@ -1661,7 +1744,7 @@ mod tests {
 
     #[test]
     fn initialize_returns_server_info() {
-        let result = super::super::dispatch(&json!({
+        let result = super::super::dispatch_for_test(&json!({
             "jsonrpc": "2.0",
             "id": 1,
             "method": "initialize",
@@ -1994,13 +2077,13 @@ mod tests {
     #[test]
     fn initialized_notification_rejects_a_request_id() {
         let state = Arc::new(HttpState::default());
-        assert!(state.register_session("initialized-session".to_string(), "2025-11-25".to_string()));
+        assert!(state.register_session("initialized-session".to_string(), "2026-07-28".to_string()));
         let body = br#"{"jsonrpc":"2.0","id":1,"method":"notifications/initialized"}"#;
         let request = http_post_request(
             body,
             &[
                 ("MCP-Session-Id", "initialized-session"),
-                ("MCP-Protocol-Version", "2025-11-25"),
+                ("MCP-Protocol-Version", "2026-07-28"),
             ],
         );
         let response = http_round_trip(state, &request);
@@ -2014,22 +2097,22 @@ mod tests {
     #[test]
     fn negotiated_protocol_controls_http_batch_support() {
         let body = br#"[{"jsonrpc":"2.0","id":1,"method":"ping"},{"jsonrpc":"2.0","id":2,"method":"ping"}]"#;
-        for (version, expected_status) in [("2025-11-25", 400), ("2025-03-26", 200)] {
-            let state = Arc::new(HttpState::default());
-            assert!(state.register_session("batch-session".to_string(), version.to_string()));
-            let request = http_post_request(
-                body,
-                &[
-                    ("MCP-Session-Id", "batch-session"),
-                    ("MCP-Protocol-Version", version),
-                ],
-            );
-            let response = http_round_trip(state, &request);
-            assert!(
-                response.starts_with(&format!("HTTP/1.1 {expected_status}")),
-                "version={version} response={response}"
-            );
-        }
+        let version = "2026-07-28";
+        let expected_status = 400;
+        let state = Arc::new(HttpState::default());
+        assert!(state.register_session("batch-session".to_string(), version.to_string()));
+        let request = http_post_request(
+            body,
+            &[
+                ("MCP-Session-Id", "batch-session"),
+                ("MCP-Protocol-Version", version),
+            ],
+        );
+        let response = http_round_trip(state, &request);
+        assert!(
+            response.starts_with(&format!("HTTP/1.1 {expected_status}")),
+            "version={version} response={response}"
+        );
     }
 
     #[test]

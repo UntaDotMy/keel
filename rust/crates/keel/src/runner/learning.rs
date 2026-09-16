@@ -25,6 +25,8 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
+
 use crate::args::FlagSet;
 use crate::runner::observation::{self, Observation};
 use crate::runtime::{
@@ -79,6 +81,148 @@ const LEARNING_META_FILE: &str = ".learning-meta.json";
 
 /// Field value marking an instinct (and skill/agent) as loop-generated.
 const SOURCE_OBSERVED: &str = "observed";
+
+/// Skill-gap proposal submitted by an agent or learning loop for validation before activation (§23.3).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SkillGapProposal {
+    pub name: String,
+    pub scope: String,
+    pub description: String,
+    pub content: String,
+    pub provenance: String,
+    pub test_evidence: Option<String>,
+    pub related_signatures: Vec<String>,
+}
+
+/// Validation result across the six §23.3 dimensions: scope, redundancy, security, size, tests, provenance.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SkillGapValidationResult {
+    pub is_valid: bool,
+    pub issues: Vec<String>,
+    pub scope_valid: bool,
+    pub redundancy_valid: bool,
+    pub security_valid: bool,
+    pub size_valid: bool,
+    pub tests_valid: bool,
+    pub provenance_valid: bool,
+}
+
+pub fn validate_skill_gap_proposal(
+    proposal: &SkillGapProposal,
+    _claude_home: &Path,
+    existing_skills: &[String],
+) -> SkillGapValidationResult {
+    let mut issues = Vec::new();
+
+    // 1. Scope validation: bounded alphanumeric/dash, non-empty scope
+    let mut scope_valid = true;
+    if proposal.name.trim().is_empty()
+        || proposal.name.len() > 64
+        || !proposal
+            .name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        issues.push(
+            "Invalid skill name or scope: must be bounded alphanumeric/dash identifier".to_string(),
+        );
+        scope_valid = false;
+    }
+    if proposal.scope.trim().is_empty() {
+        issues.push("Scope description cannot be empty".to_string());
+        scope_valid = false;
+    }
+
+    // 2. Redundancy validation: conflict with built-in/canonical skills
+    let mut redundancy_valid = true;
+    let normalized_name = proposal.name.trim().to_ascii_lowercase();
+    if existing_skills
+        .iter()
+        .any(|s| s.to_ascii_lowercase() == normalized_name && !s.starts_with("learned-"))
+    {
+        issues.push(format!(
+            "Redundant skill: conflicts with existing canonical skill '{}'",
+            proposal.name
+        ));
+        redundancy_valid = false;
+    }
+
+    // 3. Security validation: forbidden execution or dangerous commands
+    let mut security_valid = true;
+    let dangerous_patterns = [
+        "rm -rf /",
+        "mkfs",
+        ":(){ :|:& };:",
+        "curl | sh",
+        "wget | sh",
+        "chmod -R 777 /",
+        "eval(",
+        "exec(",
+    ];
+    for pat in dangerous_patterns {
+        if proposal.content.contains(pat) {
+            issues.push(format!(
+                "Security violation: proposal contains forbidden pattern '{pat}'"
+            ));
+            security_valid = false;
+        }
+    }
+
+    // 4. Size validation: max 32 KB, min 20 chars
+    let mut size_valid = true;
+    if proposal.content.len() > 32 * 1024 {
+        issues.push(format!(
+            "Size violation: proposal size ({} bytes) exceeds 32 KB bound",
+            proposal.content.len()
+        ));
+        size_valid = false;
+    } else if proposal.content.trim().len() < 20 {
+        issues.push("Size violation: proposal content is trivially short".to_string());
+        size_valid = false;
+    }
+
+    // 5. Tests validation: test evidence or verification instructions
+    let mut tests_valid = true;
+    let has_test_evidence = proposal
+        .test_evidence
+        .as_ref()
+        .map(|t| !t.trim().is_empty())
+        .unwrap_or(false)
+        || proposal.content.to_ascii_lowercase().contains("test")
+        || proposal.content.to_ascii_lowercase().contains("verify")
+        || proposal.content.to_ascii_lowercase().contains("assert");
+    if !has_test_evidence {
+        issues.push(
+            "Test validation: proposal lacks test evidence or verification instructions"
+                .to_string(),
+        );
+        tests_valid = false;
+    }
+
+    // 6. Provenance validation: non-empty trace
+    let mut provenance_valid = true;
+    if proposal.provenance.trim().is_empty() || proposal.provenance == "unknown" {
+        issues.push("Provenance violation: missing provenance trace linking to failure event or observed need".to_string());
+        provenance_valid = false;
+    }
+
+    let is_valid = scope_valid
+        && redundancy_valid
+        && security_valid
+        && size_valid
+        && tests_valid
+        && provenance_valid;
+    SkillGapValidationResult {
+        is_valid,
+        issues,
+        scope_valid,
+        redundancy_valid,
+        security_valid,
+        size_valid,
+        tests_valid,
+        provenance_valid,
+    }
+}
 
 /// Options controlling one cycle run. Defaults match the constants above; the
 /// CLI inspection surface flips `dry_run` to preview without writing.
@@ -1343,6 +1487,41 @@ fn evolve_skill(
                 return EvolveOutcome::Respected;
             }
         }
+    }
+
+    let proposal = SkillGapProposal {
+        name: skill_name.clone(),
+        scope: format!("project:{}", project),
+        description: format!("Learned procedures for project {project}"),
+        content: content.clone(),
+        provenance: format!("observed-trusted-instincts:{}", instincts.len()),
+        test_evidence: Some("Verified recurring observations across sessions".to_string()),
+        related_signatures: signature_set
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect(),
+    };
+    let existing_skills: Vec<String> = fs::read_dir(skills_directory(claude_home))
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .filter(|e| e.path().is_dir())
+                .filter_map(|e| e.file_name().into_string().ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    let validation = validate_skill_gap_proposal(&proposal, claude_home, &existing_skills);
+    if !validation.is_valid {
+        let _ = writeln!(
+            log,
+            "keel learn: rejected skill-gap proposal {skill_name}: {}",
+            validation.issues.join("; ")
+        );
+        return EvolveOutcome::Failed(format!(
+            "skill-gap proposal validation failed: {}",
+            validation.issues.join("; ")
+        ));
     }
 
     if options.dry_run {

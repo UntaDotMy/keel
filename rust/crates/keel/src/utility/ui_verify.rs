@@ -59,6 +59,7 @@ pub struct UiCriterion {
 pub enum VisualAdapter {
     ComputerUse,
     Playwright,
+    HeadlessBrowser,
     NeedsHuman,
 }
 
@@ -67,14 +68,18 @@ impl VisualAdapter {
         match self {
             Self::ComputerUse => "computer-use",
             Self::Playwright => "playwright",
+            Self::HeadlessBrowser => "headless-browser",
             Self::NeedsHuman => "needs_human",
         }
     }
 
     pub fn from_name(name: &str) -> Option<Self> {
         match name.trim().to_ascii_lowercase().as_str() {
-            "computer-use" | "computer_use" | "browser" => Some(Self::ComputerUse),
+            "computer-use" | "computer_use" => Some(Self::ComputerUse),
             "playwright" => Some(Self::Playwright),
+            "headless-browser" | "headless_browser" | "headless" | "browser" => {
+                Some(Self::HeadlessBrowser)
+            }
             "needs-human" | "needs_human" | "human" => Some(Self::NeedsHuman),
             _ => None,
         }
@@ -156,10 +161,13 @@ pub fn detect_visual_adapter(workspace_root: &Path, explicit: Option<&str>) -> V
             return adapter;
         }
     }
-    if std::env::var("CLAUDE_COMPUTER_USE").is_ok()
-        || std::env::var("KEEL_BROWSER_AVAILABLE").is_ok()
-    {
+    if std::env::var("CLAUDE_COMPUTER_USE").is_ok() {
         return VisualAdapter::ComputerUse;
+    }
+    if std::env::var("KEEL_BROWSER_AVAILABLE").is_ok()
+        || std::env::var("HEADLESS_BROWSER_AVAILABLE").is_ok()
+    {
+        return VisualAdapter::HeadlessBrowser;
     }
     let playwright_config = workspace_root.join("playwright.config.ts");
     let playwright_config_js = workspace_root.join("playwright.config.js");
@@ -190,7 +198,7 @@ pub fn evaluate_visual_criterion(
         return (
             VisualVerdict::NeedsHuman,
             vec![
-                "No automated visual adapter available (neither computer-use nor playwright detected); requires human visual inspection"
+                "No automated visual adapter available (computer-use, playwright, or headless-browser); requires human visual inspection"
                     .to_string(),
             ],
         );
@@ -199,7 +207,8 @@ pub fn evaluate_visual_criterion(
         return (
             VisualVerdict::Unclear,
             vec![
-                "No screen fixture or navigation context available to verify criteria".to_string(),
+                "No screen fixture or navigation context available to verify criteria; unclear must never become pass"
+                    .to_string(),
             ],
         );
     };
@@ -933,6 +942,14 @@ mod tests {
         assert_eq!(
             detect_visual_adapter(&temp, Some("computer-use")),
             VisualAdapter::ComputerUse
+        );
+        assert_eq!(
+            detect_visual_adapter(&temp, Some("headless-browser")),
+            VisualAdapter::HeadlessBrowser
+        );
+        assert_eq!(
+            detect_visual_adapter(&temp, Some("browser")),
+            VisualAdapter::HeadlessBrowser
         );
         assert_eq!(
             detect_visual_adapter(&temp, Some("needs_human")),

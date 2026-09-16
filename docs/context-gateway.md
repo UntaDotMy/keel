@@ -25,7 +25,11 @@ progressive levels (capability index, metadata, full schema). The no-cursor MCP
 request (`params` omitted or `{}`) always returns a bounded first page; when more
 tools remain it includes `nextCursor`, so an oversized catalog is never returned
 as one unbounded response. `keel/discover` returns ranked compact metadata and
-`keel/activate` writes a session/workspace activation receipt. The default profile
+`keel/activate` writes a session/workspace activation receipt. `server/discover`
+is accepted as a modern alias of `keel/discover` with the same owner and budget.
+List and discover pages carry `_meta.cache` (`ttlMs`, `cacheScope: session`) so
+modern hosts can reuse them; the hint rides outside the token-budgeted contract
+measurement. The default profile
 is `core`; `full` remains an explicit compatibility/debug choice.
 
 Every result carries the `resultType` that revision `2026-07-28` requires, and
@@ -71,7 +75,13 @@ review/completion decisions.
 keel stats context --json
 keel stats tools --json
 keel stats gain --json
+keel stats provider-usage [--record --provider <name> --cached-input N --uncached-input N --output N]
 ```
+
+Provider cache accounting is host-reported only. `stats context --json` carries
+`providerUsage` when a host has recorded real numbers (including a computed
+`cacheHitRate`), and `null` otherwise, Keel never infers cache usage from a
+stable prefix or from `headers` metadata alone.
 
 The reproducible baseline and required quality/latency/cache gates are recorded
 in [`benchmarks/context-gateway-baseline.json`](benchmarks/context-gateway-baseline.json).

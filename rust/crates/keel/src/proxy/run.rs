@@ -349,6 +349,27 @@ pub fn run_proxy(
                 )
             });
 
+            if raw_run.exit_code != 0 {
+                let stderr_snippet = String::from_utf8_lossy(&raw_run.stderr);
+                let stdout_snippet = String::from_utf8_lossy(&raw_run.stdout);
+                let observed = if !stderr_snippet.trim().is_empty() {
+                    &stderr_snippet
+                } else {
+                    &stdout_snippet
+                };
+                if let Ok(home) = crate::runtime::resolve_claude_home("") {
+                    let _ = crate::utility::memory_families::record_failure_event(
+                        &home,
+                        None,
+                        "command_failure",
+                        &meta.command,
+                        &format!("exit code {}", raw_run.exit_code),
+                        observed.trim(),
+                        None,
+                    );
+                }
+            }
+
             let compact_result = if flag_set.bool_value("errors-only") {
                 errors_only_compact(&raw_run, &meta)
             } else {

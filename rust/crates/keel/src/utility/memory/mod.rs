@@ -72,7 +72,8 @@ pub fn run_memory_command(
             standard_error,
         ),
         "research-cache" | "maintenance" | "agent-registry" | "agent-packets" | "loop-guard"
-        | "retrieve" | "entity" | "graph" | "status" | "instincts" => {
+        | "retrieve" | "entity" | "graph" | "status" | "instincts" | "lessons" | "corrections"
+        | "decisions" | "events" | "arbitrate" => {
             crate::utility::memory_families::run_memory_family_command(
                 command_group,
                 arguments[0].as_str(),
