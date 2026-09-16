@@ -80,7 +80,13 @@ fn compact_stream(text: &str, label: &str) -> String {
     let line_count = text.lines().count();
     let signals = signal_lines(text, SIGNAL_LIMIT);
     if signals.is_empty() && line_count <= LINE_LIMIT {
-        return text.to_string();
+        // Short output is still agent-visible, so apply the same line-level
+        // redactor as the edge/signal paths.
+        return text
+            .lines()
+            .map(redact_possible_secret)
+            .collect::<Vec<_>>()
+            .join("\n");
     }
 
     let mut rendered = String::new();
@@ -218,6 +224,15 @@ mod tests {
             !rendered.contains("sk-secret-value-1234567890abcdef"),
             "raw secret must not reach the compact result"
         );
+    }
+
+    #[test]
+    fn short_generic_output_redacts_secret_shaped_values() {
+        let stdout = "status: ok\nOPENAI_API_KEY=sk-short-generic-secret\n";
+        let result = GenericAdapter.compact(stdout.as_bytes(), b"", 0, &meta(stdout.len()));
+        assert!(result.compacted);
+        assert!(result.stdout.contains("[redacted possible secret"));
+        assert!(!result.stdout.contains("sk-short-generic-secret"));
     }
 
     fn meta(stdout_bytes: usize) -> RunMeta {

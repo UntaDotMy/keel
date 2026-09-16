@@ -261,24 +261,6 @@ pub fn copy_tree(src: &Path, dst: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Public compatibility helper retained for host-side workspace readers.
-#[allow(dead_code)]
-pub fn paginated_read(path: &Path, offset: usize, limit: usize) -> Result<String, String> {
-    let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-    let lines: Vec<&str> = text.lines().collect();
-    let end = (offset + limit).min(lines.len());
-    let slice = if offset < lines.len() {
-        &lines[offset..end]
-    } else {
-        &[] as &[&str]
-    };
-    let mut out = String::new();
-    for (i, line) in slice.iter().enumerate() {
-        out.push_str(&format!("{:4}: {}\n", offset + i + 1, line));
-    }
-    Ok(out)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

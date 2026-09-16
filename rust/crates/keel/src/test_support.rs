@@ -37,8 +37,113 @@ const PROCESS_TREE_FIXTURE_TEST: &str = "test_support::descendant_pipe_fixture";
 /// Writers hold this for their full test body and restore the prior values.
 pub(crate) static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+/// Neutralize `KEEL_HOME` for the duration of a test that drives home resolution
+/// through `CLAUDE_TARGET_OVERRIDE`.
+///
+/// `resolve_keel_home` resolves explicit flag → `KEEL_HOME` → legacy
+/// `CLAUDE_TARGET_OVERRIDE` → `~/.keel`, so a `KEEL_HOME` present in the process
+/// silently outranks the value the test just set. Because the other var is a
+/// *path*, `ENV_LOCK` cannot help: the lock serializes writers, but a test that
+/// never writes `KEEL_HOME` still reads whatever one is set. A leaked
+/// `KEEL_HOME` therefore makes such tests read a directory they never created,
+/// which is exactly the "gate reported nothing pending" failure the learned-skill
+/// gate test showed. Clearing the higher-precedence var makes the outcome depend
+/// only on what the test controls. Restores the prior value on drop, including
+/// during unwinding.
+pub(crate) struct HomePrecedenceGuard {
+    previous: Option<std::ffi::OsString>,
+}
+
+impl HomePrecedenceGuard {
+    pub(crate) fn clear_keel_home() -> Self {
+        let previous = std::env::var_os("KEEL_HOME");
+        std::env::remove_var("KEEL_HOME");
+        Self { previous }
+    }
+}
+
+impl Drop for HomePrecedenceGuard {
+    fn drop(&mut self) {
+        match &self.previous {
+            Some(value) => std::env::set_var("KEEL_HOME", value),
+            None => std::env::remove_var("KEEL_HOME"),
+        }
+    }
+}
+
 pub(crate) struct TestTempDir {
     path: PathBuf,
+}
+
+#[cfg(test)]
+mod home_precedence_tests {
+    use super::HomePrecedenceGuard;
+    use crate::test_support::ENV_LOCK;
+
+    /// The guard must remove the higher-precedence home variable for its scope and
+    /// put the prior value back afterwards, so a test that drives resolution
+    /// through `CLAUDE_TARGET_OVERRIDE` cannot be overridden by a leaked
+    /// `KEEL_HOME`.
+    #[test]
+    fn home_precedence_guard_clears_and_restores_keel_home() {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous = std::env::var_os("KEEL_HOME");
+        std::env::set_var("KEEL_HOME", "C:/leaked/foreign/home");
+
+        {
+            let _scoped = HomePrecedenceGuard::clear_keel_home();
+            assert!(
+                std::env::var_os("KEEL_HOME").is_none(),
+                "the guard must remove KEEL_HOME for its scope"
+            );
+            let resolved = crate::runtime::resolve_keel_home("").expect("resolve");
+            assert!(
+                !resolved.to_string_lossy().contains("foreign"),
+                "a cleared KEEL_HOME must stop resolution reaching the leaked home: {resolved:?}"
+            );
+        }
+
+        assert_eq!(
+            std::env::var_os("KEEL_HOME").as_deref(),
+            Some(std::ffi::OsStr::new("C:/leaked/foreign/home")),
+            "the guard must restore the prior KEEL_HOME"
+        );
+
+        match previous {
+            Some(value) => std::env::set_var("KEEL_HOME", value),
+            None => std::env::remove_var("KEEL_HOME"),
+        }
+    }
+
+    /// Resolution must follow the documented precedence, which is what makes the
+    /// guard necessary: `KEEL_HOME` outranks `CLAUDE_TARGET_OVERRIDE`.
+    #[test]
+    fn keel_home_outranks_the_legacy_override() {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous_keel = std::env::var_os("KEEL_HOME");
+        let previous_legacy = std::env::var_os("CLAUDE_TARGET_OVERRIDE");
+        std::env::set_var("KEEL_HOME", "C:/primary/home");
+        std::env::set_var("CLAUDE_TARGET_OVERRIDE", "C:/legacy/home");
+
+        let resolved = crate::runtime::resolve_keel_home("").expect("resolve");
+        assert!(
+            resolved.to_string_lossy().contains("primary"),
+            "KEEL_HOME must win: {resolved:?}"
+        );
+
+        match previous_keel {
+            Some(value) => std::env::set_var("KEEL_HOME", value),
+            None => std::env::remove_var("KEEL_HOME"),
+        }
+        match previous_legacy {
+            Some(value) => std::env::set_var("CLAUDE_TARGET_OVERRIDE", value),
+            None => std::env::remove_var("CLAUDE_TARGET_OVERRIDE"),
+        }
+    }
 }
 
 impl Deref for TestTempDir {

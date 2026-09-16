@@ -77,6 +77,10 @@ See `../_shared/common-discipline.md` for the canonical rules. Apply them to all
 
 ## Reference Map
 
+Start with the [core knowledge map](references/00-core-knowledge-map.md) when
+the request spans multiple lifecycle topics; it maps each topic to the
+smallest authoritative reference below.
+
 | Need | Primary Reference |
 |---|---|
 | Engineering principles, clean code, SOLID, anti-patterns | `references/10-engineering-principles.md` |

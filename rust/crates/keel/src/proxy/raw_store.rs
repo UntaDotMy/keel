@@ -21,6 +21,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 /// caller could construct a RawRun directly — this ensures save() never writes
 /// an unbounded stream to disk. Matches the capture cap.
 const MAX_RAW_WRITE_BYTES: usize = 64 * 1024 * 1024;
+/// Version that marks manifests written with the execution-receipt contract.
+/// Version 1 remains readable for artifacts created by UI verification.
+pub(crate) const EXECUTION_RECEIPT_INTEGRITY_SCHEMA_VERSION: u32 = 2;
 /// Raw ids become directory names and recovery pointers; bound them before
 /// path construction so a caller cannot create oversized path components.
 const MAX_RAW_ID_BYTES: usize = 256;
@@ -637,7 +640,7 @@ impl RawStore {
         let text = fs::read_to_string(path)?;
         let manifest: IntegrityManifest = serde_json::from_str(&text)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        if manifest.schema_version != 1 {
+        if !(1..=EXECUTION_RECEIPT_INTEGRITY_SCHEMA_VERSION).contains(&manifest.schema_version) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "unsupported raw integrity schema version",
@@ -1110,7 +1113,7 @@ fn write_integrity_manifest(
         files.insert(name, integrity_hash(&fs::read(entry.path())?));
     }
     let manifest = IntegrityManifest {
-        schema_version: 1,
+        schema_version: EXECUTION_RECEIPT_INTEGRITY_SCHEMA_VERSION,
         raw_id: raw_id.to_string(),
         workspace_id: namespace
             .map(|value| value.workspace_id.clone())
@@ -1765,7 +1768,10 @@ mod tests {
             )
             .expect("save");
         let manifest = store.load_integrity(raw_id).expect("manifest");
-        assert_eq!(manifest["schema_version"], 1);
+        assert_eq!(
+            manifest["schema_version"],
+            super::EXECUTION_RECEIPT_INTEGRITY_SCHEMA_VERSION
+        );
         assert_eq!(
             store
                 .read_file(raw_id, "stdout.log")
@@ -1788,6 +1794,43 @@ mod tests {
         );
         let error = other.find_dir(raw_id).expect_err("cross namespace read");
         assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn legacy_integrity_manifest_version_remains_readable() {
+        let root = crate::test_support::unique_temp_dir("keel-raw-integrity-legacy");
+        let store = RawStore::with_root(root.to_path_buf());
+        let raw_id = "20260512-143012-legacy1";
+        let mut meta = sample_meta(raw_id);
+        store
+            .save(
+                &mut meta,
+                &RawRun {
+                    stdout: b"stable".to_vec(),
+                    stderr: Vec::new(),
+                    exit_code: 0,
+                },
+            )
+            .expect("save");
+        let integrity_path = meta.raw_path.join("integrity.json");
+        let mut manifest: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&integrity_path).expect("manifest text"))
+                .expect("manifest json");
+        manifest["schema_version"] = serde_json::json!(1);
+        std::fs::write(
+            &integrity_path,
+            serde_json::to_string_pretty(&manifest).expect("serialize manifest"),
+        )
+        .expect("rewrite legacy manifest");
+        let loaded = store
+            .load_integrity(raw_id)
+            .expect("legacy manifest readable");
+        assert_eq!(loaded["schema_version"], 1);
+        assert_eq!(
+            store.read_file(raw_id, "stdout.log").expect("read"),
+            b"stable"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 

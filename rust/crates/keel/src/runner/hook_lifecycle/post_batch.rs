@@ -804,6 +804,7 @@ pub(super) fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+#[cfg(test)]
 pub(super) fn read_counter_value(path: &Path) -> u64 {
     fs::read_to_string(path)
         .ok()
@@ -842,16 +843,33 @@ pub(super) fn stop_counter_read(path: &Path, standard_error: &mut dyn Write) -> 
     }
 }
 
-fn increment_gate_counter(path: &Path, standard_error: &mut dyn Write) -> bool {
-    match increment_counter_file(path) {
-        Ok(_) => true,
+fn claim_gate_decision(
+    path: &Path,
+    mode: GateMode,
+    max_blocks: u64,
+    edit_count: usize,
+    satisfied: bool,
+    standard_error: &mut dyn Write,
+) -> Option<GateDecision> {
+    if decide_gate(mode, max_blocks, 0, edit_count, satisfied) == GateDecision::Advisory {
+        return None;
+    }
+    match increment_counter_file_below_limit(path, max_blocks) {
+        Ok(Some(blocks_issued)) => Some(decide_gate(
+            mode,
+            max_blocks,
+            blocks_issued,
+            edit_count,
+            satisfied,
+        )),
+        Ok(None) => None,
         Err(error) => {
             let _ = writeln!(
                 standard_error,
                 "keel gate: counter update failed for {}: {error}; allowing this checkpoint",
                 display_path(path)
             );
-            false
+            None
         }
     }
 }
@@ -1149,20 +1167,15 @@ pub(super) fn run_hook_post_tool_batch(
             let start = session_start_ms(&claude_home, session_id);
             let satisfied = brief_written_this_session(&claude_home, &stats.last_cwd, start);
             let blocks_path = brief_gate_blocks_path(&claude_home, session_id);
-            let blocks_issued = read_counter_value(&blocks_path);
-            let decision = decide_gate(
+            let decision = claim_gate_decision(
+                &blocks_path,
                 brief_mode,
                 brief_gate_max_blocks(),
-                blocks_issued,
                 stats.count,
                 satisfied,
+                standard_error,
             );
-            if decision != GateDecision::Advisory {
-                // Increment before rendering so the per-session cap advances
-                // even if output rendering fails or the message is ignored.
-                if !increment_gate_counter(&blocks_path, standard_error) {
-                    return emit_post_tool_batch_advisory(standard_output, standard_error);
-                }
+            if let Some(decision) = decision {
                 return emit_gate_decision(
                     decision,
                     brief_gate_message(decision),
@@ -1177,18 +1190,15 @@ pub(super) fn run_hook_post_tool_batch(
                 .map(|marker_ms| marker_ms >= stats.last_edit_ms)
                 .unwrap_or(false);
             let blocks_path = completeness_gate_blocks_path(&claude_home, session_id);
-            let blocks_issued = read_counter_value(&blocks_path);
-            let decision = decide_gate(
+            let decision = claim_gate_decision(
+                &blocks_path,
                 completeness_mode,
                 completeness_gate_max_blocks(),
-                blocks_issued,
                 stats.count,
                 scanned,
+                standard_error,
             );
-            if decision != GateDecision::Advisory {
-                if !increment_gate_counter(&blocks_path, standard_error) {
-                    return emit_post_tool_batch_advisory(standard_output, standard_error);
-                }
+            if let Some(decision) = decision {
                 return emit_gate_decision(
                     decision,
                     completeness_gate_message(decision),
@@ -1204,18 +1214,15 @@ pub(super) fn run_hook_post_tool_batch(
                 .map(|marker_ms| marker_ms >= stats.last_edit_ms)
                 .unwrap_or(false);
             let blocks_path = review_gate_blocks_path(&claude_home, session_id);
-            let blocks_issued = read_counter_value(&blocks_path);
-            let decision = decide_gate(
+            let decision = claim_gate_decision(
+                &blocks_path,
                 review_mode,
                 review_gate_max_blocks(),
-                blocks_issued,
                 stats.count,
                 reviewed,
+                standard_error,
             );
-            if decision != GateDecision::Advisory {
-                if !increment_gate_counter(&blocks_path, standard_error) {
-                    return emit_post_tool_batch_advisory(standard_output, standard_error);
-                }
+            if let Some(decision) = decision {
                 return emit_gate_decision(
                     decision,
                     review_gate_message(decision),
@@ -1230,18 +1237,15 @@ pub(super) fn run_hook_post_tool_batch(
             let start = session_start_ms(&claude_home, session_id);
             let satisfied = memory_written_this_session(&claude_home, start);
             let blocks_path = memory_gate_blocks_path(&claude_home, session_id);
-            let blocks_issued = read_counter_value(&blocks_path);
-            let decision = decide_gate(
+            let decision = claim_gate_decision(
+                &blocks_path,
                 memory_mode,
                 memory_gate_max_blocks(),
-                blocks_issued,
                 stats.count,
                 satisfied,
+                standard_error,
             );
-            if decision != GateDecision::Advisory {
-                if !increment_gate_counter(&blocks_path, standard_error) {
-                    return emit_post_tool_batch_advisory(standard_output, standard_error);
-                }
+            if let Some(decision) = decision {
                 return emit_gate_decision(
                     decision,
                     memory_gate_message(decision),
@@ -1256,18 +1260,15 @@ pub(super) fn run_hook_post_tool_batch(
         if research_on {
             let satisfied = session_has_research_tool(&claude_home, session_id);
             let blocks_path = research_gate_blocks_path(&claude_home, session_id);
-            let blocks_issued = read_counter_value(&blocks_path);
-            let decision = decide_gate(
+            let decision = claim_gate_decision(
+                &blocks_path,
                 research_mode,
                 research_gate_max_blocks(),
-                blocks_issued,
                 stats.count,
                 satisfied,
+                standard_error,
             );
-            if decision != GateDecision::Advisory {
-                if !increment_gate_counter(&blocks_path, standard_error) {
-                    return emit_post_tool_batch_advisory(standard_output, standard_error);
-                }
+            if let Some(decision) = decision {
                 return emit_gate_decision(
                     decision,
                     research_gate_message(decision),
@@ -1281,12 +1282,9 @@ pub(super) fn run_hook_post_tool_batch(
     // Learned-skill reminder (apply the loop's captured conventions). Independent
     if learned_on {
         if let Some(decision_and_message) =
-            evaluate_learned_skill_gate(&claude_home, session_id, learned_mode)
+            evaluate_learned_skill_gate(&claude_home, session_id, learned_mode, standard_error)
         {
-            let (decision, message, blocks_path) = decision_and_message;
-            if !increment_gate_counter(&blocks_path, standard_error) {
-                return emit_post_tool_batch_advisory(standard_output, standard_error);
-            }
+            let (decision, message) = decision_and_message;
             return emit_gate_decision(decision, message, standard_output, standard_error);
         }
     }
@@ -1336,12 +1334,6 @@ pub(super) fn run_hook_stop(
 
     let session_start = session_start_ms(&claude_home, session_id);
     let stop_counter = stop_gate_blocks_path(&claude_home, session_id);
-    let Some(stop_blocks) = stop_counter_read(&stop_counter, standard_error) else {
-        return 0;
-    };
-    if stop_blocks >= 3 {
-        return 0;
-    }
 
     let mut blockers: Vec<&str> = Vec::new();
     let brief_counter = brief_gate_blocks_path(&claude_home, session_id);
@@ -1400,13 +1392,17 @@ pub(super) fn run_hook_stop(
         return 0;
     }
 
-    if let Err(error) = increment_counter_file(&stop_counter) {
-        let _ = writeln!(
-            standard_error,
-            "keel stop gate: counter update failed for {}: {error}; allowing stop",
-            display_path(&stop_counter)
-        );
-        return 0;
+    match increment_counter_file_below_limit(&stop_counter, 3) {
+        Ok(Some(_)) => {}
+        Ok(None) => return 0,
+        Err(error) => {
+            let _ = writeln!(
+                standard_error,
+                "keel stop gate: counter update failed for {}: {error}; allowing stop",
+                display_path(&stop_counter)
+            );
+            return 0;
+        }
     }
     let reason = format!(
         "Keel closeout is incomplete: {}. Complete every item, then stop again.",
@@ -1434,28 +1430,22 @@ pub(super) fn evaluate_learned_skill_gate(
     claude_home: &Path,
     session_id: &str,
     mode: GateMode,
-) -> Option<(GateDecision, String, PathBuf)> {
+    standard_error: &mut dyn Write,
+) -> Option<(GateDecision, String)> {
     let briefs = crate::runner::learning::collect_synthesis_briefs(claude_home);
     if briefs.is_empty() {
         return None;
     }
     let blocks_path = learned_skill_gate_blocks_path(claude_home, session_id);
-    let blocks_issued = read_counter_value(&blocks_path);
-    let decision = decide_gate(
+    let decision = claim_gate_decision(
+        &blocks_path,
         mode,
         learned_skill_gate_max_blocks(),
-        blocks_issued,
         1,
         false,
-    );
-    if decision == GateDecision::Advisory {
-        return None;
-    }
-    Some((
-        decision,
-        learned_skill_gate_message(decision, &briefs),
-        blocks_path,
-    ))
+        standard_error,
+    )?;
+    Some((decision, learned_skill_gate_message(decision, &briefs)))
 }
 
 /// Route a fired gate's [`GateDecision`] to the matching emitter: `Nudge` →

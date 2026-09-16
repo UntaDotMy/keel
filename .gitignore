@@ -31,6 +31,10 @@ coverage.out
 /keel-bin
 /keel-bin.exe
 
+# Dependency install trees and binary lockfiles (any clone, any host)
+node_modules/
+bun.lockb
+
 # Rust build artifacts
 /target/
 # Scratch build/test dir used for isolated verification runs (cargo output + logs).
@@ -50,6 +54,10 @@ state/
 .DS_Store
 Thumbs.db
 
+*.log
+# Audit raw command-output subtrees (evidence logs, not source); already-tracked
+# historical logs stay tracked, but new audit runs will not stage new ones.
+docs/audits/**/raw/
 # Temp, patch, and log files
 /.claude_tmp*
 /.gh-*.log
@@ -63,6 +71,7 @@ Thumbs.db
 *.rej
 
 # Local planning scratch files
+/KEEL-10-10-IMPROVEMENT-PLAN.md
 plan.md
 todo.md
 todo.local.md

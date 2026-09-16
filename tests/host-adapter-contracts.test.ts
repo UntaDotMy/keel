@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { sanitizeSessionKey } from "../_shared/ts/bridge-core";
+import { isKeelResearchTool, sanitizeSessionKey } from "../_shared/ts/bridge-core";
 
 type Fixture = Record<string, unknown>;
 
@@ -270,6 +270,14 @@ test("Session keys match the Rust sanitizer contract", () => {
   }
 });
 
+test("Research tool matching is anchored to the Keel MCP namespace", () => {
+  expect(isKeelResearchTool("mcp__keel__system_map")).toBe(true);
+  expect(isKeelResearchTool("keel__system_map")).toBe(true);
+  expect(isKeelResearchTool("mcp__vendor__keel__system_map")).toBe(false);
+  expect(source("_shared/ts/bridge-core.ts")).toContain('lower.startsWith("mcp__keel__")');
+  expect(source("_shared/ts/bridge-core.ts")).not.toContain('lower.includes("keel__")');
+});
+
 test("Adapters never share one literal default session key", () => {
   for (const file of ["opencode/keel.ts", "codex/keel-codex.ts", "pi/keel-pi.ts"]) {
     expect(source(file)).not.toContain('|| "default"');
@@ -277,4 +285,6 @@ test("Adapters never share one literal default session key", () => {
   expect(source("opencode/keel.ts")).toContain("getFallbackSessionId");
   expect(source("codex/keel-codex.ts")).toContain("getFallbackSessionId");
   expect(source("pi/keel-pi.ts")).toContain("moduleSessionId");
+  expect(source("pi/keel-pi.ts")).toContain("if (!moduleSessionId) moduleSessionId = String(supplied)");
+  expect(source("pi/keel-pi.ts")).toContain("moduleSessionId = undefined");
 });

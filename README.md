@@ -59,7 +59,7 @@ keel code-search search --query "run_recall_search"
 
 | Surface | What it gives you |
 | --- | --- |
-| Brownfield gate (unique) | `preserve-existing-flow` forces owner-path evidence before editing established source. Review gates block edits when the flow-check artifact is missing. No other harness has this. |
+| Brownfield gate (unique) | `preserve-existing-flow` requires owner-path evidence before editing established source. Native review commands fail when the flow-check artifact is missing; they do not intercept or roll back the edit itself. No other harness has this. |
 | Iron-law hooks | SessionStart loads the bootstrap skill, UserPromptSubmit restates the four rules, PostToolBatch nudges a reviewer pass, PreCompact refreshes SYSTEM_MAP. |
 | Delivery loop | `keel anvil compile|cast|sieve|stamp|loop|run` — the only delivery loop. |
 | Compiled planner | `keel plan specify|research|design|tasks|check` turns a request into versioned requirements, current source-traceable research, a validated architecture, tasks, and a checked requirement traceability matrix before implementation. Brownfield pre-PR review requires the researched and designed plan. |
@@ -476,7 +476,7 @@ What is implemented today:
 
 - `run` executes the requested command, saves `stdout.log`, `stderr.log`, `command.txt`, `meta.json`, and `compact.txt`, and returns compact output with `raw: keel raw <raw_id>`.
 - `run --json` returns `command`, `exit_code`, `adapter_name`, `compacted`, `raw_id`, `raw_path`, exact token fields, `summary`, `stdout`, and `stderr`.
-- `run --full` and `run --no-compact` pass through raw output while still recording metadata; `--adapter <name>`, `--list-adapters`, `--max-lines <n>`, and `--recovery-dir <path>` are available for debugging and control. `--errors-only` keeps only error/failure-class lines from any command (adapter-agnostic). `--ultra` uses a short failure-first body and a compact raw pointer.
+- `run --full` and `run --no-compact` skip adapter compaction while still passing the result through the bounded context firewall and recording recoverable raw metadata; `--adapter <name>`, `--list-adapters`, `--max-lines <n>`, and `--recovery-dir <path>` are available for debugging and control. `--errors-only` keeps only error/failure-class lines from any command (adapter-agnostic). `--ultra` uses a short failure-first body and a compact raw pointer.
 - Built-in adapters cover `tests`, `git`, `search`, `files`, `build`, `lint`, `containers`, `cloud`, `database`, `logs`, and `generic`. Test adapters handle cargo/pytest/go/JS-style failure signals; git/search/files adapters summarize diffs, matches, and large reads; the `containers` adapter compacts docker/kubectl/helm; the `cloud` adapter reduces aws/az/gcloud output (structure-only JSON, secret redaction, failure-first); the `database` adapter reduces psql/mysql/sqlite3/redis-cli/mongosh result sets (header + sampled rows, structure-only JSON, credential redaction).
 - `raw <raw_id>`, `raw --path <raw_id>`, `raw list`, `raw prune --older-than 30d`, and `replay <raw_id>` provide local recovery and retention controls.
 - `rewrite --json "<command>"` returns supported/reason/rewritten-command metadata and preserves direct argv where possible; composite shell syntax uses PowerShell on Windows and Bash on Unix, while explicit MCP scripts never change shells.
@@ -558,7 +558,7 @@ The hook contract is transparent rewrite via `toolInputOverride` rather than man
 
 ## Preserve Existing Flow — The Brownfield Gate (Unique to keel)
 
-This is keel's headline differentiator: **no other harness in the market forces owner-path evidence before editing established source code.** When an agent touches an existing file, `preserve-existing-flow` requires tracing who owns the current behavior, what the source of truth is, and what consumers depend on it — before any edit is made. Review gates block the edit when the flow-check artifact is missing or incomplete.
+This is keel's headline differentiator: **no other harness in the market requires owner-path evidence before editing established source code.** Before an agent changes an existing file, `preserve-existing-flow` requires tracing who owns the current behavior, what the source of truth is, and what consumers depend on it. The native review gates fail review when the flow-check artifact is missing or incomplete; they do not intercept or roll back the earlier edit.
 
 Docs-only, formatting-only, generated-only, and explicitly greenfield work are exempt; established source behavior needs owner-path evidence before review gates pass.
 

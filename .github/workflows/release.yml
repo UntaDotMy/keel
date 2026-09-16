@@ -287,6 +287,11 @@ jobs:
           if [ -d docs ]; then
             cp -R docs "$target_dir/docs"
           fi
+          # Stage the managed guidance tree. AGENTS.md links into these
+          # references and the native installer copies them from the bundle.
+          if [ -d AGENTS ]; then
+            cp -R AGENTS "$target_dir/AGENTS"
+          fi
           # Stage cross-skill resource directories that SKILL.md files
           # reference via relative paths (for example _shared/common-discipline.md).
           # Mirrors SHARED_RESOURCE_DIRECTORIES in rust/.../runtime.rs — keep in
@@ -326,13 +331,32 @@ jobs:
           if [ -d statusline ]; then
             cp -R statusline "$target_dir/statusline"
           fi
+          # Keep plugin-declared assets in the archive. The plugin manifest
+          # resolves these paths relative to the packaged repository root.
+          if [ -d output-styles ]; then
+            cp -R output-styles "$target_dir/output-styles"
+          fi
+          if [ -f .lsp.json ]; then
+            cp .lsp.json "$target_dir/.lsp.json"
+          fi
           # Fail closed if staged layout cannot pass repository_layout_is_complete.
           missing=0
           for required in \
             AGENTS.md \
+            AGENTS/references/00-knowledge-map.md \
+            AGENTS/references/10-native-command-routing.md \
+            AGENTS/references/20-skill-routing.md \
+            AGENTS/references/30-execution-strategy.md \
+            AGENTS/references/40-code-quality-and-testing.md \
+            AGENTS/references/50-delivery-and-prohibited-shortcuts.md \
+            AGENTS/references/60-environment-and-portability.md \
+            AGENTS/references/70-review-quality-gates-and-policies.md \
+            AGENTS/references/99-source-anchors.md \
             README.md \
             00-skill-routing-and-escalation.md \
             reviewer/SKILL.md \
+            output-styles/keel-delivery.md \
+            .lsp.json \
             "${{ matrix.executable }}"; do
             if [ ! -e "$target_dir/$required" ]; then
               echo "ERROR: staged release bundle is missing required path: $required" >&2
@@ -431,6 +455,9 @@ jobs:
             os_name: windows
             arch: arm64
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v5
+        with:
+          ref: ${{ github.sha }}
       - name: Download platform archive
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
@@ -451,6 +478,11 @@ jobs:
           "$bundle_root/keel" status --repo-root "$bundle_root" --claude-home "$keel_home"
           "$bundle_root/keel" verify --repo-root "$bundle_root" --claude-home "$keel_home"
           "$bundle_root/keel" doctor --repo-root "$bundle_root" --claude-home "$keel_home"
+          node .github/release-smoke.mjs \
+            --binary "$bundle_root/keel" \
+            --bundle-root "$bundle_root" \
+            --claude-home "$keel_home" \
+            --report "$RUNNER_TEMP/keel-release-smoke.json"
       - name: Exercise Windows install path
         if: runner.os == 'Windows'
         shell: pwsh
@@ -469,6 +501,19 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & $binary doctor --repo-root $bundleRoot --claude-home $keelHome
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node .github/release-smoke.mjs `
+            --binary $binary `
+            --bundle-root $bundleRoot `
+            --claude-home $keelHome `
+            --report (Join-Path $env:RUNNER_TEMP "keel-release-smoke.json")
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Upload packaged MCP smoke report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: packaged-mcp-smoke-${{ matrix.os_name }}-${{ matrix.arch }}
+          path: ${{ runner.temp }}/keel-release-smoke.json
+          if-no-files-found: warn
 
   publish:
     name: Publish GitHub Release

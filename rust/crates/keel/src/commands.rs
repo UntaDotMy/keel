@@ -39,6 +39,7 @@ pub(crate) const TOP_LEVEL_COMMANDS: &[&str] = &[
     "help",
     "version",
     "platform",
+    "host",
     "bootstrap-info",
     "all",
     "install",
@@ -162,6 +163,7 @@ impl Application {
             "platform" => {
                 self.run_platform_command(command_arguments, standard_output, standard_error)
             }
+            "host" => self.run_host_command(command_arguments, standard_output, standard_error),
             "bootstrap-info" => {
                 self.run_bootstrap_info_command(command_arguments, standard_output, standard_error)
             }
@@ -380,6 +382,86 @@ impl Application {
     /// removal. Keeping this explicit prevents stale installation metadata.
     fn build_feature_set() -> &'static str {
         "standard"
+    }
+
+    /// The machine-readable host capability matrix required by §18. Emits every
+    /// host keel claims a governance story for, so "no host is silently
+    /// ungoverned" is checkable without running an arbitrary command through the
+    /// proxy. `--host` narrows to one entry.
+    fn run_host_command(
+        &self,
+        arguments: &[String],
+        standard_output: &mut dyn Write,
+        standard_error: &mut dyn Write,
+    ) -> u8 {
+        // The flag parser stops at the first positional, so the subcommand is
+        // peeled here the same way `keel stats <surface>` does it.
+        let remaining = match arguments.first().map(String::as_str) {
+            Some(subcommand) if subcommand.eq_ignore_ascii_case("matrix") => &arguments[1..],
+            _ => {
+                let _ = writeln!(
+                    standard_error,
+                    "Usage: keel host matrix [--host <name>] [--json]"
+                );
+                return 2;
+            }
+        };
+        let mut flag_set = FlagSet::new("host matrix");
+        flag_set.string_flag("host", "");
+        flag_set.bool_flag("json", false);
+        if let Err(parse_error) = flag_set.parse(remaining) {
+            let _ = writeln!(standard_error, "{}", parse_error.message);
+            return 2;
+        }
+        let requested = flag_set.string_value("host").to_string();
+        // The matrix is owned by the proxy as serde_json, so emit it verbatim
+        // rather than round-tripping through the crate's own JSON type.
+        let matrix = crate::proxy::execution::HostCapabilities::claimed_matrix();
+        let mut hosts = matrix["hosts"].as_array().cloned().unwrap_or_default();
+        if !requested.trim().is_empty() {
+            hosts.retain(|entry| {
+                entry["host"]
+                    .as_str()
+                    .is_some_and(|host| host.eq_ignore_ascii_case(requested.trim()))
+            });
+            if hosts.is_empty() {
+                let _ = writeln!(
+                    standard_error,
+                    "host: unknown host '{requested}'. Known hosts: {}",
+                    crate::proxy::execution::HostCapabilities::CLAIMED_HOSTS.join(", ")
+                );
+                return 2;
+            }
+        }
+        if flag_set.bool_value("json") {
+            let payload = serde_json::json!({
+                "schemaVersion": 1,
+                "protocol": "keel-command-proxy",
+                "hosts": hosts,
+            });
+            // The payload holds owned strings; serialization cannot fail here.
+            // why: an improbable failure renders an empty object, never partial JSON.
+            let rendered = serde_json::to_string_pretty(&payload).unwrap_or_default();
+            let _ = writeln!(standard_output, "{rendered}");
+            return 0;
+        }
+        for host in &hosts {
+            let _ = writeln!(
+                standard_output,
+                "host={} governance={} registered={} preToolIntercept={} postToolReduce={} permissionGate={} contextRewrite={} unsupported={}",
+                host["host"].as_str().unwrap_or("?"),
+                host["governanceLevel"].as_str().unwrap_or("?"),
+                host["hostRegistered"].as_bool().unwrap_or(false),
+                host["preToolInterception"].as_bool().unwrap_or(false),
+                host["postToolInterception"].as_bool().unwrap_or(false),
+                host["permissionGate"].as_bool().unwrap_or(false),
+                host["contextRewrite"].as_bool().unwrap_or(false),
+                host["unsupportedPaths"]
+                    .as_array()
+                    .map_or(0, |paths| paths.len()),
+            );
+        }
+        0
     }
 
     fn run_platform_command(
@@ -954,6 +1036,51 @@ mod tests {
     use super::*;
     use keel_flow::Check;
     use std::path::Path;
+
+    /// The flag parser stops at the first positional, so `host matrix --flag`
+    /// silently ignored every flag until the subcommand was peeled first. This
+    /// pins the peeled form, the narrowed form, and the fail-closed form.
+    #[test]
+    fn host_matrix_peels_its_subcommand_and_honours_flags() {
+        let application = Application::new("test-version");
+        let run = |arguments: &[&str]| {
+            let mut stdout: Vec<u8> = Vec::new();
+            let mut stderr: Vec<u8> = Vec::new();
+            let owned = arguments
+                .iter()
+                .map(|value| value.to_string())
+                .collect::<Vec<_>>();
+            let code = application.run(&owned, &mut stdout, &mut stderr);
+            (
+                code,
+                String::from_utf8_lossy(&stdout).to_string(),
+                String::from_utf8_lossy(&stderr).to_string(),
+            )
+        };
+
+        let (code, stdout, _) = run(&["host", "matrix"]);
+        assert_eq!(code, 0);
+        for host in crate::proxy::execution::HostCapabilities::CLAIMED_HOSTS {
+            assert!(stdout.contains(&format!("host={host} ")), "missing {host}");
+        }
+
+        let (code, stdout, _) = run(&["host", "matrix", "--host", "cursor", "--json"]);
+        assert_eq!(code, 0);
+        let payload: serde_json::Value =
+            serde_json::from_str(&stdout).expect("host matrix --json is valid JSON");
+        assert_eq!(payload["hosts"].as_array().map(Vec::len), Some(1));
+        assert_eq!(payload["hosts"][0]["host"], "cursor");
+        assert_eq!(payload["hosts"][0]["governanceLevel"], "PARTIALLY_GOVERNED");
+        assert_eq!(payload["hosts"][0]["preToolInterception"], true);
+
+        let (code, _, stderr) = run(&["host", "matrix", "--host", "not-a-host"]);
+        assert_eq!(code, 2, "an unknown host must fail closed");
+        assert!(stderr.contains("unknown host"), "{stderr}");
+
+        let (code, _, stderr) = run(&["host"]);
+        assert_eq!(code, 2);
+        assert!(stderr.contains("Usage: keel host matrix"), "{stderr}");
+    }
 
     #[test]
     fn flow_command_runs_start_check_finish_lifecycle() {

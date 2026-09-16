@@ -16,12 +16,12 @@ This file is the thin host adapter shim for Claude Code. Canonical cross-vendor 
 
 ## Enforcement Gates (PostToolBatch)
 
-Enforcement gates act as a model-independent backstop for the operating contract:
-- **Brief gate** (`CLAUDE_SKILLS_BRIEF_GATE`): Requires a working brief before code edits. Cleared by `keel memory working-brief write` or `brief_create` MCP tool.
+PostToolBatch gates check completed code changes and emit bounded follow-up context; they do not prevent or roll back the tool call that made the edit. The `Stop` hook can refuse closeout while an armed gate remains unmet, also under a bounded per-session cap. PreToolUse separately enforces the Iron Law and optional Anvil gate before gated tools run.
+- **Brief gate** (`CLAUDE_SKILLS_BRIEF_GATE`): Requires a current working brief after code changes and before closeout. Cleared by `keel memory working-brief write` or `brief_create` MCP tool.
 - **Review gate** (`CLAUDE_SKILLS_REVIEW_GATE`): Requires a passing review after edits. Cleared by `keel review pre-pr` or `keel review pre-commit`.
 - **Memory gate** (`CLAUDE_SKILLS_MEMORY_GATE`): Nudges memory capture when code changes.
 - **Learned-skill gate** (`CLAUDE_SKILLS_LEARNED_SKILL_GATE`): Alerts on promoted skills requiring synthesis.
-- **Research gate** (`CLAUDE_SKILLS_RESEARCH_GATE`): Requires fresh web-search or recall evidence before edits.
+- **Research gate** (`CLAUDE_SKILLS_RESEARCH_GATE`): Requires current web-search or recall evidence for the implementation after code changes and before closeout.
 - **Completeness gate** (`CLAUDE_SKILLS_COMPLETENESS_GATE`): Requires sibling scan via `keel code-search siblings`.
 
 ## Commands Quick Reference

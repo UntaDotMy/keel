@@ -76,7 +76,29 @@ In addition to workflow scenarios, the repository measures token efficiency at r
 - Compaction benchmark report: [`bench/competitor/eval-compaction-report.json`](../bench/competitor/eval-compaction-report.json)
 - Comparative analysis metrics: [`bench/competitor/comparative-compaction.json`](../bench/competitor/comparative-compaction.json)
 - Measured compaction savings across 7 genuine toolchain fixtures: **27.28% overall** (with `cargo test` pass achieving **79.26%** savings).
-- Tiered MCP catalog profile: reduces discovery footprint from 2,929 tokens down to **1,225 tokens** (**58.18% reduction**), while retaining direct dispatchability for all 37 tools.
+- Reducer reliability over the same fixtures: **100% critical-evidence retention**, **100% failure-evidence retention**, and a **0% reacquisition rate**, so the saving does not cost the model the evidence it needs to act.
+- Tiered MCP catalog profile: reduces discovery footprint from 2,929 tokens down to **1,240 tokens** (**57.66% reduction**), while retaining direct dispatchability for all 37 tools.
+
+`keel eval --json` reports per-case `evidenceRetained`/`evidenceTotal`, `outcomeVisible`,
+`reacquisitionRequired`, and `reduceMicros` alongside the token counts, plus the
+aggregate `evidenceRetentionPercent`, `failureEvidenceRetentionPercent`, and
+`reacquisitionRatePercent`. Reduction is only a win when the saving and the
+evidence retention move together.
+
+Both benchmarks declare their thresholds in the artifact before the numbers are
+interpreted, and the regression tests assert against those same constants, so a
+declared floor and its check cannot drift apart. Reducer floors: 100% evidence and
+failure-evidence retention, 20% overall savings, 50% on the high-volume fixture,
+at least three compacted fixtures, and a 0% reacquisition rate. Catalog floors:
+every page within its declared budget, zero duplicate and zero omitted tools,
+100% discovery coverage, and a 2000 ms ceiling on the catalog walk.
+
+The MCP catalog profiles have their own comparison. `keel stats tools --benchmark --json`
+walks `full`, `core`, `core+pagination`, `core+progressive-discovery`, and
+`core+progressive-discovery+compact-schemas` through the canonical packing path, then
+reports the exact first-page cost, pages to traverse, unique tools reached, and
+discovery coverage across twelve representative task families. It fails closed when a
+page exceeds its budget, traversal duplicates or omits a tool, or discovery misses a task.
 
 The current gateway baseline is archived in
 [`docs/benchmarks/context-gateway-baseline.json`](./benchmarks/context-gateway-baseline.json).
@@ -89,9 +111,14 @@ profile transition.
 The skill gateway has a separate benchmark because skill activation and reference
 budgets are independent surfaces. `keel skill-eval --benchmark --json` runs three
 times per deterministic task and compares `all-skills-eager`, `metadata-only`,
-`metadata+selective-activation`, and `metadata+cost-aware-selection`. It reports
-selection accuracy, activation precision/recall, measured tokenizer input, turns,
-latency, peak context, recovery, wrong-skill activations, and conflict rate. The
+`metadata+selective-activation`, `metadata+cost-aware-selection`, and
+`metadata+cost-aware-selection+resource-on-demand`. It reports selection accuracy,
+activation precision/recall, wrong and missed activation rates, measured tokenizer
+input, reacquisition calls, turns, latency, peak context, recovery, and conflict
+rate. Model-visible skill tokens are counted separately from local routing CPU
+time, so cheap local work is never reported as model cost. Bundled resource cost is
+measured from the real files, and the on-demand profile records the extra turn it
+pays to fetch a referenced resource. The
 latest committed local snapshot is [`bench/competitor/skill-selection-benchmark.json`](../bench/competitor/skill-selection-benchmark.json);
 provider cached-input values remain explicitly unavailable for these local fixtures.
 

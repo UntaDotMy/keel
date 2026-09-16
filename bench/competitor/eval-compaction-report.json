@@ -1,4 +1,5 @@
 {
+  "schemaVersion": 1,
   "tokenizer": "o200k_base",
   "measurement": "end-to-end: raw stdout+stderr vs rendered compact output",
   "fixtureCount": 7,
@@ -6,6 +7,11 @@
   "totalTokensCompact": 1613,
   "totalTokensSaved": 605,
   "overallSavingsPercent": 27.28,
+  "evidenceRetentionPercent": 100.00,
+  "failureEvidenceRetentionPercent": 100.00,
+  "failureCaseCount": 1,
+  "reacquisitionRatePercent": 0.00,
+  "casesRequiringReacquisition": 0,
   "cases": [
     {
       "name": "cargo-test-pass",
@@ -15,7 +21,12 @@
       "tokensRaw": 405,
       "tokensCompact": 84,
       "tokensSaved": 321,
-      "savingsPercent": 79.26
+      "savingsPercent": 79.26,
+      "evidenceRetained": 3,
+      "evidenceTotal": 3,
+      "outcomeVisible": true,
+      "reacquisitionRequired": false,
+      "reduceMicros": 1181
     },
     {
       "name": "cargo-test-fail",
@@ -25,7 +36,12 @@
       "tokensRaw": 713,
       "tokensCompact": 522,
       "tokensSaved": 191,
-      "savingsPercent": 26.79
+      "savingsPercent": 26.79,
+      "evidenceRetained": 2,
+      "evidenceTotal": 2,
+      "outcomeVisible": true,
+      "reacquisitionRequired": false,
+      "reduceMicros": 2971
     },
     {
       "name": "git-status",
@@ -35,7 +51,12 @@
       "tokensRaw": 240,
       "tokensCompact": 223,
       "tokensSaved": 17,
-      "savingsPercent": 7.08
+      "savingsPercent": 7.08,
+      "evidenceRetained": 2,
+      "evidenceTotal": 2,
+      "outcomeVisible": true,
+      "reacquisitionRequired": false,
+      "reduceMicros": 1188
     },
     {
       "name": "ripgrep-search",
@@ -45,7 +66,12 @@
       "tokensRaw": 279,
       "tokensCompact": 279,
       "tokensSaved": 0,
-      "savingsPercent": 0.00
+      "savingsPercent": 0.00,
+      "evidenceRetained": 2,
+      "evidenceTotal": 2,
+      "outcomeVisible": true,
+      "reacquisitionRequired": false,
+      "reduceMicros": 1604
     },
     {
       "name": "cargo-clippy-warnings",
@@ -55,7 +81,12 @@
       "tokensRaw": 157,
       "tokensCompact": 81,
       "tokensSaved": 76,
-      "savingsPercent": 48.41
+      "savingsPercent": 48.41,
+      "evidenceRetained": 2,
+      "evidenceTotal": 2,
+      "outcomeVisible": true,
+      "reacquisitionRequired": false,
+      "reduceMicros": 518
     },
     {
       "name": "npm-install",
@@ -65,7 +96,12 @@
       "tokensRaw": 122,
       "tokensCompact": 122,
       "tokensSaved": 0,
-      "savingsPercent": 0.00
+      "savingsPercent": 0.00,
+      "evidenceRetained": 2,
+      "evidenceTotal": 2,
+      "outcomeVisible": true,
+      "reacquisitionRequired": false,
+      "reduceMicros": 850
     },
     {
       "name": "kubectl-get-pods",
@@ -75,7 +111,12 @@
       "tokensRaw": 302,
       "tokensCompact": 302,
       "tokensSaved": 0,
-      "savingsPercent": 0.00
+      "savingsPercent": 0.00,
+      "evidenceRetained": 2,
+      "evidenceTotal": 2,
+      "outcomeVisible": true,
+      "reacquisitionRequired": false,
+      "reduceMicros": 2314
     }
   ]
 }

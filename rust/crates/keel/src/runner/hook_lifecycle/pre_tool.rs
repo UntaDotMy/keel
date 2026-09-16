@@ -122,31 +122,51 @@ pub(super) fn iron_law_marker_present(claude_home: &Path, session_id: &str) -> b
         || iron_law_legacy_path(claude_home, session_id).exists()
 }
 
-/// Substrings that identify a keel *research* tool name (MCP or host-neutral).
-/// Management/install tools are excluded so installing keel does not clear the gate.
+const KEEL_RESEARCH_TOOL_NAMES: &[&str] = &[
+    "brief_get",
+    "brief_list",
+    "code_graph",
+    "code_index",
+    "code_search",
+    "config_audit",
+    "context_brief",
+    "doctor",
+    "gain",
+    "memory_status",
+    "observe",
+    "recall",
+    "recall_status",
+    "session",
+    "skill_get",
+    "skill_lint",
+    "skill_list",
+    "skill_route",
+    "stats",
+    "system_map",
+    "system_map_refresh",
+    "telemetry",
+];
+
+fn keel_tool_leaf(tool_name: &str) -> Option<&str> {
+    if let Some(leaf) = tool_name.strip_prefix("mcp__keel__") {
+        return Some(leaf);
+    }
+    if let Some(leaf) = tool_name.strip_prefix("mcp__keel_") {
+        return (!leaf.contains("__")).then_some(leaf);
+    }
+    if let Some(leaf) = tool_name.strip_prefix("keel__") {
+        return Some(leaf);
+    }
+    tool_name
+        .strip_prefix("keel_")
+        .filter(|leaf| !leaf.contains("__"))
+}
+
+/// Identify an allowlisted Keel research tool in a canonical or legacy host
+/// namespace. Arbitrary Keel tools and lookalike server prefixes do not qualify.
 pub(crate) fn is_keel_research_tool_name(tool_name: &str) -> bool {
     let lower = tool_name.to_ascii_lowercase();
-    // Namespaced MCP: mcp__keel__system_map, keel__system_map, etc.
-    let looks_keel = lower.starts_with("mcp__keel__")
-        || lower.starts_with("mcp__keel_")
-        || lower.starts_with("keel__")
-        || lower == "keel"
-        || lower.starts_with("keel_");
-    if !looks_keel {
-        return false;
-    }
-    // Exclude pure management surfaces.
-    if lower.contains("install")
-        || lower.contains("uninstall")
-        || lower.contains("self-replace")
-        || lower.contains("self_replace")
-        || (lower.contains("repair") && lower.contains("hook"))
-    {
-        return false;
-    }
-    // Prefer research-shaped names; also accept generic keel MCP tools that
-    // agents use to orient (status, doctor, cli, memory, skill_*, brief_*).
-    true
+    keel_tool_leaf(&lower).is_some_and(|leaf| KEEL_RESEARCH_TOOL_NAMES.contains(&leaf))
 }
 
 /// Host tools that count as research under Balanced mode only.
@@ -831,3 +851,19 @@ Anvil gate: call `anvil` (compile, then run --dry-run) before editing. \
 This is the only keel delivery loop. MCP: keel__anvil action=compile args=[--goal,...,--bar,...,--files,...] then action=run args=[--dry-run]. \
 CLI: keel anvil compile --goal \"...\" --bar \"echo ok\" --files \"src/file.rs\" then keel anvil run --dry-run. \
 Set KEEL_ANVIL_GATE=off to disable.";
+
+#[cfg(test)]
+mod namespace_tests {
+    use super::*;
+
+    #[test]
+    fn keel_research_matcher_rejects_foreign_and_lookalike_namespaces() {
+        assert!(is_keel_research_tool_name("mcp__keel__system_map"));
+        assert!(is_keel_research_tool_name("mcp__keel_system_map"));
+        assert!(is_keel_research_tool_name("keel__recall"));
+        assert!(!is_keel_research_tool_name("mcp__vendor__keel__system_map"));
+        assert!(!is_keel_research_tool_name("mcp__keel_evil__system_map"));
+        assert!(!is_keel_research_tool_name("keel_evil__system_map"));
+        assert!(!is_keel_research_tool_name("mcp__keel__run_command"));
+    }
+}

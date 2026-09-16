@@ -74,11 +74,11 @@ keel hook git-hooks install
 
 ## Review Gate Enforcement (Optional Hard Blocking)
 
-The reviewer skill provides advisory reminders but does not block turns by default. To enable hard enforcement:
+PostToolBatch review reminders are feed-forward context and do not halt the current turn. The `Stop` hook may refuse closeout for an unmet armed review gate, under its per-session cap. Native `keel review` commands remain fail-closed on blocking findings. To make the hook gate imperative:
 
-Set environment variable `CLAUDE_SKILLS_REVIEW_GATE=block` → reviewer reminders become blocking gates
+Set environment variable `CLAUDE_SKILLS_REVIEW_GATE=block` → every bounded PostToolBatch fire is imperative and Stop enforces the unmet gate while its cap remains
 
-Default behavior (no env var set): Advisory-only reminders that can be ignored. This allows flexibility while still prompting quality practices.
+Default behavior (no env var set): escalate from a non-halting reminder to an imperative non-halting reminder; Stop can refuse closeout while the bounded gate remains armed.
 
 See [70-review-quality-gates-and-policies.md](AGENTS/references/70-review-quality-gates-and-policies.md) for full details on review surfaces and gates.
 

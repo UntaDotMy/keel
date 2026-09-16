@@ -212,8 +212,8 @@ export function isKeelResearchTool(toolName: string): boolean {
     return false;
   }
   return (
-    lower.includes("mcp__keel__") ||
-    lower.includes("keel__") ||
+    lower.startsWith("mcp__keel__") ||
+    lower.startsWith("keel__") ||
     lower.startsWith("keel_") ||
     lower === "keel"
   );

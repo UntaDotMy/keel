@@ -8,8 +8,11 @@
   "policy": {
     "activationBudgetTokens": 5000,
     "taskSuccess": "accepted skill is activated; negative fixtures remain silent",
+    "costAccounting": "model-visible skill tokens only; local routing CPU is reported as latencyMs and never counted as model input",
+    "resourcePolicy": "selecting profiles carry the bounded inline brief; eager profiles also preload the measured bundled resources, while the on-demand profile fetches them in a later turn and records a reacquisition call",
+    "reacquisitionLimit": "an on-demand default is accepted only when its reacquisition turns stay within the declared turn budget",
     "defaultDecisionRule": "cost-aware profile requires material token reduction, no unacceptable task-success or selection regression, and acceptable turn/latency overhead",
-    "cachedInputTokens": "unavailable for local deterministic fixtures"
+    "knownLimitation": "every positive fixture is modeled as needing its bundled resources, so the on-demand profile ties the eager profile on tokens here and pays extra turns; a corpus with optional resources would show the reduction it can buy"
   },
   "profiles": [
     {
@@ -19,17 +22,24 @@
         "selectionAccuracy": 0.00,
         "activationPrecision": 1.65,
         "activationRecall": 100.00,
-        "inputTokens": 9549666,
+        "inputTokens": 9561294,
         "cachedInputTokens": "unavailable",
+        "cachedInputTokensAvailable": false,
         "turns": 114,
         "firstToolErrors": 0,
         "discoveryOverheadTokens": 676476,
-        "latencyMs": 1072.717,
-        "peakContextTokens": 83769,
+        "latencyMs": 83.912,
+        "peakContextTokens": 83871,
         "recoveryRate": 81.58,
         "wrongSkillActivations": 5718,
+        "wrongActivationRate": 100.00,
+        "missedActivationRate": 0.00,
+        "reacquisitionCalls": 0,
+        "resourceCostTokensMeasured": 85297,
+        "localRoutingCpuMs": 83.912,
         "conflictRate": 100.00
-      }
+      },
+      "reproduction": "cargo run --locked -p keel -- skill-eval --benchmark --json"
     },
     {
       "profile": "metadata-only",
@@ -40,15 +50,22 @@
         "activationRecall": 0.00,
         "inputTokens": 676476,
         "cachedInputTokens": "unavailable",
+        "cachedInputTokensAvailable": false,
         "turns": 114,
         "firstToolErrors": 0,
         "discoveryOverheadTokens": 676476,
-        "latencyMs": 26.532,
+        "latencyMs": 63.691,
         "peakContextTokens": 5934,
         "recoveryRate": 18.42,
         "wrongSkillActivations": 0,
+        "wrongActivationRate": 0.00,
+        "missedActivationRate": 100.00,
+        "reacquisitionCalls": 0,
+        "resourceCostTokensMeasured": 85297,
+        "localRoutingCpuMs": 63.691,
         "conflictRate": 0.00
-      }
+      },
+      "reproduction": "cargo run --locked -p keel -- skill-eval --benchmark --json"
     },
     {
       "profile": "metadata+selective-activation",
@@ -57,17 +74,24 @@
         "selectionAccuracy": 94.74,
         "activationPrecision": 93.55,
         "activationRecall": 93.55,
-        "inputTokens": 837810,
+        "inputTokens": 1090272,
         "cachedInputTokens": "unavailable",
+        "cachedInputTokensAvailable": false,
         "turns": 207,
         "firstToolErrors": 0,
         "discoveryOverheadTokens": 676476,
-        "latencyMs": 245.662,
-        "peakContextTokens": 8655,
+        "latencyMs": 702.112,
+        "peakContextTokens": 19342,
         "recoveryRate": 94.74,
         "wrongSkillActivations": 6,
+        "wrongActivationRate": 5.26,
+        "missedActivationRate": 6.45,
+        "reacquisitionCalls": 0,
+        "resourceCostTokensMeasured": 85297,
+        "localRoutingCpuMs": 702.112,
         "conflictRate": 0.00
-      }
+      },
+      "reproduction": "cargo run --locked -p keel -- skill-eval --benchmark --json"
     },
     {
       "profile": "metadata+cost-aware-selection",
@@ -76,18 +100,50 @@
         "selectionAccuracy": 100.00,
         "activationPrecision": 100.00,
         "activationRecall": 100.00,
-        "inputTokens": 835965,
+        "inputTokens": 1095813,
         "cachedInputTokens": "unavailable",
+        "cachedInputTokensAvailable": false,
         "turns": 207,
         "firstToolErrors": 0,
         "discoveryOverheadTokens": 676476,
-        "latencyMs": 990.435,
-        "peakContextTokens": 8655,
+        "latencyMs": 1611.534,
+        "peakContextTokens": 19342,
         "recoveryRate": 100.00,
         "wrongSkillActivations": 0,
+        "wrongActivationRate": 0.00,
+        "missedActivationRate": 0.00,
+        "reacquisitionCalls": 0,
+        "resourceCostTokensMeasured": 85297,
+        "localRoutingCpuMs": 1611.534,
         "conflictRate": 0.00
-      }
+      },
+      "reproduction": "cargo run --locked -p keel -- skill-eval --benchmark --json"
+    },
+    {
+      "profile": "metadata+cost-aware-selection+resource-on-demand",
+      "metrics": {
+        "taskSuccessRate": 100.00,
+        "selectionAccuracy": 100.00,
+        "activationPrecision": 100.00,
+        "activationRecall": 100.00,
+        "inputTokens": 1095813,
+        "cachedInputTokens": "unavailable",
+        "cachedInputTokensAvailable": false,
+        "turns": 246,
+        "firstToolErrors": 0,
+        "discoveryOverheadTokens": 676476,
+        "latencyMs": 1264.108,
+        "peakContextTokens": 19342,
+        "recoveryRate": 100.00,
+        "wrongSkillActivations": 0,
+        "wrongActivationRate": 0.00,
+        "missedActivationRate": 0.00,
+        "reacquisitionCalls": 39,
+        "resourceCostTokensMeasured": 85297,
+        "localRoutingCpuMs": 1264.108,
+        "conflictRate": 0.00
+      },
+      "reproduction": "cargo run --locked -p keel -- skill-eval --benchmark --json"
     }
-  ],
-  "reproduction": "cargo run --locked -p keel -- skill-eval --benchmark --json"
+  ]
 }

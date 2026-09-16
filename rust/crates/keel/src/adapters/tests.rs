@@ -85,7 +85,9 @@ fn collect_summary_lines(text: &str) -> Vec<String> {
             || normalized.contains("error:")
             || normalized.contains("failed:");
         if is_summary && !line.trim().is_empty() {
-            lines.push(line.trim().to_string());
+            // Summary lines can be short but may still echo environment values,
+            // so keep their order while applying the shared agent-visible redactor.
+            lines.push(redact_possible_secret(line.trim()));
         }
         if lines.len() >= MAX_SUMMARY_LINES {
             break;
@@ -179,6 +181,19 @@ mod tests {
             .contains("tests/api/test_users.py::test_create_user"));
         assert!(result.stdout.contains("expected 201"));
         assert!(result.stdout.contains("rerun:"));
+    }
+
+    #[test]
+    fn short_summary_redacts_secret_shaped_values() {
+        let stdout = "1 failed, OPENAI_API_KEY=sk-short-summary-secret\n";
+        let result = TestAdapter.compact(
+            stdout.as_bytes(),
+            b"",
+            1,
+            &meta("pytest tests -q", stdout.len()),
+        );
+        assert!(result.stdout.contains("[redacted possible secret"));
+        assert!(!result.stdout.contains("sk-short-summary-secret"));
     }
 
     #[test]
