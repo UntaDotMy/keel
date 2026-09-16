@@ -8,14 +8,14 @@ additional_cargo_args = ["--locked"]
 examine_globs = [
     "rust/crates/keel/src/proxy/**/*.rs",
     "rust/crates/keel/src/mcp/**/*.rs",
-    "rust/crates/keel/src/plan.rs",
+    "rust/crates/keel/src/error.rs",
     "rust/crates/keel/src/utility/plan.rs",
-    "rust/crates/keel/src/research.rs",
-    "rust/crates/keel/src/ticket.rs",
-    "rust/crates/keel/src/warning_engine.rs",
+    "rust/crates/keel/src/utility/research_policy.rs",
+    "rust/crates/keel/src/utility/task_ticket.rs",
+    "rust/crates/keel/src/utility/memory_families.rs",
+    "rust/crates/keel/src/proxy/warnings.rs",
     "rust/crates/keel/src/review.rs",
     "rust/crates/keel/src/review/**/*.rs",
-    "rust/crates/keel/src/review_gates.rs",
 ]
 
 exclude_globs = [

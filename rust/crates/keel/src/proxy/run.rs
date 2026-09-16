@@ -329,6 +329,27 @@ pub fn run_proxy(
                 )
             });
 
+            if raw_run.exit_code != 0 {
+                let stderr_snippet = String::from_utf8_lossy(&raw_run.stderr);
+                let stdout_snippet = String::from_utf8_lossy(&raw_run.stdout);
+                let observed = if !stderr_snippet.trim().is_empty() {
+                    &stderr_snippet
+                } else {
+                    &stdout_snippet
+                };
+                if let Ok(home) = crate::runtime::resolve_claude_home("") {
+                    let _ = crate::utility::memory_families::record_failure_event(
+                        &home,
+                        None,
+                        "command_failure",
+                        &meta.command,
+                        &format!("exit code {}", raw_run.exit_code),
+                        observed.trim(),
+                        None,
+                    );
+                }
+            }
+
             let compact_result = if flag_set.bool_value("errors-only") {
                 errors_only_compact(&raw_run, &meta)
             } else {
@@ -358,18 +379,34 @@ pub fn run_proxy(
                 neutralize_injection(&String::from_utf8_lossy(&result.stderr), &meta.raw_id);
             raw_findings.extend(stderr_findings);
             let neutralized_raw_output = format!("{clean_stdout}{clean_stderr}");
-            // Enforce the final model boundary after adapter reduction; a
-            // firewall failure is explicit and never falls back to raw output.
+            // Enforce final model boundary; a firewall failure is explicit.
+            // Debug opt-outs (--full) are receipted and measured against budget.
             let mut context_projection: Option<ContextProjection> = None;
             let mut context_blocked = false;
             let context_bypass = flag_set.bool_value("full") || flag_set.bool_value("no-compact");
+            let debug_budget = crate::proxy::context::ContextPolicy::for_surface(
+                crate::proxy::context::DEFAULT_MAX_DYNAMIC_TOKENS,
+            )
+            .max_tokens;
             let context_candidate = if compact_result.compacted {
                 rendered.clone()
             } else {
                 neutralized_raw_output.clone()
             };
             let rendered = if context_bypass {
-                rendered
+                let bypass_tokens = TokenMeter::count_text(&rendered);
+                if bypass_tokens > debug_budget {
+                    context_blocked = true;
+                    let _ = writeln!(
+                        standard_error,
+                        "keel context firewall blocked debug output: {bypass_tokens} exceeds {debug_budget}"
+                    );
+                    format!(
+                        "[keel] context blocked: debug output exceeds {debug_budget}-token budget"
+                    )
+                } else {
+                    rendered
+                }
             } else {
                 match project_command_context(&context_candidate, &meta, raw_saved) {
                     Ok(projection) => {
@@ -410,7 +447,8 @@ pub fn run_proxy(
                 ExecutionStatus::Unknown
             } else if context_bypass {
                 // Full/no-compact are explicit compatibility/debug opt-outs;
-                // their model-visible result bypasses the context firewall.
+                // their neutralized output passed the finite debug budget and
+                // is receipted as Bypassed rather than Reduced.
                 ExecutionStatus::Bypassed
             } else if context_blocked {
                 ExecutionStatus::Blocked
@@ -453,7 +491,8 @@ pub fn run_proxy(
             meta.compact_path = meta.raw_path.join("compact.txt");
 
             // Store exactly the bounded projection received by the model; full
-            // and no-compact retain neutralized streams and record a bypass.
+            // and no-compact retain neutralized streams within the debug budget
+            // and record a bypass.
             let (agent_output, output_streams) = if context_bypass && !context_blocked {
                 (
                     neutralized_raw_output.clone(),

@@ -55,6 +55,11 @@ pub fn run_memory_family_command(
         "retrieve" => run_retrieve(command_group, arguments, standard_output, standard_error),
         "status" => run_status(command_group, arguments, standard_output, standard_error),
         "instincts" => run_instincts(command_group, arguments, standard_output, standard_error),
+        "lessons" => run_lessons(command_group, arguments, standard_output, standard_error),
+        "corrections" => run_corrections(command_group, arguments, standard_output, standard_error),
+        "decisions" => run_decisions(command_group, arguments, standard_output, standard_error),
+        "events" => run_events(command_group, arguments, standard_output, standard_error),
+        "arbitrate" => run_arbitrate(command_group, arguments, standard_output, standard_error),
         other => {
             let _ = writeln!(standard_error, "{command_group}: unknown family {other}");
             1
@@ -199,6 +204,7 @@ fn run_research_cache(
              lookup   --query \"...\" [--include-stale]\n\
              stale    [--days N]\n\
              reward   --id <id>\n\
+             expire   [--days N] [--apply]\n\
              list"
         );
         return if arguments.is_empty() { 1 } else { 0 };
@@ -546,10 +552,96 @@ fn run_research_cache(
             standard_output,
             standard_error,
         ),
+        "expire" => {
+            let mut flags = FlagSet::new(format!("{label} expire"));
+            flags.string_flag("days", "");
+            flags.string_flag("claude-home", "");
+            flags.bool_flag("apply", false);
+            flags.bool_flag("json", false);
+            if let Err(error) = flags.parse(&arguments[1..]) {
+                let _ = writeln!(standard_error, "{}", error.message);
+                return 1;
+            }
+            let Some(home) =
+                resolve_home(flags.string_value("claude-home"), &label, standard_error)
+            else {
+                return 1;
+            };
+            let days: u128 = match flags.string_value("days").trim().parse::<u128>() {
+                Ok(days) if days > 0 => days,
+                Ok(_) => {
+                    let _ = writeln!(
+                        standard_error,
+                        "{label} expire: --days must be a positive integer"
+                    );
+                    return 1;
+                }
+                Err(_) => 90,
+            };
+            let store = family_store(&home, command_group, "research-cache");
+            let records = match store.list_records() {
+                Ok(records) => records,
+                Err(error) => {
+                    let _ = writeln!(standard_error, "{label}: {error}");
+                    return 1;
+                }
+            };
+            let cutoff = format_timestamp_iso8601(current_timestamp_millis() - days * 86_400_000);
+            let expired: Vec<String> = records
+                .iter()
+                .filter(|(_, record)| field(record, "recordedAt").unwrap_or("") < cutoff.as_str())
+                .map(|(id, _)| id.clone())
+                .collect();
+            if !flags.bool_value("apply") {
+                if flags.bool_value("json") {
+                    let payload = Value::Object(vec![
+                        ("days".into(), Value::Number(days.to_string())),
+                        ("count".into(), Value::Number(expired.len().to_string())),
+                        (
+                            "ids".into(),
+                            Value::Array(expired.into_iter().map(Value::String).collect()),
+                        ),
+                        ("applied".into(), Value::Bool(false)),
+                    ]);
+                    return render_json(standard_output, standard_error, &payload);
+                }
+                let _ = writeln!(
+                    standard_output,
+                    "{label} expire: {} entr{} older than {days} day(s) (dry-run; pass --apply to mark stale)",
+                    expired.len(),
+                    if expired.len() == 1 { "y" } else { "ies" }
+                );
+                return 0;
+            }
+            let mut marked = 0usize;
+            for id in &expired {
+                if store.read_record(id).ok().flatten().is_some() {
+                    let mut record = store.read_record(id).ok().flatten().unwrap_or_default();
+                    set_field(&mut record, "state", "expired".to_string());
+                    if store.write_record(id, &record).is_ok() {
+                        marked += 1;
+                    }
+                }
+            }
+            if flags.bool_value("json") {
+                let payload = Value::Object(vec![
+                    ("days".into(), Value::Number(days.to_string())),
+                    ("count".into(), Value::Number(marked.to_string())),
+                    ("applied".into(), Value::Bool(true)),
+                ]);
+                return render_json(standard_output, standard_error, &payload);
+            }
+            let _ = writeln!(
+                standard_output,
+                "{label} expire: marked {marked} entr{} stale",
+                if marked == 1 { "y" } else { "ies" }
+            );
+            0
+        }
         other => {
             let _ = writeln!(
                 standard_error,
-                "{label}: unknown action {other} (expected record|lookup|stale|reward|list)"
+                "{label}: unknown action {other} (expected record|lookup|stale|reward|expire|list)"
             );
             1
         }
@@ -1049,7 +1141,7 @@ fn run_entity(
     if arguments.is_empty() || is_help(&arguments[0]) {
         let _ = writeln!(
             standard_output,
-            "Usage: keel {command_group} entity [upsert|list|query] ..."
+            "Usage: keel {command_group} entity [upsert|list|query|supersede] ..."
         );
         return if arguments.is_empty() { 1 } else { 0 };
     }
@@ -1059,6 +1151,8 @@ fn run_entity(
             flags.string_flag("name", "");
             flags.string_flag("type", "");
             flags.string_flag("summary", "");
+            flags.string_flag("source", "");
+            flags.string_flag("supersedes", "");
             flags.string_flag("claude-home", "");
             flags.bool_flag("json", false);
             if let Err(error) = flags.parse(&arguments[1..]) {
@@ -1082,7 +1176,9 @@ fn run_entity(
             // Entities are keyed by type+name so upsert overwrites in place.
             let id = sanitize_id(&format!("{entity_type}-{name}"));
             let (_, at) = now_id("entity");
-            let record: Record = vec![
+            let store = family_store(&home, command_group, "entities");
+            let previous = store.read_record(&id).ok().flatten();
+            let mut record: Record = vec![
                 ("id".into(), id.clone()),
                 ("name".into(), name),
                 ("type".into(), entity_type),
@@ -1090,9 +1186,23 @@ fn run_entity(
                     "summary".into(),
                     flags.string_value("summary").trim().to_string(),
                 ),
+                (
+                    "source".into(),
+                    flags.string_value("source").trim().to_string(),
+                ),
+                (
+                    "supersedes".into(),
+                    flags.string_value("supersedes").trim().to_string(),
+                ),
                 ("updatedAt".into(), at),
             ];
-            let store = family_store(&home, command_group, "entities");
+            // why: provenance survives in place: keep the prior source chain
+            // when the caller does not restate it, and link the supersede edge.
+            if let Some(previous) = previous.as_ref() {
+                carry_field(previous, &mut record, "source");
+                carry_field(previous, &mut record, "supersedes");
+                carry_field(previous, &mut record, "supersededBy");
+            }
             match store.write_record(&id, &record) {
                 Ok(path) => emit_created(
                     &label,
@@ -1149,9 +1259,12 @@ fn run_entity(
                     let type_ok = type_filter.is_empty()
                         || field(record, "type").unwrap_or("").to_lowercase() == type_filter;
                     let text = format!(
-                        "{} {}",
+                        "{} {} {} {} {}",
                         field(record, "name").unwrap_or(""),
-                        field(record, "summary").unwrap_or("")
+                        field(record, "summary").unwrap_or(""),
+                        field(record, "source").unwrap_or(""),
+                        field(record, "supersedes").unwrap_or(""),
+                        field(record, "supersededBy").unwrap_or(""),
                     )
                     .to_lowercase();
                     let contains_ok = contains.is_empty() || text.contains(&contains);
@@ -1185,11 +1298,141 @@ fn run_entity(
             }
             0
         }
+        "supersede" => {
+            let mut flags = FlagSet::new(format!("{label} supersede"));
+            flags.string_flag("id", "");
+            flags.string_flag("by", "");
+            flags.string_flag("reason", "");
+            flags.string_flag("claude-home", "");
+            flags.bool_flag("json", false);
+            if let Err(error) = flags.parse(&arguments[1..]) {
+                let _ = writeln!(standard_error, "{}", error.message);
+                return 1;
+            }
+            let id = flags.string_value("id").trim().to_string();
+            let by = flags.string_value("by").trim().to_string();
+            let reason = flags.string_value("reason").trim().to_string();
+            if id.is_empty() || by.is_empty() {
+                let _ = writeln!(
+                    standard_error,
+                    "{label} supersede: --id and --by are required"
+                );
+                return 1;
+            }
+            let Some(home) =
+                resolve_home(flags.string_value("claude-home"), &label, standard_error)
+            else {
+                return 1;
+            };
+            supersede_entity(
+                command_group,
+                &label,
+                &home,
+                &id,
+                &by,
+                &reason,
+                flags.bool_value("json"),
+                standard_output,
+                standard_error,
+            )
+        }
         other => {
             let _ = writeln!(
                 standard_error,
-                "{label}: unknown action {other} (expected upsert|list|query)"
+                "{label}: unknown action {other} (expected upsert|list|query|supersede)"
             );
+            1
+        }
+    }
+}
+
+fn carry_field(previous: &Record, next: &mut Record, key: &str) {
+    // why: upsert carries provenance fields forward when the caller leaves
+    // them empty, so a later read still sees author/source/supersede links.
+    let prior = field(previous, key).unwrap_or("").trim();
+    if prior.is_empty() {
+        return;
+    }
+    if let Some(slot) = next.iter_mut().find(|(name, _)| name == key) {
+        if slot.1.trim().is_empty() {
+            slot.1 = prior.to_string();
+        }
+    }
+}
+
+fn set_entity_field(record: &mut Record, key: &str, value: String) {
+    if let Some(slot) = record.iter_mut().find(|(name, _)| name == key) {
+        slot.1 = value;
+    } else {
+        record.push((key.to_string(), value));
+    }
+}
+
+/// Link a supersede edge between two entity records: the old record keeps a
+/// `supersededBy` tombstone pointer and the new record keeps `supersedes`.
+/// Neither record is deleted, so the decision stays auditable.
+#[allow(clippy::too_many_arguments)]
+fn supersede_entity(
+    command_group: &str,
+    label: &str,
+    home: &std::path::Path,
+    id: &str,
+    by: &str,
+    reason: &str,
+    json: bool,
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> u8 {
+    let store = family_store(home, command_group, "entities");
+    let mut old = match store.read_record(id) {
+        Ok(Some(record)) => record,
+        Ok(None) => {
+            let _ = writeln!(standard_error, "{label} supersede: no entity with id {id}");
+            return 1;
+        }
+        Err(error) => {
+            let _ = writeln!(standard_error, "{label}: {error}");
+            return 1;
+        }
+    };
+    let mut next = match store.read_record(by) {
+        Ok(Some(record)) => record,
+        Ok(None) => {
+            let _ = writeln!(standard_error, "{label} supersede: no entity with id {by}");
+            return 1;
+        }
+        Err(error) => {
+            let _ = writeln!(standard_error, "{label}: {error}");
+            return 1;
+        }
+    };
+    let (_, at) = now_id("entity");
+    set_entity_field(&mut old, "supersededBy", by.to_string());
+    set_entity_field(&mut old, "updatedAt", at.clone());
+    if !reason.trim().is_empty() {
+        set_entity_field(&mut old, "supersedeReason", reason.trim().to_string());
+    }
+    set_entity_field(&mut next, "supersedes", id.to_string());
+    set_entity_field(&mut next, "updatedAt", at);
+    if let Err(error) = store.write_record(id, &old) {
+        let _ = writeln!(standard_error, "{label}: {error}");
+        return 1;
+    }
+    match store.write_record(by, &next) {
+        Ok(_) => {
+            if json {
+                let payload = Value::Object(vec![
+                    ("updated".into(), Value::Bool(true)),
+                    ("superseded".into(), Value::String(id.to_string())),
+                    ("supersededBy".into(), Value::String(by.to_string())),
+                ]);
+                return render_json(standard_output, standard_error, &payload);
+            }
+            let _ = writeln!(standard_output, "{label} supersede: {id} -> {by}");
+            0
+        }
+        Err(error) => {
+            let _ = writeln!(standard_error, "{label}: {error}");
             1
         }
     }
@@ -1449,6 +1692,7 @@ const STATUS_FAMILIES: &[&str] = &[
     "entities",
     "graph",
     "instincts",
+    "lessons",
 ];
 
 /// Record counts per memory family for `command_group`. A family whose store cannot be read counts as 0 so a partial
@@ -1850,9 +2094,1667 @@ fn instincts_promote(
     0
 }
 
-// ---------------------------------------------------------------------------
+// lessons: scoped learning lifecycle for plan §26/§27.
+// Candidates require evidence to promote; regressions demote active lessons.
+
+const LESSON_PROMOTE_THRESHOLD: i64 = 2;
+const LESSON_STATES: &[&str] = &[
+    "candidate",
+    "active",
+    "questioned",
+    "quarantined",
+    "superseded",
+];
+
+fn run_lessons(
+    command_group: &str,
+    arguments: &[String],
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> u8 {
+    let label = format!("{command_group} lessons");
+    if arguments.is_empty() || is_help(&arguments[0]) {
+        let _ = writeln!(
+            standard_output,
+            "Usage: keel {command_group} lessons [record|list|reinforce|promote|evaluate|demote] ...\n\
+             \n\
+             record    --pattern \"...\" --evidence \"...\" --response \"...\"\n\
+                       [--cause \"...\"] [--scope \"...\"]\n\
+             list      [--status candidate|active|questioned|quarantined|superseded]\n\
+             reinforce --id <id>\n\
+             promote   --id <id> [--threshold N]\n\
+             evaluate  --id <id> --before-tokens N --after-tokens N\n\
+                       [--before-turns N] [--after-turns N]\n\
+             demote    --id <id> [--state questioned|quarantined|superseded] [--reason \"...\"]"
+        );
+        return if arguments.is_empty() { 1 } else { 0 };
+    }
+    match arguments[0].as_str() {
+        "record" => lessons_record(
+            command_group,
+            &label,
+            &arguments[1..],
+            standard_output,
+            standard_error,
+        ),
+        "list" => lessons_list(
+            command_group,
+            &label,
+            &arguments[1..],
+            standard_output,
+            standard_error,
+        ),
+        "reinforce" => lessons_mutate(
+            command_group,
+            &label,
+            &arguments[1..],
+            LessonMutation::Reinforce,
+            standard_output,
+            standard_error,
+        ),
+        "promote" => lessons_mutate(
+            command_group,
+            &label,
+            &arguments[1..],
+            LessonMutation::Promote,
+            standard_output,
+            standard_error,
+        ),
+        "demote" => lessons_mutate(
+            command_group,
+            &label,
+            &arguments[1..],
+            LessonMutation::Demote,
+            standard_output,
+            standard_error,
+        ),
+        "evaluate" => lessons_evaluate(
+            command_group,
+            &label,
+            &arguments[1..],
+            standard_output,
+            standard_error,
+        ),
+        other => {
+            let _ = writeln!(
+                standard_error,
+                "{label}: unknown action {other} (expected record|list|reinforce|promote|evaluate|demote)"
+            );
+            1
+        }
+    }
+}
+
+enum LessonMutation {
+    Reinforce,
+    Promote,
+    Demote,
+}
+
+fn lessons_record(
+    command_group: &str,
+    label: &str,
+    arguments: &[String],
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> u8 {
+    let mut flags = FlagSet::new(format!("{label} record"));
+    flags.string_flag("pattern", "");
+    flags.string_flag("evidence", "");
+    flags.string_flag("response", "");
+    flags.string_flag("cause", "");
+    flags.string_flag("scope", "");
+    flags.string_flag("claude-home", "");
+    flags.bool_flag("json", false);
+    if let Err(error) = flags.parse(arguments) {
+        let _ = writeln!(standard_error, "{}", error.message);
+        return 1;
+    }
+    let pattern = flags.string_value("pattern").trim().to_string();
+    let evidence = flags.string_value("evidence").trim().to_string();
+    let response = flags.string_value("response").trim().to_string();
+    if pattern.is_empty() || evidence.is_empty() || response.is_empty() {
+        // why: plan §26.3: a candidate without evidence is never recorded.
+        let _ = writeln!(
+            standard_error,
+            "{label} record: --pattern, --evidence, and --response are required"
+        );
+        return 1;
+    }
+    let Some(home) = resolve_home(flags.string_value("claude-home"), label, standard_error) else {
+        return 1;
+    };
+    let store = family_store(&home, command_group, "lessons");
+    let id = sanitize_id(&pattern);
+    let (_, at) = now_id("lesson");
+    let scope = flags.string_value("scope").trim().to_string();
+    let (confidence, observations, created_at, status) = match store.read_record(&id) {
+        Ok(Some(existing)) => {
+            let prior_confidence: i64 = field(&existing, "confidence")
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0);
+            let prior_observations: i64 = field(&existing, "observations")
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0);
+            (
+                prior_confidence + 1,
+                prior_observations + 1,
+                field(&existing, "createdAt").unwrap_or(&at).to_string(),
+                field(&existing, "status")
+                    .unwrap_or("candidate")
+                    .to_string(),
+            )
+        }
+        _ => (1, 1, at.clone(), "candidate".to_string()),
+    };
+    let mut record: Record = vec![
+        ("id".into(), id.clone()),
+        ("pattern".into(), pattern),
+        ("evidence".into(), evidence),
+        ("response".into(), response),
+        (
+            "cause".into(),
+            flags.string_value("cause").trim().to_string(),
+        ),
+        (
+            "scope".into(),
+            if scope.is_empty() {
+                "workspace".into()
+            } else {
+                scope
+            },
+        ),
+        ("status".into(), status),
+        ("confidence".into(), confidence.to_string()),
+        ("observations".into(), observations.to_string()),
+        ("createdAt".into(), created_at),
+        ("updatedAt".into(), at),
+    ];
+    if let Ok(Some(existing)) = store.read_record(&id) {
+        carry_field(&existing, &mut record, "lastVerified");
+    }
+    match store.write_record(&id, &record) {
+        Ok(path) => {
+            if flags.bool_value("json") {
+                let payload = Value::Object(vec![
+                    ("recorded".into(), Value::Bool(true)),
+                    ("lesson".into(), record_to_value(&record)),
+                ]);
+                return render_json(standard_output, standard_error, &payload);
+            }
+            let _ = writeln!(
+                standard_output,
+                "{label}: {id} (status {}, confidence {confidence})",
+                field(&record, "status").unwrap_or("candidate")
+            );
+            let _ = writeln!(standard_output, "  saved: {}", display_path(&path));
+            0
+        }
+        Err(error) => {
+            let _ = writeln!(standard_error, "{label}: {error}");
+            1
+        }
+    }
+}
+
+fn lessons_list(
+    command_group: &str,
+    label: &str,
+    arguments: &[String],
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> u8 {
+    let mut flags = FlagSet::new(format!("{label} list"));
+    flags.string_flag("status", "");
+    flags.string_flag("claude-home", "");
+    flags.bool_flag("json", false);
+    if let Err(error) = flags.parse(arguments) {
+        let _ = writeln!(standard_error, "{}", error.message);
+        return 1;
+    }
+    let status_filter = flags.string_value("status").trim().to_ascii_lowercase();
+    if !status_filter.is_empty() && !LESSON_STATES.contains(&status_filter.as_str()) {
+        let _ = writeln!(
+            standard_error,
+            "{label} list: --status must be one of {}",
+            LESSON_STATES.join(", ")
+        );
+        return 1;
+    }
+    let Some(home) = resolve_home(flags.string_value("claude-home"), label, standard_error) else {
+        return 1;
+    };
+    let store = family_store(&home, command_group, "lessons");
+    let records = match store.list_records() {
+        Ok(records) => records,
+        Err(error) => {
+            let _ = writeln!(standard_error, "{label}: {error}");
+            return 1;
+        }
+    };
+    let matches: Vec<&Record> = records
+        .iter()
+        .map(|(_, record)| record)
+        .filter(|record| {
+            status_filter.is_empty()
+                || field(record, "status").unwrap_or("candidate") == status_filter
+        })
+        .collect();
+    if flags.bool_value("json") {
+        let payload = Value::Object(vec![
+            ("count".into(), Value::Number(matches.len().to_string())),
+            (
+                "lessons".into(),
+                Value::Array(
+                    matches
+                        .iter()
+                        .map(|record| record_to_value(record))
+                        .collect(),
+                ),
+            ),
+        ]);
+        return render_json(standard_output, standard_error, &payload);
+    }
+    let _ = writeln!(standard_output, "{label}: {} lesson(s)", matches.len());
+    for record in &matches {
+        let _ = writeln!(
+            standard_output,
+            "  [{}] {} (confidence {})",
+            field(record, "status").unwrap_or("candidate"),
+            field(record, "pattern").unwrap_or("?"),
+            field(record, "confidence").unwrap_or("0")
+        );
+    }
+    0
+}
+
+fn lessons_mutate(
+    command_group: &str,
+    label: &str,
+    arguments: &[String],
+    mutation: LessonMutation,
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> u8 {
+    let verb = match mutation {
+        LessonMutation::Reinforce => "reinforce",
+        LessonMutation::Promote => "promote",
+        LessonMutation::Demote => "demote",
+    };
+    let mut flags = FlagSet::new(format!("{label} {verb}"));
+    flags.string_flag("id", "");
+    flags.string_flag("threshold", LESSON_PROMOTE_THRESHOLD.to_string());
+    flags.string_flag("state", "");
+    flags.string_flag("reason", "");
+    flags.string_flag("claude-home", "");
+    flags.bool_flag("json", false);
+    if let Err(error) = flags.parse(arguments) {
+        let _ = writeln!(standard_error, "{}", error.message);
+        return 1;
+    }
+    let id = flags.string_value("id").trim().to_string();
+    if id.is_empty() {
+        let _ = writeln!(standard_error, "{label} {verb}: --id is required");
+        return 1;
+    }
+    let Some(home) = resolve_home(flags.string_value("claude-home"), label, standard_error) else {
+        return 1;
+    };
+    let store = family_store(&home, command_group, "lessons");
+    let mut record = match store.read_record(&id) {
+        Ok(Some(record)) => record,
+        Ok(None) => {
+            let _ = writeln!(standard_error, "{label} {verb}: no lesson with id {id}");
+            return 1;
+        }
+        Err(error) => {
+            let _ = writeln!(standard_error, "{label}: {error}");
+            return 1;
+        }
+    };
+    let (_, at) = now_id("lesson");
+    let outcome = match mutation {
+        LessonMutation::Reinforce => {
+            let confidence: i64 = field(&record, "confidence")
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0);
+            let observations: i64 = field(&record, "observations")
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0);
+            set_field(&mut record, "confidence", (confidence + 1).to_string());
+            set_field(&mut record, "observations", (observations + 1).to_string());
+            format!("confidence {}", confidence + 1)
+        }
+        LessonMutation::Promote => {
+            let threshold: i64 = flags
+                .string_value("threshold")
+                .trim()
+                .parse()
+                .unwrap_or(LESSON_PROMOTE_THRESHOLD);
+            let confidence: i64 = field(&record, "confidence")
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0);
+            let has_evidence = field(&record, "evidence")
+                .map(str::trim)
+                .is_some_and(|evidence| !evidence.is_empty());
+            if !has_evidence {
+                let _ = writeln!(
+                    standard_error,
+                    "{label} promote: {id} has no evidence; a lesson cannot be promoted without it"
+                );
+                return 1;
+            }
+            if confidence < threshold {
+                let _ = writeln!(
+                    standard_error,
+                    "{label} promote: {id} confidence {confidence} is below threshold {threshold}"
+                );
+                return 1;
+            }
+            set_field(&mut record, "status", "active".to_string());
+            set_field(&mut record, "lastVerified", at.clone());
+            format!("status active (confidence {confidence})")
+        }
+        LessonMutation::Demote => {
+            let state = {
+                let requested = flags.string_value("state").trim().to_ascii_lowercase();
+                if requested.is_empty() {
+                    "questioned".to_string()
+                } else if matches!(
+                    requested.as_str(),
+                    "questioned" | "quarantined" | "superseded"
+                ) {
+                    requested
+                } else {
+                    let _ = writeln!(
+                        standard_error,
+                        "{label} demote: --state must be questioned, quarantined, or superseded"
+                    );
+                    return 1;
+                }
+            };
+            set_field(&mut record, "status", state.clone());
+            set_field(&mut record, "lastVerified", at.clone());
+            let reason = flags.string_value("reason").trim().to_string();
+            if !reason.is_empty() {
+                set_field(&mut record, "demotionReason", reason);
+            }
+            format!("status {state}")
+        }
+    };
+    set_field(&mut record, "updatedAt", at);
+    match store.write_record(&id, &record) {
+        Ok(_) => {
+            if flags.bool_value("json") {
+                let payload = Value::Object(vec![
+                    ("updated".into(), Value::Bool(true)),
+                    ("lesson".into(), record_to_value(&record)),
+                ]);
+                return render_json(standard_output, standard_error, &payload);
+            }
+            let _ = writeln!(standard_output, "{label} {verb}: {id} -> {outcome}");
+            0
+        }
+        Err(error) => {
+            let _ = writeln!(standard_error, "{label}: {error}");
+            1
+        }
+    }
+}
+
+fn lessons_evaluate(
+    command_group: &str,
+    label: &str,
+    arguments: &[String],
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> u8 {
+    let mut flags = FlagSet::new(format!("{label} evaluate"));
+    flags.string_flag("id", "");
+    flags.string_flag("before-tokens", "");
+    flags.string_flag("after-tokens", "");
+    flags.string_flag("before-turns", "");
+    flags.string_flag("after-turns", "");
+    flags.string_flag("claude-home", "");
+    flags.bool_flag("json", false);
+    if let Err(error) = flags.parse(arguments) {
+        let _ = writeln!(standard_error, "{}", error.message);
+        return 1;
+    }
+    let id = flags.string_value("id").trim().to_string();
+    let before_tokens: i64 = flags
+        .string_value("before-tokens")
+        .trim()
+        .parse()
+        .unwrap_or(-1);
+    let after_tokens: i64 = flags
+        .string_value("after-tokens")
+        .trim()
+        .parse()
+        .unwrap_or(-1);
+    let before_turns: Option<i64> = flags.string_value("before-turns").trim().parse().ok();
+    let after_turns: Option<i64> = flags.string_value("after-turns").trim().parse().ok();
+    if id.is_empty() || before_tokens < 0 || after_tokens < 0 {
+        let _ = writeln!(
+            standard_error,
+            "{label} evaluate: --id, --before-tokens, and --after-tokens are required"
+        );
+        return 1;
+    }
+    let Some(home) = resolve_home(flags.string_value("claude-home"), label, standard_error) else {
+        return 1;
+    };
+    let store = family_store(&home, command_group, "lessons");
+    let mut record = match store.read_record(&id) {
+        Ok(Some(record)) => record,
+        Ok(None) => {
+            let _ = writeln!(standard_error, "{label} evaluate: no lesson with id {id}");
+            return 1;
+        }
+        Err(error) => {
+            let _ = writeln!(standard_error, "{label}: {error}");
+            return 1;
+        }
+    };
+    // why: plan §44: a lesson that does not improve measured behaviour (or
+    // regresses it) is demoted instead of staying active.
+    let tokens_improved = after_tokens < before_tokens;
+    let turns_improved = match (before_turns, after_turns) {
+        (Some(before), Some(after)) => after <= before,
+        _ => true,
+    };
+    let verdict = if tokens_improved && turns_improved {
+        "improved"
+    } else {
+        "regressed"
+    };
+    let (_, at) = now_id("lesson");
+    set_field(&mut record, "beforeTokens", before_tokens.to_string());
+    set_field(&mut record, "afterTokens", after_tokens.to_string());
+    if let Some(before) = before_turns {
+        set_field(&mut record, "beforeTurns", before.to_string());
+    }
+    if let Some(after) = after_turns {
+        set_field(&mut record, "afterTurns", after.to_string());
+    }
+    set_field(&mut record, "evaluation", verdict.to_string());
+    set_field(&mut record, "lastVerified", at.clone());
+    set_field(&mut record, "updatedAt", at);
+    if verdict == "regressed" {
+        set_field(&mut record, "status", "questioned".to_string());
+    }
+    match store.write_record(&id, &record) {
+        Ok(_) => {
+            if flags.bool_value("json") {
+                let payload = Value::Object(vec![
+                    ("evaluated".into(), Value::Bool(true)),
+                    ("verdict".into(), Value::String(verdict.to_string())),
+                    ("lesson".into(), record_to_value(&record)),
+                ]);
+                return render_json(standard_output, standard_error, &payload);
+            }
+            let _ = writeln!(
+                standard_output,
+                "{label} evaluate: {id} -> {verdict} (tokens {before_tokens} -> {after_tokens})"
+            );
+            0
+        }
+        Err(error) => {
+            let _ = writeln!(standard_error, "{label}: {error}");
+            1
+        }
+    }
+}
+
+// reality authority hierarchy (§25)
+
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+#[repr(u8)]
+pub enum RealityAuthorityTier {
+    CurrentObservableFact = 1,
+    CurrentUserInstruction = 2,
+    CurrentValidatedProjectState = 3,
+    VerifiedProjectMemory = 4,
+    HistoricalLesson = 5,
+    ModelPriorKnowledge = 6,
+}
+
+impl RealityAuthorityTier {
+    pub fn rank(self) -> u8 {
+        self as u8
+    }
+
+    pub fn from_str_or_num(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "1" | "current_observable_fact" | "current-observable-fact" | "fact" => {
+                Some(Self::CurrentObservableFact)
+            }
+            "2" | "current_user_instruction" | "current-user-instruction" | "instruction" => {
+                Some(Self::CurrentUserInstruction)
+            }
+            "3"
+            | "current_validated_project_state"
+            | "current-validated-project-state"
+            | "project_state" => Some(Self::CurrentValidatedProjectState),
+            "4" | "verified_project_memory" | "verified-project-memory" | "memory" => {
+                Some(Self::VerifiedProjectMemory)
+            }
+            "5" | "historical_lesson" | "historical-lesson" | "lesson" => {
+                Some(Self::HistoricalLesson)
+            }
+            "6" | "model_prior_knowledge" | "model-prior-knowledge" | "model" => {
+                Some(Self::ModelPriorKnowledge)
+            }
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::CurrentObservableFact => "current_observable_fact",
+            Self::CurrentUserInstruction => "current_user_instruction",
+            Self::CurrentValidatedProjectState => "current_validated_project_state",
+            Self::VerifiedProjectMemory => "verified_project_memory",
+            Self::HistoricalLesson => "historical_lesson",
+            Self::ModelPriorKnowledge => "model_prior_knowledge",
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ArbitrationResult {
+    pub winning_claim: String,
+    pub winning_tier: RealityAuthorityTier,
+    pub losing_claim: String,
+    pub losing_tier: RealityAuthorityTier,
+    pub is_conflict: bool,
+    pub rationale: String,
+}
+
+pub fn arbitrate_claim(
+    primary_claim: &str,
+    primary_tier: RealityAuthorityTier,
+    competing_claim: &str,
+    competing_tier: RealityAuthorityTier,
+) -> ArbitrationResult {
+    let p_rank = primary_tier.rank();
+    let c_rank = competing_tier.rank();
+
+    if p_rank < c_rank {
+        ArbitrationResult {
+            winning_claim: primary_claim.to_string(),
+            winning_tier: primary_tier,
+            losing_claim: competing_claim.to_string(),
+            losing_tier: competing_tier,
+            is_conflict: false,
+            rationale: format!(
+                "{} (tier {}) outranks {} (tier {}) per §25 Reality Authority Hierarchy",
+                primary_tier.as_str(),
+                p_rank,
+                competing_tier.as_str(),
+                c_rank
+            ),
+        }
+    } else if c_rank < p_rank {
+        ArbitrationResult {
+            winning_claim: competing_claim.to_string(),
+            winning_tier: competing_tier,
+            losing_claim: primary_claim.to_string(),
+            losing_tier: primary_tier,
+            is_conflict: false,
+            rationale: format!(
+                "{} (tier {}) outranks {} (tier {}) per §25 Reality Authority Hierarchy",
+                competing_tier.as_str(),
+                c_rank,
+                primary_tier.as_str(),
+                p_rank
+            ),
+        }
+    } else {
+        let is_conflict = primary_claim.trim() != competing_claim.trim();
+        ArbitrationResult {
+            winning_claim: primary_claim.to_string(),
+            winning_tier: primary_tier,
+            losing_claim: competing_claim.to_string(),
+            losing_tier: competing_tier,
+            is_conflict,
+            rationale: if is_conflict {
+                format!(
+                    "Unresolved conflict: both claims hold equal authority tier {} but contradict",
+                    primary_tier.as_str()
+                )
+            } else {
+                format!("Claims agree at authority tier {}", primary_tier.as_str())
+            },
+        }
+    }
+}
+
+fn run_arbitrate(
+    command_group: &str,
+    arguments: &[String],
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> u8 {
+    let label = format!("{command_group} arbitrate");
+    let mut flags = FlagSet::new(&label);
+    flags.string_flag("primary", "");
+    flags.string_flag("primary-tier", "");
+    flags.string_flag("competing", "");
+    flags.string_flag("competing-tier", "");
+    flags.bool_flag("json", false);
+
+    if arguments.is_empty() || is_help(&arguments[0]) {
+        let _ = writeln!(
+            standard_output,
+            "Usage: keel {command_group} arbitrate --primary \"...\" --primary-tier <1..6|name> --competing \"...\" --competing-tier <1..6|name> [--json]"
+        );
+        return if arguments.is_empty() { 1 } else { 0 };
+    }
+    if let Err(error) = flags.parse(arguments) {
+        let _ = writeln!(standard_error, "{label}: {}", error.message);
+        return 1;
+    }
+    let p_claim = flags.string_value("primary");
+    let c_claim = flags.string_value("competing");
+    let p_tier_str = flags.string_value("primary-tier");
+    let c_tier_str = flags.string_value("competing-tier");
+
+    let Some(p_tier) = RealityAuthorityTier::from_str_or_num(p_tier_str) else {
+        let _ = writeln!(
+            standard_error,
+            "{label}: invalid --primary-tier {p_tier_str:?} (expected 1..6 or tier name)"
+        );
+        return 1;
+    };
+    let Some(c_tier) = RealityAuthorityTier::from_str_or_num(c_tier_str) else {
+        let _ = writeln!(
+            standard_error,
+            "{label}: invalid --competing-tier {c_tier_str:?} (expected 1..6 or tier name)"
+        );
+        return 1;
+    };
+
+    let result = arbitrate_claim(p_claim, p_tier, c_claim, c_tier);
+    if flags.bool_value("json") {
+        let payload = Value::Object(vec![
+            ("winningClaim".into(), Value::String(result.winning_claim)),
+            (
+                "winningTier".into(),
+                Value::String(result.winning_tier.as_str().to_string()),
+            ),
+            ("losingClaim".into(), Value::String(result.losing_claim)),
+            (
+                "losingTier".into(),
+                Value::String(result.losing_tier.as_str().to_string()),
+            ),
+            ("isConflict".into(), Value::Bool(result.is_conflict)),
+            ("rationale".into(), Value::String(result.rationale)),
+        ]);
+        return render_json(standard_output, standard_error, &payload);
+    }
+    let _ = writeln!(
+        standard_output,
+        "Winner: [{}] {}\nRationale: {}",
+        result.winning_tier.as_str(),
+        result.winning_claim,
+        result.rationale
+    );
+    0
+}
+
+// corrections family (§24.1)
+
+fn run_corrections(
+    command_group: &str,
+    arguments: &[String],
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> u8 {
+    let label = format!("{command_group} corrections");
+    if arguments.is_empty() || is_help(&arguments[0]) {
+        let _ = writeln!(
+            standard_output,
+            "Usage: keel {command_group} corrections [add|list|get|delete] ...\n\
+             \n\
+             add    --mistake \"...\" --correction \"...\" [--scope \"...\"] [--fingerprint \"...\"] [--source \"...\"] [--id <id>]\n\
+             list   [--scope \"...\"] [--json]\n\
+             get    --id <id>\n\
+             delete --id <id>"
+        );
+        return if arguments.is_empty() { 1 } else { 0 };
+    }
+    match arguments[0].as_str() {
+        "add" => corrections_add(
+            command_group,
+            &label,
+            &arguments[1..],
+            standard_output,
+            standard_error,
+        ),
+        "list" => corrections_list(
+            command_group,
+            &label,
+            &arguments[1..],
+            standard_output,
+            standard_error,
+        ),
+        "get" => corrections_get(
+            command_group,
+            &label,
+            &arguments[1..],
+            standard_output,
+            standard_error,
+        ),
+        "delete" => corrections_delete(
+            command_group,
+            &label,
+            &arguments[1..],
+            standard_output,
+            standard_error,
+        ),
+        other => {
+            let _ = writeln!(
+                standard_error,
+                "{label}: unknown action {other} (expected add|list|get|delete)"
+            );
+            1
+        }
+    }
+}
+
+fn corrections_add(
+    command_group: &str,
+    label: &str,
+    arguments: &[String],
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> u8 {
+    let mut flags = FlagSet::new(label);
+    flags.string_flag("mistake", "");
+    flags.string_flag("correction", "");
+    flags.string_flag("scope", "project");
+    flags.string_flag("fingerprint", "");
+    flags.string_flag("source", "user_correction");
+    flags.string_flag("id", "");
+    flags.string_flag("claude-home", "");
+    flags.bool_flag("json", false);
+
+    if let Err(error) = flags.parse(arguments) {
+        let _ = writeln!(standard_error, "{label}: {}", error.message);
+        return 1;
+    }
+    let mistake = flags.string_value("mistake");
+    let correction = flags.string_value("correction");
+    if mistake.trim().is_empty() || correction.trim().is_empty() {
+        let _ = writeln!(
+            standard_error,
+            "{label}: --mistake and --correction are required"
+        );
+        return 1;
+    }
+    let Some(home) = resolve_home(flags.string_value("claude-home"), label, standard_error) else {
+        return 1;
+    };
+    let store = family_store(&home, command_group, "corrections");
+    let now = current_timestamp_millis();
+    let at = format_timestamp_iso8601(now);
+    let id_flag = flags.string_value("id");
+    let id = if id_flag.trim().is_empty() {
+        format!("cor-{now:x}")
+    } else {
+        id_flag.trim().to_string()
+    };
+    let fp = flags.string_value("fingerprint");
+    let fingerprint = if fp.trim().is_empty() {
+        crate::utility::hashing::fnv1a64_hex(mistake)
+    } else {
+        fp.trim().to_string()
+    };
+
+    let record = vec![
+        ("id".to_string(), id.clone()),
+        ("mistake".to_string(), mistake.to_string()),
+        ("correction".to_string(), correction.to_string()),
+        ("scope".to_string(), flags.string_value("scope").to_string()),
+        ("fingerprint".to_string(), fingerprint),
+        (
+            "source".to_string(),
+            flags.string_value("source").to_string(),
+        ),
+        ("confidence".to_string(), "1".to_string()),
+        ("createdAt".to_string(), at.clone()),
+        ("updatedAt".to_string(), at),
+    ];
+    match store.write_record(&id, &record) {
+        Ok(_) => {
+            if flags.bool_value("json") {
+                let payload = Value::Object(vec![
+                    ("added".into(), Value::Bool(true)),
+                    ("id".into(), Value::String(id)),
+                ]);
+                return render_json(standard_output, standard_error, &payload);
+            }
+            let _ = writeln!(standard_output, "{label}: recorded correction {id}");
+            0
+        }
+        Err(error) => {
+            let _ = writeln!(standard_error, "{label}: {error}");
+            1
+        }
+    }
+}
+
+fn corrections_list(
+    command_group: &str,
+    label: &str,
+    arguments: &[String],
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> u8 {
+    let mut flags = FlagSet::new(label);
+    flags.string_flag("scope", "");
+    flags.string_flag("claude-home", "");
+    flags.bool_flag("json", false);
+
+    if let Err(error) = flags.parse(arguments) {
+        let _ = writeln!(standard_error, "{label}: {}", error.message);
+        return 1;
+    }
+    let Some(home) = resolve_home(flags.string_value("claude-home"), label, standard_error) else {
+        return 1;
+    };
+    let store = family_store(&home, command_group, "corrections");
+    let records = match store.list_records() {
+        Ok(r) => r,
+        Err(error) => {
+            let _ = writeln!(standard_error, "{label}: {error}");
+            return 1;
+        }
+    };
+    let filter_scope = flags.string_value("scope");
+    let filtered: Vec<&Record> = records
+        .iter()
+        .map(|(_, r)| r)
+        .filter(|r| {
+            if filter_scope.is_empty() {
+                true
+            } else {
+                field(r, "scope") == Some(filter_scope)
+            }
+        })
+        .collect();
+
+    if flags.bool_value("json") {
+        let items: Vec<Value> = filtered.iter().map(|r| record_to_value(r)).collect();
+        let payload = Value::Object(vec![
+            ("count".into(), Value::Number(items.len().to_string())),
+            ("corrections".into(), Value::Array(items)),
+        ]);
+        return render_json(standard_output, standard_error, &payload);
+    }
+    let _ = writeln!(standard_output, "{label}: {} correction(s)", filtered.len());
+    for r in filtered {
+        let id = field(r, "id").unwrap_or("?");
+        let mistake = field(r, "mistake").unwrap_or("");
+        let correction = field(r, "correction").unwrap_or("");
+        let _ = writeln!(
+            standard_output,
+            "  - [{id}] mistake: {mistake} -> fix: {correction}"
+        );
+    }
+    0
+}
+
+fn corrections_get(
+    command_group: &str,
+    label: &str,
+    arguments: &[String],
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> u8 {
+    let mut flags = FlagSet::new(label);
+    flags.string_flag("id", "");
+    flags.string_flag("claude-home", "");
+    flags.bool_flag("json", false);
+
+    if let Err(error) = flags.parse(arguments) {
+        let _ = writeln!(standard_error, "{label}: {}", error.message);
+        return 1;
+    }
+    let id = flags.string_value("id");
+    if id.trim().is_empty() {
+        let _ = writeln!(standard_error, "{label}: --id is required");
+        return 1;
+    }
+    let Some(home) = resolve_home(flags.string_value("claude-home"), label, standard_error) else {
+        return 1;
+    };
+    let store = family_store(&home, command_group, "corrections");
+    match store.read_record(id) {
+        Ok(Some(record)) => {
+            if flags.bool_value("json") {
+                return render_json(standard_output, standard_error, &record_to_value(&record));
+            }
+            for (k, v) in &record {
+                let _ = writeln!(standard_output, "{k}: {v}");
+            }
+            0
+        }
+        Ok(None) => {
+            let _ = writeln!(standard_error, "{label}: record {id} not found");
+            1
+        }
+        Err(error) => {
+            let _ = writeln!(standard_error, "{label}: {error}");
+            1
+        }
+    }
+}
+
+fn corrections_delete(
+    command_group: &str,
+    label: &str,
+    arguments: &[String],
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> u8 {
+    let mut flags = FlagSet::new(label);
+    flags.string_flag("id", "");
+    flags.string_flag("claude-home", "");
+    flags.bool_flag("json", false);
+
+    if let Err(error) = flags.parse(arguments) {
+        let _ = writeln!(standard_error, "{label}: {}", error.message);
+        return 1;
+    }
+    let id = flags.string_value("id");
+    if id.trim().is_empty() {
+        let _ = writeln!(standard_error, "{label}: --id is required");
+        return 1;
+    }
+    let Some(home) = resolve_home(flags.string_value("claude-home"), label, standard_error) else {
+        return 1;
+    };
+    let store = family_store(&home, command_group, "corrections");
+    match store.delete_record(id) {
+        Ok(_) => {
+            if flags.bool_value("json") {
+                let payload = Value::Object(vec![
+                    ("deleted".into(), Value::Bool(true)),
+                    ("id".into(), Value::String(id.to_string())),
+                ]);
+                return render_json(standard_output, standard_error, &payload);
+            }
+            let _ = writeln!(standard_output, "{label}: deleted {id}");
+            0
+        }
+        Err(error) => {
+            let _ = writeln!(standard_error, "{label}: {error}");
+            1
+        }
+    }
+}
+
+// decisions family (§24.1)
+
+fn run_decisions(
+    command_group: &str,
+    arguments: &[String],
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> u8 {
+    let label = format!("{command_group} decisions");
+    if arguments.is_empty() || is_help(&arguments[0]) {
+        let _ = writeln!(
+            standard_output,
+            "Usage: keel {command_group} decisions [add|list|get|delete] ...\n\
+             \n\
+             add    --title \"...\" --decision \"...\" [--rationale \"...\"] [--alternatives \"...\"] [--scope \"...\"] [--status \"...\"] [--id <id>]\n\
+             list   [--scope \"...\"] [--status \"...\"] [--json]\n\
+             get    --id <id>\n\
+             delete --id <id>"
+        );
+        return if arguments.is_empty() { 1 } else { 0 };
+    }
+    match arguments[0].as_str() {
+        "add" => decisions_add(
+            command_group,
+            &label,
+            &arguments[1..],
+            standard_output,
+            standard_error,
+        ),
+        "list" => decisions_list(
+            command_group,
+            &label,
+            &arguments[1..],
+            standard_output,
+            standard_error,
+        ),
+        "get" => decisions_get(
+            command_group,
+            &label,
+            &arguments[1..],
+            standard_output,
+            standard_error,
+        ),
+        "delete" => decisions_delete(
+            command_group,
+            &label,
+            &arguments[1..],
+            standard_output,
+            standard_error,
+        ),
+        other => {
+            let _ = writeln!(
+                standard_error,
+                "{label}: unknown action {other} (expected add|list|get|delete)"
+            );
+            1
+        }
+    }
+}
+
+fn decisions_add(
+    command_group: &str,
+    label: &str,
+    arguments: &[String],
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> u8 {
+    let mut flags = FlagSet::new(label);
+    flags.string_flag("title", "");
+    flags.string_flag("decision", "");
+    flags.string_flag("rationale", "");
+    flags.string_flag("alternatives", "");
+    flags.string_flag("scope", "project");
+    flags.string_flag("status", "accepted");
+    flags.string_flag("id", "");
+    flags.string_flag("claude-home", "");
+    flags.bool_flag("json", false);
+
+    if let Err(error) = flags.parse(arguments) {
+        let _ = writeln!(standard_error, "{label}: {}", error.message);
+        return 1;
+    }
+    let title = flags.string_value("title");
+    let decision = flags.string_value("decision");
+    if title.trim().is_empty() || decision.trim().is_empty() {
+        let _ = writeln!(
+            standard_error,
+            "{label}: --title and --decision are required"
+        );
+        return 1;
+    }
+    let Some(home) = resolve_home(flags.string_value("claude-home"), label, standard_error) else {
+        return 1;
+    };
+    let store = family_store(&home, command_group, "decisions");
+    let now = current_timestamp_millis();
+    let at = format_timestamp_iso8601(now);
+    let id_flag = flags.string_value("id");
+    let id = if id_flag.trim().is_empty() {
+        format!("dec-{now:x}")
+    } else {
+        id_flag.trim().to_string()
+    };
+
+    let record = vec![
+        ("id".to_string(), id.clone()),
+        ("title".to_string(), title.to_string()),
+        ("decision".to_string(), decision.to_string()),
+        (
+            "rationale".to_string(),
+            flags.string_value("rationale").to_string(),
+        ),
+        (
+            "alternatives".to_string(),
+            flags.string_value("alternatives").to_string(),
+        ),
+        ("scope".to_string(), flags.string_value("scope").to_string()),
+        (
+            "status".to_string(),
+            flags.string_value("status").to_string(),
+        ),
+        ("createdAt".to_string(), at.clone()),
+        ("updatedAt".to_string(), at),
+    ];
+    match store.write_record(&id, &record) {
+        Ok(_) => {
+            if flags.bool_value("json") {
+                let payload = Value::Object(vec![
+                    ("added".into(), Value::Bool(true)),
+                    ("id".into(), Value::String(id)),
+                ]);
+                return render_json(standard_output, standard_error, &payload);
+            }
+            let _ = writeln!(standard_output, "{label}: recorded decision {id}");
+            0
+        }
+        Err(error) => {
+            let _ = writeln!(standard_error, "{label}: {error}");
+            1
+        }
+    }
+}
+
+fn decisions_list(
+    command_group: &str,
+    label: &str,
+    arguments: &[String],
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> u8 {
+    let mut flags = FlagSet::new(label);
+    flags.string_flag("scope", "");
+    flags.string_flag("status", "");
+    flags.string_flag("claude-home", "");
+    flags.bool_flag("json", false);
+
+    if let Err(error) = flags.parse(arguments) {
+        let _ = writeln!(standard_error, "{label}: {}", error.message);
+        return 1;
+    }
+    let Some(home) = resolve_home(flags.string_value("claude-home"), label, standard_error) else {
+        return 1;
+    };
+    let store = family_store(&home, command_group, "decisions");
+    let records = match store.list_records() {
+        Ok(r) => r,
+        Err(error) => {
+            let _ = writeln!(standard_error, "{label}: {error}");
+            return 1;
+        }
+    };
+    let filter_scope = flags.string_value("scope");
+    let filter_status = flags.string_value("status");
+    let filtered: Vec<&Record> = records
+        .iter()
+        .map(|(_, r)| r)
+        .filter(|r| {
+            if !filter_scope.is_empty() && field(r, "scope") != Some(filter_scope) {
+                return false;
+            }
+            if !filter_status.is_empty() && field(r, "status") != Some(filter_status) {
+                return false;
+            }
+            true
+        })
+        .collect();
+
+    if flags.bool_value("json") {
+        let items: Vec<Value> = filtered.iter().map(|r| record_to_value(r)).collect();
+        let payload = Value::Object(vec![
+            ("count".into(), Value::Number(items.len().to_string())),
+            ("decisions".into(), Value::Array(items)),
+        ]);
+        return render_json(standard_output, standard_error, &payload);
+    }
+    let _ = writeln!(standard_output, "{label}: {} decision(s)", filtered.len());
+    for r in filtered {
+        let id = field(r, "id").unwrap_or("?");
+        let title = field(r, "title").unwrap_or("");
+        let status = field(r, "status").unwrap_or("active");
+        let _ = writeln!(standard_output, "  - [{id}] ({status}) {title}");
+    }
+    0
+}
+
+fn decisions_get(
+    command_group: &str,
+    label: &str,
+    arguments: &[String],
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> u8 {
+    let mut flags = FlagSet::new(label);
+    flags.string_flag("id", "");
+    flags.string_flag("claude-home", "");
+    flags.bool_flag("json", false);
+
+    if let Err(error) = flags.parse(arguments) {
+        let _ = writeln!(standard_error, "{label}: {}", error.message);
+        return 1;
+    }
+    let id = flags.string_value("id");
+    if id.trim().is_empty() {
+        let _ = writeln!(standard_error, "{label}: --id is required");
+        return 1;
+    }
+    let Some(home) = resolve_home(flags.string_value("claude-home"), label, standard_error) else {
+        return 1;
+    };
+    let store = family_store(&home, command_group, "decisions");
+    match store.read_record(id) {
+        Ok(Some(record)) => {
+            if flags.bool_value("json") {
+                return render_json(standard_output, standard_error, &record_to_value(&record));
+            }
+            for (k, v) in &record {
+                let _ = writeln!(standard_output, "{k}: {v}");
+            }
+            0
+        }
+        Ok(None) => {
+            let _ = writeln!(standard_error, "{label}: record {id} not found");
+            1
+        }
+        Err(error) => {
+            let _ = writeln!(standard_error, "{label}: {error}");
+            1
+        }
+    }
+}
+
+fn decisions_delete(
+    command_group: &str,
+    label: &str,
+    arguments: &[String],
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> u8 {
+    let mut flags = FlagSet::new(label);
+    flags.string_flag("id", "");
+    flags.string_flag("claude-home", "");
+    flags.bool_flag("json", false);
+
+    if let Err(error) = flags.parse(arguments) {
+        let _ = writeln!(standard_error, "{label}: {}", error.message);
+        return 1;
+    }
+    let id = flags.string_value("id");
+    if id.trim().is_empty() {
+        let _ = writeln!(standard_error, "{label}: --id is required");
+        return 1;
+    }
+    let Some(home) = resolve_home(flags.string_value("claude-home"), label, standard_error) else {
+        return 1;
+    };
+    let store = family_store(&home, command_group, "decisions");
+    match store.delete_record(id) {
+        Ok(_) => {
+            if flags.bool_value("json") {
+                let payload = Value::Object(vec![
+                    ("deleted".into(), Value::Bool(true)),
+                    ("id".into(), Value::String(id.to_string())),
+                ]);
+                return render_json(standard_output, standard_error, &payload);
+            }
+            let _ = writeln!(standard_output, "{label}: deleted {id}");
+            0
+        }
+        Err(error) => {
+            let _ = writeln!(standard_error, "{label}: {error}");
+            1
+        }
+    }
+}
+
+// events family and failure ledger (§26.1, §40)
+
+fn run_events(
+    command_group: &str,
+    arguments: &[String],
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> u8 {
+    let label = format!("{command_group} events");
+    if arguments.is_empty() || is_help(&arguments[0]) {
+        let _ = writeln!(
+            standard_output,
+            "Usage: keel {command_group} events [record|list|get|clear] ...\n\
+             \n\
+             record --type \"...\" --observed \"...\" --action \"...\" --result \"...\" [--task \"...\"] [--fingerprint \"...\"] [--recovery \"...\"] [--verified] [--id <id>]\n\
+             list   [--type \"...\"] [--task \"...\"] [--json]\n\
+             get    --id <id>\n\
+             clear  [--all]"
+        );
+        return if arguments.is_empty() { 1 } else { 0 };
+    }
+    match arguments[0].as_str() {
+        "record" => events_record_cmd(
+            command_group,
+            &label,
+            &arguments[1..],
+            standard_output,
+            standard_error,
+        ),
+        "list" => events_list(
+            command_group,
+            &label,
+            &arguments[1..],
+            standard_output,
+            standard_error,
+        ),
+        "get" => events_get(
+            command_group,
+            &label,
+            &arguments[1..],
+            standard_output,
+            standard_error,
+        ),
+        "clear" => events_clear(
+            command_group,
+            &label,
+            &arguments[1..],
+            standard_output,
+            standard_error,
+        ),
+        other => {
+            let _ = writeln!(
+                standard_error,
+                "{label}: unknown action {other} (expected record|list|get|clear)"
+            );
+            1
+        }
+    }
+}
+
+pub fn record_failure_event(
+    claude_home: &Path,
+    task_id: Option<&str>,
+    event_type: &str,
+    action: &str,
+    result: &str,
+    observed: &str,
+    recovery: Option<&str>,
+) -> Result<String, String> {
+    let store = RecordStore::new(claude_home, "memory/events");
+    let now = current_timestamp_millis();
+    let at = format_timestamp_iso8601(now);
+    let event_id = format!("EVT-{now:x}");
+    let raw_fp = format!("{event_type}:{action}:{observed}");
+    let fingerprint = crate::utility::hashing::fnv1a64_hex(&raw_fp);
+
+    let record = vec![
+        ("id".to_string(), event_id.clone()),
+        ("taskId".to_string(), task_id.unwrap_or("").to_string()),
+        ("type".to_string(), event_type.to_string()),
+        ("fingerprint".to_string(), fingerprint.clone()),
+        ("observed".to_string(), observed.to_string()),
+        ("action".to_string(), action.to_string()),
+        ("result".to_string(), result.to_string()),
+        ("recovery".to_string(), recovery.unwrap_or("").to_string()),
+        ("verified".to_string(), "true".to_string()),
+        ("createdAt".to_string(), at.clone()),
+    ];
+
+    store
+        .write_record(&event_id, &record)
+        .map_err(|e| e.to_string())?;
+
+    // Count events in memory/events matching this fingerprint
+    let matching_count = store
+        .list_records()
+        .unwrap_or_default()
+        .iter()
+        .filter(|(_, r)| field(r, "fingerprint") == Some(fingerprint.as_str()))
+        .count();
+
+    if matching_count >= 2 {
+        let lessons_store = RecordStore::new(claude_home, "memory/lessons");
+        let already_has_lesson = lessons_store
+            .list_records()
+            .unwrap_or_default()
+            .iter()
+            .any(|(_, r)| field(r, "evidence").is_some_and(|ev| ev.contains(&fingerprint)));
+
+        if !already_has_lesson {
+            let lesson_id = format!("les-{now:x}");
+            let lesson_record = vec![
+                ("id".to_string(), lesson_id.clone()),
+                (
+                    "pattern".to_string(),
+                    format!("Recurring {event_type} in {action}"),
+                ),
+                (
+                    "evidence".to_string(),
+                    format!("Observed repeated failure events with fingerprint {fingerprint}"),
+                ),
+                (
+                    "causeHypothesis".to_string(),
+                    format!("Failure observed {matching_count} times: {observed}"),
+                ),
+                (
+                    "correctResponse".to_string(),
+                    format!("Investigate root cause and apply verified fix for {action}"),
+                ),
+                ("scope".to_string(), "project".to_string()),
+                ("confidence".to_string(), matching_count.to_string()),
+                ("status".to_string(), "candidate".to_string()),
+                ("lastVerified".to_string(), at.clone()),
+                ("createdAt".to_string(), at),
+            ];
+            let _ = lessons_store.write_record(&lesson_id, &lesson_record);
+        }
+    }
+
+    Ok(event_id)
+}
+
+fn events_record_cmd(
+    _command_group: &str,
+    label: &str,
+    arguments: &[String],
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> u8 {
+    let mut flags = FlagSet::new(label);
+    flags.string_flag("type", "tool_failure");
+    flags.string_flag("observed", "");
+    flags.string_flag("action", "");
+    flags.string_flag("result", "");
+    flags.string_flag("task", "");
+    flags.string_flag("recovery", "");
+    flags.string_flag("id", "");
+    flags.string_flag("claude-home", "");
+    flags.bool_flag("verified", false);
+    flags.bool_flag("json", false);
+
+    if let Err(error) = flags.parse(arguments) {
+        let _ = writeln!(standard_error, "{label}: {}", error.message);
+        return 1;
+    }
+    let observed = flags.string_value("observed");
+    let action = flags.string_value("action");
+    let result = flags.string_value("result");
+    if observed.trim().is_empty() || action.trim().is_empty() {
+        let _ = writeln!(
+            standard_error,
+            "{label}: --observed and --action are required"
+        );
+        return 1;
+    }
+    let Some(home) = resolve_home(flags.string_value("claude-home"), label, standard_error) else {
+        return 1;
+    };
+    let task = flags.string_value("task");
+    let task_opt = if task.is_empty() { None } else { Some(task) };
+    let recovery = flags.string_value("recovery");
+    let rec_opt = if recovery.is_empty() {
+        None
+    } else {
+        Some(recovery)
+    };
+
+    match record_failure_event(
+        &home,
+        task_opt,
+        flags.string_value("type"),
+        action,
+        result,
+        observed,
+        rec_opt,
+    ) {
+        Ok(event_id) => {
+            if flags.bool_value("json") {
+                let payload = Value::Object(vec![
+                    ("recorded".into(), Value::Bool(true)),
+                    ("eventId".into(), Value::String(event_id)),
+                ]);
+                return render_json(standard_output, standard_error, &payload);
+            }
+            let _ = writeln!(
+                standard_output,
+                "{label}: recorded failure event {event_id}"
+            );
+            0
+        }
+        Err(error) => {
+            let _ = writeln!(standard_error, "{label}: {error}");
+            1
+        }
+    }
+}
+
+fn events_list(
+    command_group: &str,
+    label: &str,
+    arguments: &[String],
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> u8 {
+    let mut flags = FlagSet::new(label);
+    flags.string_flag("type", "");
+    flags.string_flag("task", "");
+    flags.string_flag("claude-home", "");
+    flags.bool_flag("json", false);
+
+    if let Err(error) = flags.parse(arguments) {
+        let _ = writeln!(standard_error, "{label}: {}", error.message);
+        return 1;
+    }
+    let Some(home) = resolve_home(flags.string_value("claude-home"), label, standard_error) else {
+        return 1;
+    };
+    let store = family_store(&home, command_group, "events");
+    let records = match store.list_records() {
+        Ok(r) => r,
+        Err(error) => {
+            let _ = writeln!(standard_error, "{label}: {error}");
+            return 1;
+        }
+    };
+    let filter_type = flags.string_value("type");
+    let filter_task = flags.string_value("task");
+    let filtered: Vec<&Record> = records
+        .iter()
+        .map(|(_, r)| r)
+        .filter(|r| {
+            if !filter_type.is_empty() && field(r, "type") != Some(filter_type) {
+                return false;
+            }
+            if !filter_task.is_empty() && field(r, "taskId") != Some(filter_task) {
+                return false;
+            }
+            true
+        })
+        .collect();
+
+    if flags.bool_value("json") {
+        let items: Vec<Value> = filtered.iter().map(|r| record_to_value(r)).collect();
+        let payload = Value::Object(vec![
+            ("count".into(), Value::Number(items.len().to_string())),
+            ("events".into(), Value::Array(items)),
+        ]);
+        return render_json(standard_output, standard_error, &payload);
+    }
+    let _ = writeln!(standard_output, "{label}: {} event(s)", filtered.len());
+    for r in filtered {
+        let id = field(r, "id").unwrap_or("?");
+        let ev_type = field(r, "type").unwrap_or("");
+        let action = field(r, "action").unwrap_or("");
+        let _ = writeln!(standard_output, "  - [{id}] ({ev_type}) action: {action}");
+    }
+    0
+}
+
+fn events_get(
+    command_group: &str,
+    label: &str,
+    arguments: &[String],
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> u8 {
+    let mut flags = FlagSet::new(label);
+    flags.string_flag("id", "");
+    flags.string_flag("claude-home", "");
+    flags.bool_flag("json", false);
+
+    if let Err(error) = flags.parse(arguments) {
+        let _ = writeln!(standard_error, "{label}: {}", error.message);
+        return 1;
+    }
+    let id = flags.string_value("id");
+    if id.trim().is_empty() {
+        let _ = writeln!(standard_error, "{label}: --id is required");
+        return 1;
+    }
+    let Some(home) = resolve_home(flags.string_value("claude-home"), label, standard_error) else {
+        return 1;
+    };
+    let store = family_store(&home, command_group, "events");
+    match store.read_record(id) {
+        Ok(Some(record)) => {
+            if flags.bool_value("json") {
+                return render_json(standard_output, standard_error, &record_to_value(&record));
+            }
+            for (k, v) in &record {
+                let _ = writeln!(standard_output, "{k}: {v}");
+            }
+            0
+        }
+        Ok(None) => {
+            let _ = writeln!(standard_error, "{label}: record {id} not found");
+            1
+        }
+        Err(error) => {
+            let _ = writeln!(standard_error, "{label}: {error}");
+            1
+        }
+    }
+}
+
+fn events_clear(
+    command_group: &str,
+    label: &str,
+    arguments: &[String],
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> u8 {
+    let mut flags = FlagSet::new(label);
+    flags.string_flag("claude-home", "");
+    flags.bool_flag("all", false);
+    flags.bool_flag("json", false);
+
+    if let Err(error) = flags.parse(arguments) {
+        let _ = writeln!(standard_error, "{label}: {}", error.message);
+        return 1;
+    }
+    let Some(home) = resolve_home(flags.string_value("claude-home"), label, standard_error) else {
+        return 1;
+    };
+    let store = family_store(&home, command_group, "events");
+    let records = store.list_records().unwrap_or_default();
+    let count = records.len();
+    for (id, _) in records {
+        let _ = store.delete_record(&id);
+    }
+    if flags.bool_value("json") {
+        let payload = Value::Object(vec![
+            ("cleared".into(), Value::Bool(true)),
+            ("count".into(), Value::Number(count.to_string())),
+        ]);
+        return render_json(standard_output, standard_error, &payload);
+    }
+    let _ = writeln!(standard_output, "{label}: cleared {count} event(s)");
+    0
+}
+
 // shared helpers
-// ---------------------------------------------------------------------------
 
 fn set_field(record: &mut Record, key: &str, value: String) {
     if let Some(slot) = record.iter_mut().find(|(field_key, _)| field_key == key) {
@@ -2194,6 +4096,196 @@ mod tests {
     }
 
     #[test]
+    fn lessons_require_evidence_and_promote_only_at_threshold() {
+        let home = temp_home("less");
+        let h = home.to_string_lossy().to_string();
+        // why: plan §26.3: no evidence, no candidate.
+        let (code, _, err) = run(
+            "memory",
+            "lessons",
+            &[
+                "record",
+                "--pattern",
+                "no evidence",
+                "--response",
+                "n/a",
+                "--claude-home",
+                &h,
+            ],
+        );
+        assert_eq!(code, 1, "evidence-free lesson must be refused");
+        assert!(err.contains("--evidence"), "stderr: {err}");
+
+        let (code, _, err) = run(
+            "memory",
+            "lessons",
+            &[
+                "record",
+                "--pattern",
+                "repeated failing strategy",
+                "--evidence",
+                "two runs failed with the same signature",
+                "--response",
+                "use the machine-readable output",
+                "--scope",
+                "workspace",
+                "--claude-home",
+                &h,
+            ],
+        );
+        assert_eq!(code, 0, "stderr: {err}");
+        let id = "repeated-failing-strategy";
+
+        // confidence 1 < threshold 2: promotion must refuse.
+        let (code, _, err) = run(
+            "memory",
+            "lessons",
+            &["promote", "--id", id, "--claude-home", &h],
+        );
+        assert_eq!(code, 1, "below-threshold promote must refuse");
+        assert!(err.contains("threshold"), "stderr: {err}");
+
+        run(
+            "memory",
+            "lessons",
+            &["reinforce", "--id", id, "--claude-home", &h],
+        );
+        let (code, out, err) = run(
+            "memory",
+            "lessons",
+            &["promote", "--id", id, "--claude-home", &h],
+        );
+        assert_eq!(code, 0, "stderr: {err}");
+        assert!(out.contains("active"), "stdout: {out}");
+
+        let (code, out, err) = run(
+            "memory",
+            "lessons",
+            &["list", "--status", "active", "--claude-home", &h],
+        );
+        assert_eq!(code, 0, "stderr: {err}");
+        assert!(out.contains("repeated failing strategy"), "stdout: {out}");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn lesson_evaluation_demotes_on_regression() {
+        let home = temp_home("less-eval");
+        let h = home.to_string_lossy().to_string();
+        run(
+            "memory",
+            "lessons",
+            &[
+                "record",
+                "--pattern",
+                "eval target",
+                "--evidence",
+                "observed twice",
+                "--response",
+                "compact earlier",
+                "--claude-home",
+                &h,
+            ],
+        );
+        run(
+            "memory",
+            "lessons",
+            &["reinforce", "--id", "eval-target", "--claude-home", &h],
+        );
+        let (code, _, err) = run(
+            "memory",
+            "lessons",
+            &["promote", "--id", "eval-target", "--claude-home", &h],
+        );
+        assert_eq!(code, 0, "stderr: {err}");
+
+        // Measured improvement keeps the lesson active.
+        let (code, out, err) = run(
+            "memory",
+            "lessons",
+            &[
+                "evaluate",
+                "--id",
+                "eval-target",
+                "--before-tokens",
+                "4000",
+                "--after-tokens",
+                "780",
+                "--before-turns",
+                "4",
+                "--after-turns",
+                "2",
+                "--claude-home",
+                &h,
+            ],
+        );
+        assert_eq!(code, 0, "stderr: {err}");
+        assert!(out.contains("improved"), "stdout: {out}");
+
+        // A regression demotes it instead of leaving it active.
+        let (code, out, err) = run(
+            "memory",
+            "lessons",
+            &[
+                "evaluate",
+                "--id",
+                "eval-target",
+                "--before-tokens",
+                "800",
+                "--after-tokens",
+                "3200",
+                "--claude-home",
+                &h,
+            ],
+        );
+        assert_eq!(code, 0, "stderr: {err}");
+        assert!(out.contains("regressed"), "stdout: {out}");
+        let (code, out, err) = run(
+            "memory",
+            "lessons",
+            &["list", "--status", "questioned", "--claude-home", &h],
+        );
+        assert_eq!(code, 0, "stderr: {err}");
+        assert!(out.contains("eval target"), "stdout: {out}");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn research_cache_expire_is_dry_run_until_apply() {
+        let home = temp_home("rcexp");
+        let h = home.to_string_lossy().to_string();
+        let (code, _, err) = run(
+            "memory",
+            "research-cache",
+            &[
+                "record",
+                "--question",
+                "old answer",
+                "--answer",
+                "stale value",
+                "--claude-home",
+                &h,
+            ],
+        );
+        assert_eq!(code, 0, "stderr: {err}");
+        let (code, out, err) = run(
+            "memory",
+            "research-cache",
+            &["expire", "--days", "90", "--claude-home", &h],
+        );
+        assert_eq!(code, 0, "stderr: {err}");
+        assert!(out.contains("dry-run"), "stdout: {out}");
+        let (code, out, err) = run(
+            "memory",
+            "research-cache",
+            &["expire", "--days", "90", "--apply", "--claude-home", &h],
+        );
+        assert_eq!(code, 0, "stderr: {err}");
+        assert!(out.contains("marked"), "stdout: {out}");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
     fn research_cache_record_then_lookup_finds_match() {
         let home = temp_home("rc");
         let h = home.to_string_lossy().to_string();
@@ -2495,6 +4587,85 @@ mod tests {
         assert!(
             out.contains("1 record"),
             "upsert must not duplicate; stdout: {out}"
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn entity_supersede_links_tombstone_without_deleting() {
+        let home = temp_home("entsup");
+        let h = home.to_string_lossy().to_string();
+        run(
+            "memory",
+            "entity",
+            &[
+                "upsert",
+                "--name",
+                "OldAuth",
+                "--type",
+                "decision",
+                "--summary",
+                "v1",
+                "--source",
+                "review-1",
+                "--claude-home",
+                &h,
+            ],
+        );
+        run(
+            "memory",
+            "entity",
+            &[
+                "upsert",
+                "--name",
+                "NewAuth",
+                "--type",
+                "decision",
+                "--summary",
+                "v2",
+                "--supersedes",
+                "decision-oldauth",
+                "--claude-home",
+                &h,
+            ],
+        );
+        let (code, out, err) = run(
+            "memory",
+            "entity",
+            &[
+                "supersede",
+                "--id",
+                "decision-oldauth",
+                "--by",
+                "decision-newauth",
+                "--reason",
+                "v2 verified",
+                "--claude-home",
+                &h,
+            ],
+        );
+        assert_eq!(code, 0, "stderr: {err}");
+        assert!(
+            out.contains("decision-oldauth -> decision-newauth"),
+            "stdout: {out}"
+        );
+        let (code, out, err) = run(
+            "memory",
+            "entity",
+            &["query", "--contains", "decision", "--claude-home", &h],
+        );
+        // why: query matches across name/summary/source/supersede links.
+        assert_eq!(code, 0, "stderr: {err}");
+        assert!(out.contains("2 match"), "stdout: {out}");
+        let store = family_store(&std::path::PathBuf::from(&h), "memory", "entities");
+        let old = store
+            .read_record("decision-oldauth")
+            .expect("read old")
+            .expect("old exists");
+        assert_eq!(
+            field(&old, "supersededBy").unwrap_or(""),
+            "decision-newauth",
+            "old record must keep a supersededBy tombstone"
         );
         let _ = std::fs::remove_dir_all(&home);
     }

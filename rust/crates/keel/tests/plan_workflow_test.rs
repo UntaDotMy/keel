@@ -161,7 +161,7 @@ fn plan_specify_records_proportional_complexity_classification() {
     assert_success(&trivial, "trivial specify");
     let trivial_payload = json_output(&trivial);
     assert_eq!(trivial_payload["complexityClass"], "trivial");
-    assert_eq!(trivial_payload["taskClass"], "trivial");
+    assert_eq!(trivial_payload["taskClass"], "TRIVIAL");
     assert_eq!(trivial_payload["planningRequired"], false);
 
     let risky_tree = isolated_tree("complexity-risky");
@@ -176,6 +176,7 @@ fn plan_specify_records_proportional_complexity_classification() {
     assert_success(&risky, "risky specify");
     let risky_payload = json_output(&risky);
     assert_eq!(risky_payload["complexityClass"], "high-risk");
+    assert_eq!(risky_payload["taskClass"], "CRITICAL");
     assert_eq!(risky_payload["planningRequired"], true);
     assert!(risky_payload["complexitySignals"]
         .as_array()

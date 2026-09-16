@@ -46,5 +46,11 @@ jobs:
           node -e "
             const fs = require('fs');
             const baseline = JSON.parse(fs.readFileSync('docs/quality/mutation-baseline.json', 'utf8'));
-            console.log('Baseline mutation score:', baseline.summary.mutationScore);
+            const score = Number(baseline.summary.mutationScore);
+            const threshold = Number(baseline.summary.threshold ?? 95.0);
+            console.log('Baseline mutation score:', score, 'threshold:', threshold);
+            if (!Number.isFinite(score) || score < threshold) {
+              console.error('Mutation baseline below threshold: ' + score + ' < ' + threshold);
+              process.exit(1);
+            }
           "

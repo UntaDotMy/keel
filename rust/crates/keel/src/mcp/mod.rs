@@ -161,7 +161,7 @@ const DEFAULT_MAX_INFLIGHT: usize = 64;
 /// fallback, so the server stays compatible as the spec revises without needing
 /// a constant bump each time. Current spec revision: 2025-11-25
 /// (see code.claude.com/docs/en/mcp and modelcontextprotocol.io/specification).
-pub(super) const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
+pub(super) const MCP_PROTOCOL_VERSION: &str = "2026-07-28";
 pub(super) const MCP_LEGACY_PROTOCOL_VERSION: &str = "2024-11-05";
 pub(super) const MCP_PREVIOUS_PROTOCOL_VERSION: &str = "2025-03-26";
 
@@ -1140,7 +1140,7 @@ pub(crate) fn dispatch_body(body: &Value) -> DispatchBodyResult {
         Value::Array(items) => {
             let mut responses = Vec::new();
             for item in items {
-                if let Some(response) = dispatch(item) {
+                if let Some(response) = dispatch_for_test(item) {
                     responses.push(response);
                 }
             }
@@ -1150,7 +1150,7 @@ pub(crate) fn dispatch_body(body: &Value) -> DispatchBodyResult {
                 DispatchBodyResult::Json(Value::Array(responses))
             }
         }
-        other => match dispatch(other) {
+        other => match dispatch_for_test(other) {
             Some(response) => DispatchBodyResult::Json(response),
             None => DispatchBodyResult::Accepted,
         },
@@ -1263,7 +1263,7 @@ fn write_framed_response(
 /// this function directly to avoid spawning the binary; the stdio loop also
 /// uses it after framing.
 #[cfg(test)]
-pub fn dispatch(request: &Value) -> Option<Value> {
+pub(super) fn dispatch_for_test(request: &Value) -> Option<Value> {
     let context = McpRequestContext::authoritative(None);
     dispatch_cancellable_with_context(request, &Arc::new(AtomicBool::new(false)), &context)
 }
@@ -1360,7 +1360,7 @@ fn handle_method_cancellable(
             Some(Arc::clone(cancellation)),
             context.clone(),
         ),
-        "keel/discover" => {
+        "keel/discover" | "server/discover" => {
             let query = params
                 .get("query")
                 .and_then(Value::as_str)
@@ -1379,7 +1379,7 @@ fn handle_method_cancellable(
             })?;
             project_protocol_json(
                 payload,
-                "keel/discover",
+                method,
                 crate::proxy::context::ContextSource::McpTool,
                 context,
             )
@@ -1432,7 +1432,10 @@ fn handle_initialize(params: &Value) -> Value {
         Some(version)
             if matches!(
                 version,
-                MCP_LEGACY_PROTOCOL_VERSION | MCP_PREVIOUS_PROTOCOL_VERSION | MCP_PROTOCOL_VERSION
+                MCP_LEGACY_PROTOCOL_VERSION
+                    | MCP_PREVIOUS_PROTOCOL_VERSION
+                    | MCP_PROTOCOL_VERSION
+                    | "2025-11-25"
             ) =>
         {
             version
@@ -1686,7 +1689,7 @@ mod tests {
             "method": "initialize",
             "params": {}
         });
-        let response = dispatch(&request).expect("response present");
+        let response = dispatch_for_test(&request).expect("response present");
         assert_eq!(response["jsonrpc"], "2.0");
         assert_eq!(response["id"], json!(1));
         let result = &response["result"];
@@ -1710,7 +1713,7 @@ mod tests {
             "method": "initialize",
             "params": { "protocolVersion": "2024-11-05" }
         });
-        let response = dispatch(&request).expect("response present");
+        let response = dispatch_for_test(&request).expect("response present");
         assert_eq!(
             response["result"]["protocolVersion"],
             json!("2024-11-05"),
@@ -1724,7 +1727,7 @@ mod tests {
             "method": "initialize",
             "params": { "protocolVersion": 1234 }
         });
-        let bad_response = dispatch(&bad).expect("response present");
+        let bad_response = dispatch_for_test(&bad).expect("response present");
         assert_eq!(
             bad_response["result"]["protocolVersion"],
             json!(MCP_PROTOCOL_VERSION),
@@ -1738,7 +1741,7 @@ mod tests {
             "method": "initialize",
             "params": { "protocolVersion": null }
         });
-        let null_response = dispatch(&null_version).expect("response present");
+        let null_response = dispatch_for_test(&null_version).expect("response present");
         assert_eq!(
             null_response["result"]["protocolVersion"],
             json!(MCP_PROTOCOL_VERSION),
@@ -1752,7 +1755,7 @@ mod tests {
             "jsonrpc": "2.0",
             "method": "notifications/initialized"
         });
-        assert!(dispatch(&request).is_none());
+        assert!(dispatch_for_test(&request).is_none());
     }
 
     #[test]
@@ -1762,7 +1765,7 @@ mod tests {
             "id": "ping-1",
             "method": "ping"
         });
-        let response = dispatch(&request).expect("response present");
+        let response = dispatch_for_test(&request).expect("response present");
         assert_eq!(response["id"], json!("ping-1"));
         assert_eq!(response["result"], json!({}));
     }
@@ -1777,7 +1780,7 @@ mod tests {
             "id": 7,
             "method": "tools/list"
         });
-        let response = dispatch(&request).expect("response present");
+        let response = dispatch_for_test(&request).expect("response present");
         let tools = response["result"]["tools"].as_array().expect("tools array");
         let names: Vec<&str> = tools
             .iter()
@@ -1815,13 +1818,13 @@ mod tests {
         let _env_guard = crate::test_support::ENV_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let omitted = dispatch(&json!({
+        let omitted = dispatch_for_test(&json!({
             "jsonrpc": "2.0",
             "id": 7,
             "method": "tools/list"
         }))
         .expect("omitted params response");
-        let empty = dispatch(&json!({
+        let empty = dispatch_for_test(&json!({
             "jsonrpc": "2.0",
             "id": 8,
             "method": "tools/list",
@@ -1846,7 +1849,7 @@ mod tests {
             "id": 11,
             "method": "resources/list"
         });
-        let response = dispatch(&request).expect("response present");
+        let response = dispatch_for_test(&request).expect("response present");
         let resources = response["result"]["resources"]
             .as_array()
             .expect("resources array");
@@ -1962,7 +1965,7 @@ mod tests {
             "id": 99,
             "method": "tools/teleport"
         });
-        let response = dispatch(&request).expect("response present");
+        let response = dispatch_for_test(&request).expect("response present");
         assert_eq!(response["error"]["code"], json!(JSON_RPC_METHOD_NOT_FOUND));
     }
 
@@ -1972,7 +1975,7 @@ mod tests {
             "id": 1,
             "method": "initialize"
         });
-        let response = dispatch(&request).expect("response present");
+        let response = dispatch_for_test(&request).expect("response present");
         assert_eq!(response["error"]["code"], json!(JSON_RPC_INVALID_REQUEST));
     }
 
@@ -1999,7 +2002,7 @@ mod tests {
                 "arguments": {}
             }
         });
-        let response = dispatch(&request).expect("response present");
+        let response = dispatch_for_test(&request).expect("response present");
         assert_eq!(response["error"]["code"], json!(JSON_RPC_INVALID_PARAMS));
     }
 
@@ -2031,7 +2034,7 @@ mod tests {
             "id": Value::Null,
             "method": "ping"
         });
-        let response = dispatch(&request).expect("response present");
+        let response = dispatch_for_test(&request).expect("response present");
         assert_eq!(response["jsonrpc"], "2.0");
         assert_eq!(
             response["id"],
@@ -2217,7 +2220,7 @@ mod tests {
             "id": 7,
             "method": "tools/list"
         });
-        let response = dispatch(&request).expect("response present");
+        let response = dispatch_for_test(&request).expect("response present");
         let serialized = serde_json::to_string(&response).expect("serialize");
         assert!(
             serialized.len() <= MAX_STDIO_FRAME_BYTES,

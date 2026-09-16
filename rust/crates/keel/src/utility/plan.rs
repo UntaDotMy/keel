@@ -9,7 +9,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use chrono::{SecondsFormat, Utc};
 use serde_json::{json, Value};
@@ -57,6 +57,17 @@ const SPEC_SECTIONS: [&str; 22] = [
 
 const VAGUE_PREDICATES: [&str; 7] = [
     "works", "correct", "nice", "good", "proper", "fast", "secure",
+];
+
+pub const VAGUE_REQUEST_PLANNING_QUESTIONS: [&str; 8] = [
+    "What is slow, broken, or failing to meet requirements?",
+    "Which measured latency, error rate, or metric characterizes the issue?",
+    "What is the current baseline?",
+    "What is the target threshold, performance goal, or expected outcome?",
+    "What is the exact scope and what are explicit non-goals?",
+    "What constraints, dependencies, or invariants apply?",
+    "How will success be objectively and machine-verifiably measured?",
+    "Does the proposed change affect system correctness, API compatibility, or security boundaries?",
 ];
 
 macro_rules! command_or_return {
@@ -357,8 +368,13 @@ fn run_specify(flags: FlagSet, streams: &mut CommandStreams<'_>) -> u8 {
         json!({
             "stage": "specified",
             "clarificationRequired": clarification_required,
+            "planningQuestions": if clarification_required {
+                VAGUE_REQUEST_PLANNING_QUESTIONS.to_vec()
+            } else {
+                Vec::new()
+            },
             "complexityClass": complexity.label,
-            "taskClass": complexity.label,
+            "taskClass": plan_task_class(&complexity, request),
             "planningRequired": complexity.planning_required,
             "complexitySignals": complexity.signals,
         }),
@@ -472,6 +488,34 @@ fn run_research(flags: FlagSet, streams: &mut CommandStreams<'_>) -> u8 {
     let mut payload = stage_payload(&plan_id, &paths, "researched");
     insert_string(&mut payload, "grounding", &bundle.grounding);
     insert_string(&mut payload, "researchSource", &bundle.research_source);
+    let research_summary = format!(
+        "Research Complete for Plan {plan_id}:\ngrounding: {}\nsource: {}\nsources: {}\nclaims: {}",
+        bundle.grounding,
+        bundle.research_source,
+        bundle.sources.len(),
+        claims.len(),
+    );
+    let session_id = std::env::var("CLAUDE_CODE_SESSION_ID")
+        .or_else(|_| std::env::var("CODEX_THREAD_ID"))
+        .unwrap_or_else(|_| "default".to_string());
+    if let Ok(projection) = crate::proxy::context::project_scoped(
+        crate::proxy::context::ContextPolicy::for_surface(
+            crate::proxy::context::DEFAULT_MAX_RESEARCH_PROJECTION_TOKENS,
+        ),
+        crate::proxy::context::ProjectionInput::new(
+            crate::proxy::context::ContextSource::Research,
+            research_summary,
+            Some(plan_id.clone()),
+            context.workspace().to_string_lossy().to_string(),
+            session_id,
+        )
+        .with_cache_class(crate::proxy::context::CacheClass::Session),
+    ) {
+        payload["researchProjection"] = json!({
+            "summary": projection.summary,
+            "metadata": projection.metadata(),
+        });
+    }
     emit_success(
         &flags,
         streams,
@@ -1274,17 +1318,34 @@ fn vague_terms(request: &str) -> Vec<&'static str> {
         .collect()
 }
 
-#[derive(Debug, Clone)]
-struct ComplexityClassification {
-    label: &'static str,
-    planning_required: bool,
-    signals: Vec<String>,
+pub fn evaluate_vague_request(request: &str) -> (bool, Vec<&'static str>, Vec<&'static str>) {
+    let terms = vague_terms(request);
+    let is_vague = !terms.is_empty();
+    let questions = if is_vague {
+        VAGUE_REQUEST_PLANNING_QUESTIONS.to_vec()
+    } else {
+        Vec::new()
+    };
+    (is_vague, terms, questions)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ComplexityClassification {
+    pub label: &'static str,
+    pub planning_required: bool,
+    pub signals: Vec<String>,
 }
 
 /// Classify planning effort from explicit, deterministic request signals. This
 /// informs proportional governance; it never bypasses an existing required
 /// lifecycle gate or silently turns a high-risk request into a trivial one.
-fn classify_request(request: &str) -> ComplexityClassification {
+///
+/// The label maps the plan §7 five-tier vocabulary onto the three enforced
+/// tiers: TRIVIAL and SMALL stay distinct by scope, NORMAL and ARCHITECTURAL
+/// both require planning under `standard`, and CRITICAL maps to `high-risk`.
+/// The emitted `taskClass` field carries the original §7 tier so policy and
+/// telemetry share the plan vocabulary even where enforcement is coarser.
+pub fn classify_request(request: &str) -> ComplexityClassification {
     let normalized = request.to_ascii_lowercase();
     let words: Vec<&str> = normalized.split_whitespace().collect();
     let high_risk_terms = [
@@ -1333,6 +1394,147 @@ fn classify_request(request: &str) -> ComplexityClassification {
         label,
         planning_required: label != "trivial",
         signals,
+    }
+}
+
+/// Map the enforced complexity tier onto the plan §7 five-tier vocabulary
+/// (TRIVIAL/SMALL/NORMAL/ARCHITECTURAL/CRITICAL) for the `taskClass` field.
+/// Enforcement stays three-tier; this keeps telemetry and review gates on the
+/// plan vocabulary without changing gate behavior.
+pub fn plan_task_class(complexity: &ComplexityClassification, request: &str) -> &'static str {
+    let words = request.split_whitespace().count();
+    match complexity.label {
+        "trivial" if words <= 4 => "TRIVIAL",
+        "trivial" => "SMALL",
+        "high-risk"
+            if complexity
+                .signals
+                .iter()
+                .any(|signal| signal.starts_with("risk:")) =>
+        {
+            "CRITICAL"
+        }
+        "high-risk" => "ARCHITECTURAL",
+        _ => "NORMAL",
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PlanPointerSnapshot {
+    pub plan_pointer: String,
+    pub current: String,
+    pub next: String,
+    pub open_blockers: usize,
+}
+
+impl PlanPointerSnapshot {
+    pub fn to_four_line_string(&self) -> String {
+        format!(
+            "Plan pointer: {}\nCurrent: {}\nNext: {}\nOpen blockers: {}",
+            self.plan_pointer, self.current, self.next, self.open_blockers
+        )
+    }
+}
+
+pub fn active_plan_pointer(
+    claude_home: &Path,
+    workspace_root: Option<&Path>,
+) -> PlanPointerSnapshot {
+    let workspace_path = workspace_root
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| "default".to_string());
+    let workspace_key = crate::utility::system_map::workspace_key(&workspace_path);
+    let plans_root = claude_home
+        .join("memories")
+        .join("workspaces")
+        .join(workspace_key)
+        .join("plans");
+
+    if !plans_root.is_dir() {
+        return PlanPointerSnapshot {
+            plan_pointer: "none".to_string(),
+            current: "none".to_string(),
+            next: "none".to_string(),
+            open_blockers: 0,
+        };
+    }
+
+    let mut entries = match fs::read_dir(&plans_root) {
+        Ok(read_dir) => read_dir
+            .filter_map(Result::ok)
+            .filter(|e| e.path().is_dir())
+            .collect::<Vec<_>>(),
+        Err(_) => Vec::new(),
+    };
+
+    if entries.is_empty() {
+        return PlanPointerSnapshot {
+            plan_pointer: "none".to_string(),
+            current: "none".to_string(),
+            next: "none".to_string(),
+            open_blockers: 0,
+        };
+    }
+
+    entries.sort_by_key(|e| {
+        e.metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+    });
+    entries.reverse();
+
+    let plan_dir = entries[0].path();
+    let plan_id = plan_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("none")
+        .to_string();
+
+    let status_path = plan_dir.join("status.json");
+    let mut open_blockers = 0;
+    if let Ok(content) = fs::read_to_string(&status_path) {
+        if let Ok(val) = serde_json::from_str::<Value>(&content) {
+            if val.get("clarificationRequired").and_then(Value::as_bool) == Some(true) {
+                open_blockers += 1;
+            }
+        }
+    }
+
+    let tasks_path = plan_dir.join(TASKS_FILE);
+    let mut current = "none".to_string();
+    let mut next = "none".to_string();
+
+    if let Ok(content) = fs::read_to_string(&tasks_path) {
+        if let Ok(tasks_val) = serde_json::from_str::<Value>(&content) {
+            if let Some(task_list) = tasks_val.get("tasks").and_then(Value::as_array) {
+                let mut found_current = false;
+                for t in task_list {
+                    let task_id = t.get("taskId").and_then(Value::as_str).unwrap_or("unknown");
+                    let status = t.get("status").and_then(Value::as_str).unwrap_or("pending");
+                    if status == "blocked" {
+                        open_blockers += 1;
+                    }
+                    if !found_current
+                        && (status == "in_progress" || status == "pending" || status == "open")
+                    {
+                        current = task_id.to_string();
+                        found_current = true;
+                    } else if found_current
+                        && next == "none"
+                        && (status == "pending" || status == "open")
+                    {
+                        next = task_id.to_string();
+                    }
+                }
+            }
+        }
+    }
+
+    PlanPointerSnapshot {
+        plan_pointer: plan_id,
+        current,
+        next,
+        open_blockers,
     }
 }
 
@@ -1484,9 +1686,16 @@ fn render_specification(plan_id: &str, request: &str, vague_terms: &[&str]) -> S
         "Decision: no_material_ambiguity_detected\n\nRationale: REQ-001 names an observable result and the AC supplies a verification result.\n\nSource IDs: SRC-REQUEST-001\n\nPlausible interpretations:\n- Implement the observable behavior exactly as stated in REQ-001.\n\nClarification question: none."
             .to_string()
     } else {
+        let questions_text = VAGUE_REQUEST_PLANNING_QUESTIONS
+            .iter()
+            .enumerate()
+            .map(|(i, q)| format!("  {}. {q}", i + 1))
+            .collect::<Vec<_>>()
+            .join("\n");
         format!(
-            "Decision: unresolved_material_ambiguity\n\nRationale: The submitted terms do not define a unique observable success result.\n\nSource IDs: SRC-REQUEST-001\n\nDetected terms: {}\n\nPlausible interpretations:\n- Define a measurable latency or throughput threshold.\n- Define the security property, threat boundary, and required failure behavior.\n- Limit the request to a named component and observable result.\n\nClarification question: Which interpretation and measurable threshold define success?",
-            vague_terms.join(", ")
+            "Decision: unresolved_material_ambiguity\n\nRationale: The submitted terms do not define a unique observable success result.\n\nSource IDs: SRC-REQUEST-001\n\nDetected terms: {}\n\nPlausible interpretations:\n- Define a measurable latency or throughput threshold.\n- Define the security property, threat boundary, and required failure behavior.\n- Limit the request to a named component and observable result.\n\nRequired planning questions for the agent:\n{}\n\nClarification question: Which interpretation and measurable threshold define success?",
+            vague_terms.join(", "),
+            questions_text,
         )
     };
     format!(

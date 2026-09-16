@@ -11,6 +11,7 @@ MCP: `memory` tool / `memory_status`). Implementation: `utility/memory_families.
 |---|---|---|
 | `research-cache` | **Active** | Written by research-enforcement / explicit cache saves |
 | `instincts` | **Active** | Learning loop at SessionEnd |
+| `lessons` | **Active** | Evidence-backed lesson lifecycle (record/reinforce/promote/evaluate/demote) |
 | `agent-registry` | Scaffold (often 0) | Multi-agent registry; CLI ready; no auto-writer yet |
 | `agent-packets` | Scaffold (often 0) | Packet bus for agent teams; CLI ready |
 | `loop-guard` | Scaffold (often 0) | Signature anti-loop records; CLI ready |
@@ -49,3 +50,48 @@ planner reuses only complete citation records. A matching complete stale record
 blocks local fallback and asks for a new search. `plan research` then validates
 the selected record against the project's retrieval-age policy as a separate
 fail-closed check.
+
+## Entity provenance and supersede
+
+Entity upserts carry `source`, `supersedes`, and `supersededBy` provenance
+fields. Use `entity supersede --id <old> --by <new> --reason <why>` to link a
+tombstone without deleting either record, so the decision stays auditable:
+
+```bash
+keel memory entity upsert --name OldAuth --type decision --summary v1 --source review-1
+keel memory entity upsert --name NewAuth --type decision --summary v2 --supersedes decision-oldauth
+keel memory entity supersede --id decision-oldauth --by decision-newauth --reason "v2 verified"
+```
+
+## Lesson lifecycle
+
+Lessons are scoped, evidence-backed statements about a problem pattern and the
+correct response. `record` refuses a lesson without evidence; `promote` requires
+the confidence threshold; `evaluate` compares measured before/after behaviour
+and demotes a lesson that regresses instead of leaving it active.
+
+```bash
+keel memory lessons record \
+  --pattern "repeated failing strategy" \
+  --evidence "two runs failed with the same signature" \
+  --response "use the machine-readable output" --scope workspace
+keel memory lessons reinforce --id repeated-failing-strategy
+keel memory lessons promote   --id repeated-failing-strategy
+keel memory lessons evaluate  --id repeated-failing-strategy \
+  --before-tokens 4000 --after-tokens 780 --before-turns 4 --after-turns 2
+keel memory lessons demote    --id repeated-failing-strategy --state quarantined --reason "regressed twice"
+keel memory lessons list --status active
+```
+
+States: `candidate`, `active`, `questioned`, `quarantined`, `superseded`.
+Promotion only changes lesson state; it never rewrites policy.
+
+## Research cache expiry
+
+`research-cache expire` is a dry run by default and only marks records `expired`
+with `--apply`, so a bulk sweep never silently discards evidence:
+
+```bash
+keel memory research-cache expire --days 90
+keel memory research-cache expire --days 90 --apply
+```

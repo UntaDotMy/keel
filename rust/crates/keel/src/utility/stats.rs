@@ -45,6 +45,9 @@ pub fn run_stats_command(
                 return run_context_stats(&arguments[1..], standard_output, standard_error)
             }
             "tools" => return run_tools_stats(&arguments[1..], standard_output, standard_error),
+            "provider-usage" => {
+                return run_provider_usage(&arguments[1..], standard_output, standard_error)
+            }
             "gain" => {
                 return crate::utility::gain::run_gain_command(
                     &arguments[1..],
@@ -126,6 +129,248 @@ fn stats_workspace_root(flag_set: &FlagSet) -> String {
     }
 }
 
+/// Directory holding host-reported provider cache usage rows.
+fn provider_usage_directory(claude_home: &Path) -> PathBuf {
+    claude_home.join("state").join("provider-usage")
+}
+
+/// Append one host-reported provider usage row. The provider owns these numbers;
+/// nothing here is inferred, so an absent record stays absent rather than zero.
+fn record_provider_usage_row(
+    claude_home: &Path,
+    provider: &str,
+    cached_input: Option<u64>,
+    uncached_input: Option<u64>,
+    output_tokens: Option<u64>,
+    session: &str,
+) -> Result<PathBuf, String> {
+    let directory = provider_usage_directory(claude_home);
+    fs::create_dir_all(&directory)
+        .map_err(|error| format!("create {}: {error}", display_path(&directory)))?;
+    let stamp = crate::utility::record_store::current_timestamp_millis();
+    let path = directory.join(format!(
+        "{}.jsonl",
+        crate::utility::record_store::format_timestamp_iso8601(stamp)
+            .chars()
+            .take(10)
+            .collect::<String>()
+    ));
+    let row = json!({
+        "recordedAt": crate::utility::record_store::format_timestamp_iso8601(stamp),
+        "provider": provider,
+        "cachedInputTokens": cached_input,
+        "uncachedInputTokens": uncached_input,
+        "outputTokens": output_tokens,
+        "sessionId": session,
+    });
+    let mut line = serde_json::to_string(&row)
+        .map_err(|error| format!("serialize provider usage: {error}"))?;
+    line.push('\n');
+    use std::io::Write as _;
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|error| format!("open {}: {error}", display_path(&path)))?;
+    file.write_all(line.as_bytes())
+        .map_err(|error| format!("write {}: {error}", display_path(&path)))?;
+    Ok(path)
+}
+
+/// Summarize recorded provider usage. Returns `None` when no host has reported
+/// numbers, so callers keep the field explicitly unavailable instead of
+/// fabricating a zero cache hit rate.
+fn provider_usage_summary(claude_home: &Path) -> Option<serde_json::Value> {
+    let directory = provider_usage_directory(claude_home);
+    if !directory.is_dir() {
+        return None;
+    }
+    let mut cached = 0u64;
+    let mut uncached = 0u64;
+    let mut output = 0u64;
+    let mut rows = 0u64;
+    let mut providers: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let entries = fs::read_dir(&directory).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let Ok(text) = fs::read_to_string(&path) else {
+            continue;
+        };
+        for line in text.lines() {
+            let Ok(row) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            rows += 1;
+            if let Some(provider) = row.get("provider").and_then(|value| value.as_str()) {
+                providers.insert(provider.to_string());
+            }
+            cached += row
+                .get("cachedInputTokens")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0);
+            uncached += row
+                .get("uncachedInputTokens")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0);
+            output += row
+                .get("outputTokens")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0);
+        }
+    }
+    if rows == 0 {
+        return None;
+    }
+    let total_input = cached + uncached;
+    let cache_hit_rate = (total_input > 0).then(|| cached as f64 / total_input as f64);
+    Some(json!({
+        "rows": rows,
+        "providers": providers.into_iter().collect::<Vec<_>>(),
+        "cachedInputTokens": cached,
+        "uncachedInputTokens": uncached,
+        "outputTokens": output,
+        "cacheHitRate": cache_hit_rate,
+    }))
+}
+
+fn run_provider_usage(
+    arguments: &[String],
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> u8 {
+    let mut flags = FlagSet::new("stats provider-usage");
+    flags.bool_flag("json", false);
+    flags.bool_flag("record", false);
+    flags.string_flag("provider", "");
+    flags.string_flag("cached-input", "");
+    flags.string_flag("uncached-input", "");
+    flags.string_flag("output", "");
+    flags.string_flag("session", "");
+    flags.string_flag("claude-home", "");
+    if let Err(error) = flags.parse(arguments) {
+        let _ = writeln!(standard_error, "{}", error.message);
+        return 1;
+    }
+    let claude_home = match resolve_claude_home(flags.string_value("claude-home")) {
+        Ok(path) => path,
+        Err(error) => {
+            let _ = writeln!(standard_error, "stats provider-usage: {error}");
+            return 1;
+        }
+    };
+    if flags.bool_value("record") {
+        let provider = flags.string_value("provider").trim().to_string();
+        if provider.is_empty() {
+            let _ = writeln!(
+                standard_error,
+                "stats provider-usage: --provider is required with --record"
+            );
+            return 1;
+        }
+        let parse_optional = |raw: &str| -> Result<Option<u64>, String> {
+            let raw = raw.trim();
+            if raw.is_empty() {
+                return Ok(None);
+            }
+            raw.parse::<u64>().map(Some).map_err(|_| {
+                "stats provider-usage: token counts must be non-negative integers".to_string()
+            })
+        };
+        let cached = match parse_optional(flags.string_value("cached-input")) {
+            Ok(value) => value,
+            Err(error) => {
+                let _ = writeln!(standard_error, "{error}");
+                return 1;
+            }
+        };
+        let uncached = match parse_optional(flags.string_value("uncached-input")) {
+            Ok(value) => value,
+            Err(error) => {
+                let _ = writeln!(standard_error, "{error}");
+                return 1;
+            }
+        };
+        let output = match parse_optional(flags.string_value("output")) {
+            Ok(value) => value,
+            Err(error) => {
+                let _ = writeln!(standard_error, "{error}");
+                return 1;
+            }
+        };
+        if cached.is_none() && uncached.is_none() && output.is_none() {
+            let _ = writeln!(
+                standard_error,
+                "stats provider-usage: provide at least one of --cached-input, --uncached-input, --output"
+            );
+            return 1;
+        }
+        match record_provider_usage_row(
+            &claude_home,
+            &provider,
+            cached,
+            uncached,
+            output,
+            flags.string_value("session").trim(),
+        ) {
+            Ok(path) => {
+                if flags.bool_value("json") {
+                    let payload = json!({
+                        "recorded": true,
+                        "provider": provider,
+                        "path": display_path(&path),
+                    });
+                    return write_serde_json(
+                        standard_output,
+                        standard_error,
+                        "stats provider-usage",
+                        &payload,
+                    );
+                }
+                let _ = writeln!(
+                    standard_output,
+                    "stats provider-usage: recorded {provider} -> {}",
+                    display_path(&path)
+                );
+                0
+            }
+            Err(error) => {
+                let _ = writeln!(standard_error, "stats provider-usage: {error}");
+                1
+            }
+        }
+    } else {
+        let summary = provider_usage_summary(&claude_home);
+        let payload = json!({
+            "available": summary.is_some(),
+            "usage": summary,
+            "note": "provider-reported only; keel never infers cache accounting",
+        });
+        if flags.bool_value("json") {
+            return write_serde_json(
+                standard_output,
+                standard_error,
+                "stats provider-usage",
+                &payload,
+            );
+        }
+        match summary {
+            Some(usage) => {
+                let _ = writeln!(standard_output, "stats provider-usage: {usage}");
+            }
+            None => {
+                let _ = writeln!(
+                    standard_output,
+                    "stats provider-usage: no host-reported usage recorded"
+                );
+            }
+        }
+        0
+    }
+}
+
 fn run_context_stats(
     arguments: &[String],
     standard_output: &mut dyn Write,
@@ -139,6 +384,8 @@ fn run_context_stats(
         return 1;
     }
     let workspace_root = stats_workspace_root(&flags);
+    let claude_home = resolve_claude_home("").ok();
+    let provider_usage = claude_home.as_deref().and_then(provider_usage_summary);
     let ledger = fixed_context::collect(Path::new(&workspace_root));
     let entries = ledger
         .entries
@@ -178,6 +425,7 @@ fn run_context_stats(
         },
         "skills": {"skillCount": ledger.skills.skill_count},
         "surfaces": entries,
+        "providerUsage": provider_usage,
         "policy": {
             "maxDynamicTokens": crate::proxy::context::DEFAULT_MAX_DYNAMIC_TOKENS,
             "maxToolCatalogTokens": crate::proxy::context::DEFAULT_MAX_TOOL_CATALOG_TOKENS,
@@ -761,6 +1009,48 @@ mod tests {
         let result = run(&root);
         let _ = fs::remove_dir_all(&root);
         result
+    }
+
+    #[test]
+    fn provider_usage_is_absent_until_a_host_reports_numbers() {
+        with_isolated_home("provider-usage-empty", |home| {
+            assert!(
+                provider_usage_summary(home).is_none(),
+                "no records must stay explicitly unavailable, never a zero"
+            );
+            record_provider_usage_row(home, "host-a", Some(900), Some(100), Some(40), "s1")
+                .expect("record provider usage");
+            let summary = provider_usage_summary(home).expect("summary after a record");
+            assert_eq!(
+                summary["cachedInputTokens"].as_u64(),
+                Some(900),
+                "cached input tokens must be the reported value"
+            );
+            assert_eq!(summary["uncachedInputTokens"].as_u64(), Some(100));
+            assert_eq!(summary["outputTokens"].as_u64(), Some(40));
+            let rate = summary["cacheHitRate"].as_f64().expect("cache hit rate");
+            assert!((rate - 0.9).abs() < 1e-9, "rate {rate}");
+            assert_eq!(
+                summary["providers"]
+                    .as_array()
+                    .map(|providers| providers.len()),
+                Some(1),
+                "one provider recorded"
+            );
+        });
+    }
+
+    #[test]
+    fn provider_usage_without_input_tokens_reports_no_rate() {
+        with_isolated_home("provider-usage-no-input", |home| {
+            record_provider_usage_row(home, "host-b", None, None, Some(10), "s2")
+                .expect("record output-only usage");
+            let summary = provider_usage_summary(home).expect("summary");
+            assert!(
+                summary["cacheHitRate"].is_null(),
+                "no input tokens means no measurable rate: {summary}"
+            );
+        });
     }
 
     #[test]
