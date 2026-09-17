@@ -371,9 +371,11 @@ pub(crate) fn validate_task_artifacts(
     issues: &mut Vec<String>,
 ) {
     let Some(tasks) = tasks else {
+        issues.push("tasks.json is missing".to_string());
         return;
     };
     let Some(ticket_files) = tasks.get("ticketFiles") else {
+        issues.push("tasks.json ticketFiles is missing".to_string());
         return;
     };
     let Some(ticket_files) = ticket_files.as_array() else {
@@ -1002,9 +1004,9 @@ fn validate_ticket_subtasks(
 
 fn validate_timestamp(subtask: &Value, id: &str, issues: &mut Vec<String>) {
     let timestamp = string_field(subtask, "verification_timestamp").unwrap_or_default();
-    if timestamp.is_empty() || DateTime::parse_from_rfc3339(timestamp).is_err() {
+    if !valid_evidence_timestamp(timestamp) {
         issues.push(format!(
-            "{id} done status requires an RFC3339 verification_timestamp"
+            "{id} requires a current, non-future RFC3339 verification_timestamp"
         ));
     }
 }
@@ -1065,17 +1067,18 @@ fn validate_subtodos(seed: &TaskSeed, subtask_id: &str, subtask: &Value, issues:
     }
 }
 
-fn validate_evidence_reference(
+pub(crate) fn validate_evidence_reference(
     context: &ValidationContext<'_>,
     seed: &TaskSeed,
     subtask_id: &str,
     subtask: &Value,
     reference: &Value,
     issues: &mut Vec<String>,
-) {
+) -> Option<Value> {
+    let issue_count = issues.len();
     let Some(reference) = reference.as_object() else {
         issues.push(format!("{subtask_id} evidence_ref is not an object"));
-        return;
+        return None;
     };
     let path_value = reference
         .get("path")
@@ -1087,30 +1090,24 @@ fn validate_evidence_reference(
         .unwrap_or_default();
     let Some(path) = resolve_regular_plan_file(context.plan_directory, path_value, issues) else {
         issues.push(format!("{subtask_id} evidence_ref path is not resolvable"));
-        return;
+        return None;
     };
-    let body = match read_bounded_text(&path, path_value, issues) {
-        Some(body) => body,
-        None => return,
-    };
-    // why: evidence binding is tamper-evident; accept sha256 and legacy FNV
-    // fingerprint so existing tickets keep validating without breakage.
+    let body = read_bounded_text(&path, path_value, issues)?;
     let actual_sha = format!(
         "sha256:{}",
         crate::utility::hashing::sha256_hex(body.as_bytes())
     );
-    let actual_fnv = format!("fnv1a64:{}", crate::utility::hashing::fnv1a64_hex(&body));
-    if expected_hash != actual_sha && expected_hash != actual_fnv {
+    if expected_hash != actual_sha {
         issues.push(format!(
             "{subtask_id} content_hash does not match evidence artifact"
         ));
-        return;
+        return None;
     }
     let evidence: Value = match serde_json::from_str(&body) {
         Ok(value) => value,
         Err(error) => {
             issues.push(format!("parse evidence {path_value}: {error}"));
-            return;
+            return None;
         }
     };
     if evidence.get("schema_version").and_then(Value::as_u64) != Some(SCHEMA_VERSION)
@@ -1137,6 +1134,8 @@ fn validate_evidence_reference(
             ));
         }
     }
+    validate_timestamp(subtask, subtask_id, issues);
+    validate_source_binding(context.workspace_root, &evidence, subtask_id, issues);
     let evidence_type = string_field(&evidence, "evidence_type").unwrap_or_default();
     validate_evidence_payload(
         context.keel_home,
@@ -1146,6 +1145,7 @@ fn validate_evidence_reference(
         &evidence,
         issues,
     );
+    (issues.len() == issue_count).then_some(evidence)
 }
 
 fn validate_evidence_payload(
@@ -1160,36 +1160,76 @@ fn validate_evidence_payload(
         "command" => {
             require_text(evidence, "command", subtask_id, issues);
             require_zero_exit(evidence, subtask_id, issues);
-            require_sha256(evidence, "output_hash", subtask_id, issues);
+            validate_file_hash(
+                workspace_root,
+                evidence,
+                "output_path",
+                "output_hash",
+                subtask_id,
+                issues,
+            );
         }
         "named_test" => {
             require_text(evidence, "test_name", subtask_id, issues);
             require_pass(evidence, subtask_id, issues);
-            require_sha256(evidence, "output_hash", subtask_id, issues);
+            validate_file_hash(
+                workspace_root,
+                evidence,
+                "output_path",
+                "output_hash",
+                subtask_id,
+                issues,
+            );
         }
         "lint_diagnostic" => {
             require_text(evidence, "tool", subtask_id, issues);
             require_zero_exit(evidence, subtask_id, issues);
-            require_sha256(evidence, "output_hash", subtask_id, issues);
+            validate_file_hash(
+                workspace_root,
+                evidence,
+                "output_path",
+                "output_hash",
+                subtask_id,
+                issues,
+            );
         }
         "source_hash" => {
-            let source_path = require_text(evidence, "source_path", subtask_id, issues);
-            require_sha256(evidence, "source_hash", subtask_id, issues);
-            if let Some(source_path) = source_path {
-                if resolve_regular_workspace_file(workspace_root, source_path).is_none() {
-                    issues.push(format!(
-                        "{subtask_id} source_path is not machine-resolvable"
-                    ));
-                }
-            }
+            validate_file_hash(
+                workspace_root,
+                evidence,
+                "source_path",
+                "source_hash",
+                subtask_id,
+                issues,
+            );
         }
         "raw_store" => {
             let raw_id = require_text(evidence, "raw_store_id", subtask_id, issues);
             if let Some(raw_id) = raw_id {
-                let store =
-                    crate::proxy::raw_store::RawStore::with_root(keel_home.join("raw-output"));
+                let store = crate::proxy::raw_store::RawStore::with_namespace(
+                    keel_home.join("raw-output"),
+                    crate::proxy::raw_store::RawNamespace::for_workspace(workspace_root),
+                );
                 match store.load_meta(raw_id) {
-                    Ok(meta) if meta.exit_code == 0 => {}
+                    Ok(meta) if meta.exit_code == 0 => {
+                        let recorded = string_field(evidence, "recorded_at")
+                            .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+                            .map(|value| value.timestamp_millis());
+                        if meta.workspace.canonicalize().ok() != workspace_root.canonicalize().ok()
+                            || match recorded {
+                                None => true,
+                                Some(at) => {
+                                    at < 0
+                                        || (at as u64).saturating_add(999)
+                                            < meta.started_at.saturating_add(meta.duration_ms)
+                                }
+                            }
+                        {
+                            issues.push(format!(
+                                "{subtask_id} RawStore workspace or timestamp does not match"
+                            ));
+                        }
+                    }
                     Ok(meta) => issues.push(format!(
                         "{subtask_id} RawStore {raw_id} exit code is {}",
                         meta.exit_code
@@ -1207,16 +1247,179 @@ fn validate_evidence_payload(
                     "{subtask_id} screenshot visual_verdict is not pass"
                 ));
             }
-            require_sha256(evidence, "artifact_hash", subtask_id, issues);
+            validate_file_hash(
+                workspace_root,
+                evidence,
+                "artifact_path",
+                "artifact_hash",
+                subtask_id,
+                issues,
+            );
         }
         "benchmark" => {
             require_text(evidence, "artifact_id", subtask_id, issues);
             require_pass(evidence, subtask_id, issues);
-            require_sha256(evidence, "output_hash", subtask_id, issues);
+            validate_file_hash(
+                workspace_root,
+                evidence,
+                "output_path",
+                "output_hash",
+                subtask_id,
+                issues,
+            );
         }
         _ => issues.push(format!(
             "{subtask_id} has unsupported evidence_type {evidence_type}"
         )),
+    }
+}
+
+fn valid_evidence_timestamp(value: &str) -> bool {
+    DateTime::parse_from_rfc3339(value).is_ok_and(|time| time <= chrono::Utc::now())
+}
+
+fn validate_file_hash(
+    workspace: &Path,
+    evidence: &Value,
+    path_field: &str,
+    hash_field: &str,
+    id: &str,
+    issues: &mut Vec<String>,
+) {
+    require_sha256(evidence, hash_field, id, issues);
+    let Some(relative) = require_text(evidence, path_field, id, issues) else {
+        return;
+    };
+    let bytes =
+        resolve_regular_workspace_file(workspace, relative).and_then(|path| fs::read(path).ok());
+    match bytes {
+        Some(bytes)
+            if string_field(evidence, hash_field)
+                == Some(
+                    format!("sha256:{}", crate::utility::hashing::sha256_hex(&bytes)).as_str(),
+                ) => {}
+        _ => issues.push(format!(
+            "{id} {path_field}/{hash_field} is unreadable or does not match current content"
+        )),
+    }
+}
+
+fn validate_source_binding(workspace: &Path, evidence: &Value, id: &str, issues: &mut Vec<String>) {
+    validate_file_hash(
+        workspace,
+        evidence,
+        "source_path",
+        "source_hash",
+        id,
+        issues,
+    );
+    if let Some(bindings) = evidence.get("source_files").and_then(Value::as_array) {
+        for binding in bindings {
+            validate_file_hash(workspace, binding, "source_path", "source_hash", id, issues);
+        }
+    }
+}
+
+pub(crate) fn evidence_status(evidence: &Value) -> crate::review::GateStatus {
+    use crate::review::GateStatus;
+    let status = string_field(evidence, "visual_verdict")
+        .or_else(|| string_field(evidence, "result"))
+        .or_else(|| string_field(evidence, "status"));
+    match status {
+        Some("pass") => GateStatus::Pass,
+        Some("needs_human") => GateStatus::NeedsHuman,
+        Some("unclear") => GateStatus::Unclear,
+        Some("skipped") => GateStatus::Skipped,
+        Some("not_applicable") => GateStatus::NotApplicable,
+        Some(_) => GateStatus::Fail,
+        None if matches!(
+            string_field(evidence, "evidence_type"),
+            Some("command" | "lint_diagnostic" | "raw_store" | "source_hash")
+        ) =>
+        {
+            GateStatus::Pass
+        }
+        None => GateStatus::Fail,
+    }
+}
+
+pub(crate) struct CompletionEvidence {
+    pub acceptance_refs: Vec<String>,
+    pub layer: String,
+    pub evidence_type: String,
+    pub status: crate::review::GateStatus,
+    pub reference: Value,
+}
+
+pub(crate) fn completion_evidence(
+    context: &ValidationContext<'_>,
+    tasks: Option<&Value>,
+    rtm: Option<&Value>,
+) -> Result<Vec<CompletionEvidence>, Vec<String>> {
+    let mut issues = Vec::new();
+    validate_task_artifacts(context, tasks, rtm, &mut issues);
+    if rtm.is_none() {
+        issues.push("rtm.json is missing".to_string());
+    }
+    if !issues.is_empty() {
+        return Err(issues);
+    }
+    let mut records = Vec::new();
+    for seed in context.seeds {
+        let task = tasks
+            .and_then(|value| value.get("tasks"))
+            .and_then(Value::as_array)
+            .and_then(|tasks| {
+                tasks
+                    .iter()
+                    .find(|task| string_field(task, "taskId") == Some(seed.id.as_str()))
+            });
+        let Some(file) = task.and_then(|task| string_field(task, "ticketFile")) else {
+            issues.push(format!("{} has no ticket file", seed.id));
+            continue;
+        };
+        let Some(path) = resolve_regular_plan_file(context.plan_directory, file, &mut issues)
+        else {
+            continue;
+        };
+        let Some(ticket) = read_bounded_json(&path, file, &mut issues) else {
+            continue;
+        };
+        for (layer, subtask) in ticket_subtasks(&ticket) {
+            let id = string_field(subtask, "id").unwrap_or_default();
+            let state = string_field(subtask, "status").unwrap_or_default();
+            let reference = subtask.get("evidence_ref").unwrap_or(&Value::Null);
+            let status = if state == "not_applicable" {
+                crate::review::GateStatus::NotApplicable
+            } else if reference.is_null() {
+                match state {
+                    "needs_human" => crate::review::GateStatus::NeedsHuman,
+                    "skipped" => crate::review::GateStatus::Skipped,
+                    _ => crate::review::GateStatus::Fail,
+                }
+            } else {
+                validate_evidence_reference(context, seed, id, subtask, reference, &mut issues)
+                    .map(|value| evidence_status(&value))
+                    .unwrap_or(crate::review::GateStatus::Fail)
+            };
+            records.push(CompletionEvidence {
+                acceptance_refs: string_array(subtask, "acceptance_refs"),
+                layer: layer.to_string(),
+                evidence_type: string_field(subtask, "expected_evidence_type")
+                    .unwrap_or_default()
+                    .to_string(),
+                status,
+                reference: reference.clone(),
+            });
+        }
+    }
+    if records.is_empty() {
+        issues.push("no task completion evidence".to_string());
+    }
+    if issues.is_empty() {
+        Ok(records)
+    } else {
+        Err(issues)
     }
 }
 
@@ -1242,8 +1445,11 @@ fn require_zero_exit(value: &Value, id: &str, issues: &mut Vec<String>) {
 }
 
 fn require_pass(value: &Value, id: &str, issues: &mut Vec<String>) {
-    if string_field(value, "result") != Some("pass") {
-        issues.push(format!("{id} evidence result is not pass"));
+    if !matches!(
+        string_field(value, "result"),
+        Some("pass" | "fail" | "needs_human" | "unclear" | "skipped" | "not_applicable")
+    ) {
+        issues.push(format!("{id} evidence result is missing or unsupported"));
     }
 }
 

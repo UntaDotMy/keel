@@ -22,6 +22,22 @@ MCP: `memory` tool / `memory_status`). Implementation: `utility/memory_families.
 CLI/MCP surfaces. Prefer wiring a real writer when a feature needs them.
 Zero records in `memory_status` is healthy for a fresh or single-agent workspace.
 
+## Recall scope and lifecycle
+
+`keel memory recall` and `keel memory retrieve` share the same scope and lifecycle
+filters. Use `--workspace <scope>` to select a workspace explicitly; use
+`--local-only` to require that scope and the current branch (with `unknown` retained
+for legacy records). Eligibility filtering happens before the result limit, so a
+foreign hit cannot consume a local result slot.
+
+Recall excludes stale or expired research-cache records, quarantined or superseded
+lessons, and superseded entities. The source files remain on disk for audit and
+explicit family commands; only retrieval eligibility changes.
+
+Every hit's `retrievalRef` replays the same scoped query, including `--workspace`
+and `--local-only` when they were supplied. A recovery reference therefore cannot
+silently widen a scoped search into a cross-workspace one.
+
 ## Research cache contract
 
 The research cache keeps two separate freshness concepts:
@@ -95,3 +111,15 @@ with `--apply`, so a bulk sweep never silently discards evidence:
 keel memory research-cache expire --days 90
 keel memory research-cache expire --days 90 --apply
 ```
+
+## SessionEnd retention and storage bounds
+
+Each JSON record is capped at 1 MiB. Each family directory is capped at 10,000
+records and 64 MiB; writes and retention scans use one bounded sidecar lock per
+family. SessionEnd prunes timestamped records in `events`, `agent-packets`,
+`loop-guard`, and `graph` after 90 days by default. Records without a recognized
+`recordedAt`, `createdAt`, or `updatedAt` timestamp are retained as legacy evidence.
+
+The shared `memory_retention_days` user setting overrides the default. The
+`CLAUDE_SKILLS_MEMORY_RECORD_RETENTION_DAYS` environment variable is the dedicated
+operator override; set it to `0` to disable this SessionEnd prune.

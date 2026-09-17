@@ -16,10 +16,11 @@
 //! stderr and swallowed: a telemetry write must never fail the hook.
 
 use std::fs::{self, OpenOptions};
-use std::io::Write;
-use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use fs2::FileExt;
 use serde_json::{json, Value as JsonDocument};
 
 use crate::runtime::resolve_claude_home;
@@ -73,11 +74,155 @@ pub fn record_tool_timing(event: &str, input: &JsonDocument) -> std::io::Result<
         "cwd": input.get("cwd").and_then(JsonDocument::as_str).unwrap_or_default(),
         "effort_level": effort_level_from(input),
     });
+    let rendered = line.to_string();
+    // Telemetry is fail-open, but it must not become an unbounded write sink
+    // when a malformed hook payload supplies a megabyte-scale identity field.
+    if rendered.len().saturating_add(1) > MAX_TIMING_ROW_BYTES {
+        return Ok(false);
+    }
 
-    let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
+    let directory = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("timings path has no parent"))?;
+    let _lock = lock_timing_store(directory)?;
+    append_timing_row(&path, &rendered)
+}
 
-    writeln!(file, "{line}")?;
+/// Per-row bound for identity fields and future hook additions.
+const MAX_TIMING_ROW_BYTES: usize = 16 * 1024;
+/// Bound one daily JSONL file before telemetry becomes a no-op.
+const MAX_TIMING_FILE_BYTES: u64 = 8 * 1024 * 1024;
+/// Bound all retained timing files, independent of the retention setting.
+const MAX_TIMING_TOTAL_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_TIMING_ROWS_PER_DAY: usize = 100_000;
+const TIMING_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
+const TIMING_LOCK_RETRY_MS: u64 = 25;
 
+struct TimingStoreLock {
+    file: fs::File,
+}
+
+impl Drop for TimingStoreLock {
+    fn drop(&mut self) {
+        // Qualify the trait method: rustc 1.89 added an inherent `File::unlock`
+        // that would otherwise shadow this and break the declared 1.80 MSRV.
+        let _ = fs2::FileExt::unlock(&self.file);
+    }
+}
+
+fn lock_timing_store(directory: &Path) -> std::io::Result<TimingStoreLock> {
+    fs::create_dir_all(directory)?;
+    let path = directory.join(".store.lock");
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&path)
+        .map_err(|error| {
+            std::io::Error::new(
+                error.kind(),
+                format!("open tool-timings lock {}: {error}", path.display()),
+            )
+        })?;
+    let deadline = Instant::now() + TIMING_LOCK_TIMEOUT;
+    loop {
+        match file.try_lock_exclusive() {
+            Ok(()) => return Ok(TimingStoreLock { file }),
+            Err(error) if timing_lock_contention(&error) => {
+                if Instant::now() >= deadline {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "tool-timings lock remained held",
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(TIMING_LOCK_RETRY_MS));
+            }
+            Err(error) => {
+                return Err(std::io::Error::new(
+                    error.kind(),
+                    format!("lock tool-timings store: {error}"),
+                ))
+            }
+        }
+    }
+}
+
+fn timing_lock_contention(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::WouldBlock
+        || error
+            .raw_os_error()
+            .is_some_and(|code| matches!(code, 32 | 33))
+}
+
+/// Recover a writer crash that left the final JSONL row without a newline.
+/// A complete line is the only durable boundary; an incomplete tail is
+/// discarded before the next append so readers never see a partial row.
+fn recover_partial_timing_line(file: &mut fs::File) -> std::io::Result<(u64, usize)> {
+    let length = file.metadata()?.len();
+    if length >= MAX_TIMING_FILE_BYTES {
+        return Ok((length, MAX_TIMING_ROWS_PER_DAY));
+    }
+    file.seek(SeekFrom::Start(0))?;
+    let mut bytes = Vec::with_capacity(length as usize);
+    file.read_to_end(&mut bytes)?;
+    if bytes.last() != Some(&b'\n') {
+        let keep = bytes
+            .iter()
+            .rposition(|byte| *byte == b'\n')
+            .map(|index| index + 1)
+            .unwrap_or(0);
+        file.set_len(keep as u64)?;
+        bytes.truncate(keep);
+    }
+    let rows = bytes.iter().filter(|byte| **byte == b'\n').count();
+    Ok((bytes.len() as u64, rows))
+}
+
+fn timing_store_bytes(directory: &Path) -> std::io::Result<u64> {
+    let mut total = 0u64;
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if name.to_string_lossy().ends_with(".jsonl") {
+            let metadata = fs::symlink_metadata(entry.path())?;
+            if metadata.file_type().is_file() {
+                total = total.saturating_add(metadata.len());
+            }
+        }
+    }
+    Ok(total)
+}
+
+fn append_timing_row(path: &Path, rendered: &str) -> std::io::Result<bool> {
+    let mut file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(path)?;
+    let (current_bytes, rows) = recover_partial_timing_line(&mut file)?;
+    let incoming_bytes = rendered.len() as u64 + 1;
+    if rows >= MAX_TIMING_ROWS_PER_DAY
+        || current_bytes.saturating_add(incoming_bytes) > MAX_TIMING_FILE_BYTES
+    {
+        return Ok(false);
+    }
+    let directory = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("timings path has no parent"))?;
+    let total_without_current = timing_store_bytes(directory)?.saturating_sub(current_bytes);
+    if total_without_current
+        .saturating_add(current_bytes)
+        .saturating_add(incoming_bytes)
+        > MAX_TIMING_TOTAL_BYTES
+    {
+        return Ok(false);
+    }
+    file.seek(SeekFrom::End(0))?;
+    file.write_all(rendered.as_bytes())?;
+    file.write_all(b"\n")?;
+    file.flush()?;
     Ok(true)
 }
 
@@ -146,6 +291,7 @@ pub fn iter_day_files(days: u64) -> std::io::Result<Vec<(chrono::NaiveDate, Path
     if !directory.exists() {
         return Ok(Vec::new());
     }
+    let _lock = lock_timing_store(&directory)?;
 
     let today = chrono::Local::now().date_naive();
     let mut day_files: Vec<(chrono::NaiveDate, PathBuf)> = Vec::new();
@@ -186,6 +332,7 @@ pub fn prune_older_than(days: u64) -> std::io::Result<usize> {
     if !directory.exists() {
         return Ok(0);
     }
+    let _lock = lock_timing_store(&directory)?;
 
     let today = chrono::Local::now().date_naive();
     let cutoff = match today.checked_sub_days(chrono::Days::new(days)) {
@@ -354,6 +501,85 @@ mod tests {
         });
     }
 
+    #[test]
+    fn record_tool_timing_discards_partial_tail_before_append() {
+        with_isolated_claude_home("partial-tail", |root| {
+            let timings = root.join("state").join("tool-timings");
+            fs::create_dir_all(&timings).expect("create timings dir");
+            let date = chrono::Local::now().format("%Y-%m-%d").to_string();
+            let path = timings.join(format!("{date}.jsonl"));
+            fs::write(&path, br#"{"partial":"tail""#).expect("write partial row");
+
+            let recorded = record_tool_timing(
+                "PostToolUse",
+                &json!({"tool_name": "Bash", "duration_ms": 7u64}),
+            )
+            .expect("record");
+            assert!(recorded);
+
+            let body = fs::read_to_string(path).expect("read recovered log");
+            assert_eq!(
+                body.lines().count(),
+                1,
+                "the incomplete tail must not remain beside the new row"
+            );
+            let row: JsonDocument =
+                serde_json::from_str(body.lines().next().unwrap()).expect("new row is valid JSON");
+            assert_eq!(
+                row.get("duration_ms").and_then(JsonDocument::as_u64),
+                Some(7)
+            );
+        });
+    }
+
+    #[test]
+    fn record_tool_timing_rejects_oversized_row_without_writing() {
+        with_isolated_claude_home("row-cap", |root| {
+            let input = json!({
+                "tool_name": "x".repeat(MAX_TIMING_ROW_BYTES),
+                "duration_ms": 1u64,
+            });
+            assert!(
+                !record_tool_timing("PostToolUse", &input).expect("record"),
+                "oversized telemetry rows must be dropped fail-open"
+            );
+            let date = chrono::Local::now().format("%Y-%m-%d").to_string();
+            assert!(
+                !root
+                    .join("state")
+                    .join("tool-timings")
+                    .join(format!("{date}.jsonl"))
+                    .exists(),
+                "an oversized row must not create a JSONL file"
+            );
+        });
+    }
+
+    #[test]
+    fn record_tool_timing_rejects_oversized_daily_file() {
+        with_isolated_claude_home("file-cap", |root| {
+            let timings = root.join("state").join("tool-timings");
+            fs::create_dir_all(&timings).expect("create timings dir");
+            let date = chrono::Local::now().format("%Y-%m-%d").to_string();
+            let path = timings.join(format!("{date}.jsonl"));
+            let file = fs::File::create(&path).expect("create oversized fixture");
+            file.set_len(MAX_TIMING_FILE_BYTES)
+                .expect("set daily file size");
+
+            assert!(
+                !record_tool_timing(
+                    "PostToolUse",
+                    &json!({"tool_name": "Bash", "duration_ms": 1u64}),
+                )
+                .expect("record"),
+                "an oversized daily file must stop further telemetry writes"
+            );
+            assert_eq!(
+                fs::metadata(path).expect("file metadata").len(),
+                MAX_TIMING_FILE_BYTES
+            );
+        });
+    }
     #[test]
     fn record_tool_timing_records_failure_event_distinctly() {
         with_isolated_claude_home("failure", |root| {

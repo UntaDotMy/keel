@@ -9,6 +9,7 @@ use crate::runtime::run_command;
 
 mod ci;
 mod closeout;
+pub(crate) use closeout::stable_requirement_id;
 mod diff_gates;
 mod hosted;
 mod language_gates;

@@ -1,5 +1,6 @@
 use keel::proxy::context::{
-    project_scoped, CacheClass, ContextFirewall, ContextPolicy, ContextSource, ProjectionInput,
+    project_scoped, schedule_turn_scoped, CacheClass, ContextFirewall, ContextPolicy,
+    ContextSource, ProjectionInput,
 };
 
 #[test]
@@ -336,4 +337,28 @@ fn nine_tier_priority_scheduler_prioritizes_higher_tier_and_omits_lower() {
     assert!(tight_res.total_visible_tokens <= 30);
     // Highest priority tier (Warning, tier 1) must be in the projections
     assert_eq!(tight_res.projections[0].source, ContextSource::Warning);
+}
+
+#[test]
+fn schedule_turn_scoped_preserves_session_identity_and_priority_order() {
+    let tier1_warning = ProjectionInput::new(
+        ContextSource::Warning,
+        "compiler warning in main.rs",
+        None::<String>,
+        "ws-test",
+        "session-turn-sched",
+    );
+    let tier9_instruction = ProjectionInput::new(
+        ContextSource::Instruction,
+        "remember to run reviewer",
+        None::<String>,
+        "ws-test",
+        "session-turn-sched",
+    );
+    let candidates = vec![tier9_instruction, tier1_warning];
+    let res = schedule_turn_scoped(500, "ws-test", "session-turn-sched", candidates)
+        .expect("schedule turn scoped must succeed");
+    assert_eq!(res.projections.len(), 2);
+    assert_eq!(res.projections[0].source, ContextSource::Warning);
+    assert_eq!(res.projections[1].source, ContextSource::Instruction);
 }

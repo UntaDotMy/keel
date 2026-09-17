@@ -21,6 +21,8 @@ pub(super) const IRON_LAW_GATE_DENIAL_STRICT: &str =
         1. MCP `context_brief` or `system_map` (or `keel memory system-map` / `keel doctor`)\n\
         2. MCP `recall` or `skill_route` / `skill_get` (or `keel memory recall`)\n\
         3. MCP `code_search` (or `keel code-search search ...`)\n\
+        Mounted tools: Write path=xd://mcp__keel_system_map content={} is the same research call. \
+        Hosts must forward the actual path and successful tool observation; an ordinary Write does not qualify.\n\
         Allowed while blocked: Read/Grep/Glob, and shell only if the command is a \
         keel research command. Plain Read alone does NOT clear STRICT. \
         Set KEEL_IRON_LAW_GATE=balanced or =off to relax.";
@@ -346,21 +348,6 @@ pub(crate) fn maybe_mark_iron_law_from_tool_event(input: &JsonDocument) {
     mark_iron_law_satisfied(session_id);
 }
 
-/// Mark from bridge observe (tool name + optional stdin command JSON / raw).
-pub(crate) fn maybe_mark_iron_law_from_parts(
-    session_id: &str,
-    tool_name: &str,
-    command: Option<&str>,
-) {
-    let mode = iron_law_gate_mode();
-    if mode == IronLawGateMode::Off {
-        return;
-    }
-    if tool_satisfies_iron_law(mode, tool_name, command) {
-        mark_iron_law_satisfied(session_id);
-    }
-}
-
 /// Scan today's tool-timings for keel (or balanced host) research tools.
 /// Fail-closed for the gate: returns false when timings are missing (no free pass).
 pub(super) fn session_has_iron_law_evidence(
@@ -559,6 +546,24 @@ pub(crate) fn pre_tool_gate_decision_with_markdown_context(
     }
     if let Some(reason) = iron_law_gate_decision(session_id) {
         return Some(reason);
+    }
+    if let Ok(plan_id) =
+        std::env::var("KEEL_PLAN_ID").or_else(|_| std::env::var("CLAUDE_SKILLS_PLAN"))
+    {
+        let plan = plan_id.trim();
+        if !plan.is_empty() && is_edit_class_tool(tool_name) && !markdown_only_edit {
+            let blocked = crate::utility::plan::plan_has_blocked_tasks(Path::new(cwd), "", plan)
+                .unwrap_or(false);
+            if blocked {
+                return Some(PLAN_TASK_BLOCKED_DENIAL);
+            }
+            let ready =
+                crate::utility::plan::evaluate_definition_of_ready(Path::new(cwd), "", plan)
+                    .is_ok_and(|eval| eval.satisfied);
+            if !ready {
+                return Some(PLAN_READY_GATE_DENIAL);
+            }
+        }
     }
     if anvil_gate_enabled() && is_edit_class_tool(tool_name) && !markdown_only_edit {
         let satisfied = resolve_claude_home("")
@@ -851,6 +856,15 @@ Anvil gate: call `anvil` (compile, then run --dry-run) before editing. \
 This is the only keel delivery loop. MCP: keel__anvil action=compile args=[--goal,...,--bar,...,--files,...] then action=run args=[--dry-run]. \
 CLI: keel anvil compile --goal \"...\" --bar \"echo ok\" --files \"src/file.rs\" then keel anvil run --dry-run. \
 Set KEEL_ANVIL_GATE=off to disable.";
+pub(super) const PLAN_TASK_BLOCKED_DENIAL: &str = "\
+Plan gate: the selected plan has blocked task(s) with unresolved prerequisites. \
+Resolve or explicitly skip each blocked task before editing source code. \
+Run `keel plan status --plan <id>` to inspect blockers.";
+
+pub(super) const PLAN_READY_GATE_DENIAL: &str = "\
+Plan gate: the active plan has unresolved prerequisites, ambiguity, or incomplete design. \
+All 11 Definition of Ready (DoR) items must pass before editing source code. \
+Run `keel plan ready --plan <id>` to evaluate readiness, or resolve the blocking items.";
 
 #[cfg(test)]
 mod namespace_tests {

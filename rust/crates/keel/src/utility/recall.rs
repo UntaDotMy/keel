@@ -12,8 +12,8 @@
 //! Invariants:
 //!   * The on-disk schema is owned by this module. The `documents` virtual table
 //!     stores section-aware memory chunks; `document_meta` stores line ranges,
-//!     source family, workspace scope, branch marker, and content fingerprint.
-//!     The `meta` table stores schema version and sync timestamps.
+//!     source family, workspace scope, branch marker, content fingerprint, lifecycle,
+//!     and expiry metadata. The `meta` table stores schema version and sync timestamps.
 //!   * Recall always reflects current files on disk: every read-path call
 //!     (`recall <query>` and `recall status`) runs `sync_recall_index` first.
 //!     Changed files are chunked and committed atomically; deleted files remove
@@ -33,12 +33,12 @@ use crate::json::{write_indented, Value};
 use crate::proxy::token_meter::TokenMeter;
 use crate::runtime::{display_path, resolve_claude_home};
 use crate::utility::hashing::{fnv1a64_hex, sha256_hex};
-
+use crate::utility::record_store::{field, parse_object_of_strings, Record};
 // The recall schema is shared by every build. FTS5 remains the deterministic
 // source-of-truth index; structured workspace indexing lives in its own lane.
 // The on-disk content hash is an integrity value, not a cache key: bump the
 // schema with its algorithm so legacy FNV indexes rebuild instead of load.
-const SCHEMA_VERSION: &str = "6";
+const SCHEMA_VERSION: &str = "7";
 
 /// Top-level subdirectories under `<claude-home>` that recall indexes by default.
 /// Listed explicitly so the indexer never wanders into binaries, hooks, or release
@@ -173,7 +173,7 @@ pub fn run_recall_command(
 fn render_recall_help(command_group: &str, standard_output: &mut dyn Write) {
     let _ = writeln!(
         standard_output,
-        "Usage: keel {command_group} recall <query> [--limit N] [--json] [--claude-home PATH] [--workspace SLUG] [--local-only]"
+        "Usage: keel {command_group} recall <query> [--limit N] [--json] [--claude-home PATH] [--workspace SCOPE] [--local-only]"
     );
     let _ = writeln!(
         standard_output,
@@ -195,6 +195,10 @@ fn render_recall_help(command_group: &str, standard_output: &mut dyn Write) {
     let _ = writeln!(
         standard_output,
         "Retrieval is wall-clock bounded by KEEL_RECALL_DEADLINE_MS (default 5000ms, maximum 30000ms)."
+    );
+    let _ = writeln!(
+        standard_output,
+        "Structured stale, expired, quarantined, and superseded records are excluded from retrieval."
     );
 }
 
@@ -262,23 +266,31 @@ fn run_recall_search(
         }
     };
 
-    // Workspace affinity: boost current-project hits above cross-project.
-    // `--workspace` forces a slug; otherwise cwd is slugged like system_map.
-    let workspace_slug = {
-        let explicit = flag_set.string_value("workspace").trim().to_string();
-        if !explicit.is_empty() {
-            Some(crate::utility::system_map::sanitize_key(&explicit))
-        } else {
-            std::env::current_dir()
-                .ok()
-                .map(|cwd| crate::utility::system_map::sanitize_key(&cwd.to_string_lossy()))
-        }
+    let local_only = flag_set.bool_value("local-only");
+    let workspace_context =
+        match recall_workspace_context(Some(flag_set.string_value("workspace")), local_only) {
+            Ok(context) => context,
+            Err(error_message) => {
+                let _ = writeln!(standard_error, "{command_group} recall: {error_message}");
+                return 1;
+            }
+        };
+    let replay_workspace = if local_only {
+        workspace_context.scope.as_deref()
+    } else {
+        let explicit = flag_set.string_value("workspace").trim();
+        (!explicit.is_empty()).then_some(explicit)
     };
-    let search = match search_recall_index(
+
+    let search = match search_recall_index_with_options(
         &claude_home,
         trimmed_query,
         limit,
-        workspace_slug.as_deref(),
+        RecallQueryOptions {
+            workspace_affinity: workspace_context.affinity.as_deref(),
+            scope: workspace_context.scope.as_deref(),
+            branch: workspace_context.branch.as_deref(),
+        },
     ) {
         Ok(Some(search)) => search,
         Ok(None) => {
@@ -296,28 +308,32 @@ fn run_recall_search(
             return 1;
         }
     };
-    let mut matches = search.hits;
+    let matches = search.hits;
     let stage = search.stage;
 
-    // `--local-only`: restrict to the current workspace lane (a new project
-    // returns empty). Both sides are dash-collapsed (`D:\` -> `D--` vs `D-`).
-    if flag_set.bool_value("local-only") {
-        if let Some(slug) = &workspace_slug {
-            let slug_norm = collapse_dashes(&slug.to_ascii_lowercase());
-            matches.retain(|hit| {
-                collapse_dashes(&hit.absolute_path.to_ascii_lowercase()).contains(&slug_norm)
-            });
-        }
-    }
-
     if flag_set.bool_value("json") {
-        let payload = build_search_json(trimmed_query, &claude_home, &matches, limit, stage);
+        let payload = build_search_json(
+            trimmed_query,
+            &claude_home,
+            &matches,
+            limit,
+            stage,
+            replay_workspace,
+            local_only,
+        );
         if let Err(error) = write_indented(standard_output, &payload) {
             let _ = writeln!(standard_error, "{command_group} recall: {error}");
             return 1;
         }
         return 0;
     }
+
+    let _ = writeln!(
+        standard_output,
+        "{command_group} recall: query={:?} matches={} stage={stage}",
+        trimmed_query,
+        matches.len()
+    );
 
     let _ = writeln!(
         standard_output,
@@ -824,21 +840,113 @@ pub struct RecallSearchResult {
     pub hits: Vec<RecallHit>,
 }
 
+/// Query constraints shared by CLI, MCP, and memory retrieval.
+///
+/// `workspace_affinity` only changes ranking. `scope` and `branch` are hard
+/// eligibility filters applied in SQLite before candidate limits, so a
+/// cross-workspace hit cannot consume a local result slot.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct RecallQueryOptions<'a> {
+    pub(crate) workspace_affinity: Option<&'a str>,
+    pub(crate) scope: Option<&'a str>,
+    pub(crate) branch: Option<&'a str>,
+}
+
+/// Scope a retrieval result must be replayed with. Recovery references echo
+/// `--workspace`/`--local-only` so a scoped search cannot be widened by
+/// accident; the low-level recall projection, the memory family retrieval
+/// command, and the MCP recall envelope all record the same pair.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct RecallReplay<'a> {
+    /// Explicit or derived workspace scope, already trimmed.
+    pub(crate) workspace: Option<&'a str>,
+    /// Whether the search applied workspace/branch eligibility in SQLite.
+    pub(crate) local_only: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct RecallWorkspaceContext {
+    pub(crate) affinity: Option<String>,
+    pub(crate) scope: Option<String>,
+    pub(crate) branch: Option<String>,
+}
+
+pub(crate) fn recall_workspace_context(
+    explicit_workspace: Option<&str>,
+    local_only: bool,
+) -> Result<RecallWorkspaceContext, String> {
+    let explicit_workspace = explicit_workspace
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let current_directory = std::env::current_dir().ok();
+    let affinity = explicit_workspace
+        .map(crate::utility::system_map::sanitize_key)
+        .or_else(|| {
+            current_directory
+                .as_deref()
+                .map(|path| crate::utility::system_map::sanitize_key(&path.to_string_lossy()))
+        });
+    let scope = if local_only {
+        explicit_workspace
+            .map(explicit_workspace_scope)
+            .or_else(|| {
+                current_directory
+                    .as_deref()
+                    .map(|path| crate::utility::system_map::workspace_key(&path.to_string_lossy()))
+            })
+    } else {
+        None
+    };
+    if local_only && scope.is_none() {
+        return Err(
+            "local-only recall requires --workspace or an available current directory".to_string(),
+        );
+    }
+    Ok(RecallWorkspaceContext {
+        affinity,
+        scope,
+        branch: local_only.then(memory_branch),
+    })
+}
+
+fn explicit_workspace_scope(value: &str) -> String {
+    if value.contains('\\')
+        || value.contains('/')
+        || value.contains(':')
+        || Path::new(value).is_dir()
+    {
+        crate::utility::system_map::workspace_key(value)
+    } else {
+        value.to_string()
+    }
+}
+
 /// Run the same auto-sync + FTS5 query path as `recall <query>` without
 /// touching stdout/stderr. Returns the prepared FTS expression alongside the
-/// hits so callers (the MCP `recall` tool, programmatic embedders) can render
-/// their own JSON envelope. `Ok(None)` means the query had no searchable
-/// terms after stripping punctuation, mirroring the CLI's "no terms" branch.
-/// Scoped recall: when `workspace_slug` is `Some`, hits from the current
-/// workspace are boosted above cross-project hits (see
-/// [`WORKSPACE_AFFINITY_BOOST`]). Pass `None` for unscoped (global,
-/// cross-project) recall, which is the default for callers that have no
-/// current-workspace context.
+/// matching hits. Lifecycle filtering is always enabled; callers that have no
+/// current-workspace context can still use the unscoped wrapper.
 pub fn search_recall_index(
     claude_home: &Path,
     raw_query: &str,
     limit: usize,
     workspace_slug: Option<&str>,
+) -> Result<Option<RecallSearchResult>, String> {
+    search_recall_index_with_options(
+        claude_home,
+        raw_query,
+        limit,
+        RecallQueryOptions {
+            workspace_affinity: workspace_slug,
+            ..RecallQueryOptions::default()
+        },
+    )
+}
+
+pub(crate) fn search_recall_index_with_options(
+    claude_home: &Path,
+    raw_query: &str,
+    limit: usize,
+    options: RecallQueryOptions<'_>,
 ) -> Result<Option<RecallSearchResult>, String> {
     let trimmed_query = validate_recall_query(raw_query)?;
     if trimmed_query.is_empty() {
@@ -861,13 +969,7 @@ pub fn search_recall_index(
         }
     }
     check_recall_deadline(Some(deadline))?;
-    match cascade_recall_query_until(
-        &connection,
-        trimmed_query,
-        limit,
-        workspace_slug,
-        Some(deadline),
-    )? {
+    match cascade_recall_query_until(&connection, trimmed_query, limit, options, Some(deadline))? {
         Some(cascade) => Ok(Some(RecallSearchResult {
             fts_query: cascade.query_expression,
             stage: cascade.stage,
@@ -1040,7 +1142,9 @@ fn ensure_recall_schema(connection: &Connection) -> Result<(), String> {
                  source_kind TEXT NOT NULL,
                  scope TEXT NOT NULL,
                  branch TEXT NOT NULL,
-                 content_hash TEXT NOT NULL
+                 content_hash TEXT NOT NULL,
+                 lifecycle TEXT NOT NULL,
+                 expires_at INTEGER
              );
              CREATE TABLE IF NOT EXISTS file_state(
                   path TEXT PRIMARY KEY,
@@ -1086,7 +1190,9 @@ fn ensure_recall_schema(connection: &Connection) -> Result<(), String> {
                          source_kind TEXT NOT NULL,
                          scope TEXT NOT NULL,
                          branch TEXT NOT NULL,
-                         content_hash TEXT NOT NULL
+                         content_hash TEXT NOT NULL,
+                         lifecycle TEXT NOT NULL,
+                         expires_at INTEGER
                       );
                       CREATE TABLE file_state(
                           path TEXT PRIMARY KEY,
@@ -1198,6 +1304,11 @@ fn sync_recall_index_until(
         size: String,
         content_hash: String,
         chunks: Vec<MemoryChunk>,
+        source_kind: String,
+        scope: String,
+        branch: String,
+        lifecycle: &'static str,
+        expires_at_millis: Option<i64>,
         was_existing: bool,
     }
     let mut pending: Vec<PendingDocument> = Vec::new();
@@ -1243,12 +1354,20 @@ fn sync_recall_index_until(
             verified_paths.push(document.absolute_path.clone());
             continue;
         }
+        let source_kind = memory_source_kind(&document.absolute_path);
+        let lifecycle_metadata =
+            indexed_lifecycle(&source_kind, &document.absolute_path, &content, now_millis);
         pending.push(PendingDocument {
             path: document.absolute_path.clone(),
             modified_at: document.modified_at_millis.to_string(),
             size: document.size_bytes.to_string(),
             content_hash,
             chunks: split_memory_chunks(&content),
+            source_kind,
+            scope: memory_scope(&document.absolute_path),
+            branch: memory_branch(),
+            lifecycle: lifecycle_metadata.lifecycle,
+            expires_at_millis: lifecycle_metadata.expires_at_millis,
             was_existing: existing_rows.contains_key(&document.absolute_path),
         });
     }
@@ -1282,17 +1401,19 @@ fn sync_recall_index_until(
             let rowid = transaction.last_insert_rowid();
             transaction
                 .execute(
-                    "INSERT INTO document_meta(rowid, path, chunk_index, start_line, end_line, source_kind, scope, branch, content_hash) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    "INSERT INTO document_meta(rowid, path, chunk_index, start_line, end_line, source_kind, scope, branch, content_hash, lifecycle, expires_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                     params![
                         rowid,
                         &document.path,
                         chunk_index as i64,
                         chunk.start_line as i64,
                         chunk.end_line as i64,
-                        memory_source_kind(&document.path),
-                        memory_scope(&document.path),
-                        memory_branch(),
+                        &document.source_kind,
+                        &document.scope,
+                        &document.branch,
                         &document.content_hash,
+                        document.lifecycle,
+                        document.expires_at_millis,
                     ],
                 )
                 .map_err(|database_error| format!("insert memory metadata: {database_error}"))?;
@@ -1455,6 +1576,167 @@ fn memory_branch() -> String {
         .ok()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| "unknown".to_string())
+}
+const ACTIVE_LIFECYCLE: &str = "active";
+const INACTIVE_LIFECYCLE: &str = "inactive";
+
+#[derive(Debug, Clone, Copy)]
+struct IndexedLifecycle {
+    lifecycle: &'static str,
+    expires_at_millis: Option<i64>,
+}
+
+fn indexed_lifecycle(
+    source_kind: &str,
+    path: &str,
+    content: &str,
+    now_millis: i64,
+) -> IndexedLifecycle {
+    let known_structured_kind = matches!(source_kind, "research-cache" | "lessons" | "entities");
+    let is_json = Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("json"));
+    if !known_structured_kind || !is_json {
+        return IndexedLifecycle {
+            lifecycle: ACTIVE_LIFECYCLE,
+            expires_at_millis: None,
+        };
+    }
+
+    let fields = match parse_object_of_strings(content) {
+        Ok(fields) => fields,
+        Err(_) => {
+            // These families are machine-readable records. Indexing malformed
+            // content would make an untrusted hand-edit look like live memory.
+            return IndexedLifecycle {
+                lifecycle: INACTIVE_LIFECYCLE,
+                expires_at_millis: None,
+            };
+        }
+    };
+
+    match source_kind {
+        "research-cache" => indexed_research_cache_lifecycle(&fields, now_millis),
+        "lessons" => {
+            let status = field(&fields, "status")
+                .unwrap_or("")
+                .trim()
+                .to_ascii_lowercase();
+            IndexedLifecycle {
+                lifecycle: if matches!(status.as_str(), "quarantined" | "superseded") {
+                    INACTIVE_LIFECYCLE
+                } else {
+                    ACTIVE_LIFECYCLE
+                },
+                expires_at_millis: None,
+            }
+        }
+        "entities" => IndexedLifecycle {
+            lifecycle: if field(&fields, "supersededBy")
+                .is_some_and(|value| !value.trim().is_empty())
+            {
+                INACTIVE_LIFECYCLE
+            } else {
+                ACTIVE_LIFECYCLE
+            },
+            expires_at_millis: None,
+        },
+        _ => unreachable!("known structured source kind is exhaustive"),
+    }
+}
+
+fn indexed_research_cache_lifecycle(fields: &Record, now_millis: i64) -> IndexedLifecycle {
+    let state = field(fields, "state")
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    let expiry = match indexed_research_cache_expiry_millis(fields) {
+        Ok(expiry) => expiry,
+        Err(()) => {
+            return IndexedLifecycle {
+                lifecycle: INACTIVE_LIFECYCLE,
+                expires_at_millis: None,
+            }
+        }
+    };
+    let expired = expiry.is_some_and(|expires_at| expires_at <= now_millis);
+    IndexedLifecycle {
+        lifecycle: if expired || matches!(state.as_str(), "stale" | "expired") {
+            INACTIVE_LIFECYCLE
+        } else {
+            ACTIVE_LIFECYCLE
+        },
+        expires_at_millis: expiry,
+    }
+}
+
+fn indexed_research_cache_expiry_millis(fields: &Record) -> Result<Option<i64>, ()> {
+    if let Some(expires_at) = field(fields, "expiresAt")
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return parse_rfc3339_millis(expires_at).map(Some).ok_or(());
+    }
+
+    let Some(freshness) = field(fields, "freshness").map(str::trim) else {
+        return Ok(None);
+    };
+    let Some(recorded_at) = field(fields, "recordedAt").map(str::trim) else {
+        return Ok(None);
+    };
+    let Some(ttl_millis) = parse_freshness_ttl_millis(freshness) else {
+        // Free-form freshness guidance is advisory and has no safe absolute
+        // expiry. Keep it active, matching family lookup semantics.
+        return Ok(None);
+    };
+    let recorded_at_millis = parse_rfc3339_millis(recorded_at).ok_or(())?;
+    let expiry = u128::try_from(recorded_at_millis)
+        .ok()
+        .and_then(|recorded| recorded.checked_add(ttl_millis))
+        .and_then(|millis| i64::try_from(millis).ok())
+        .ok_or(())?;
+    Ok(Some(expiry))
+}
+
+fn parse_rfc3339_millis(value: &str) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(value.trim())
+        .ok()
+        .map(|timestamp| timestamp.timestamp_millis())
+}
+
+fn parse_freshness_ttl_millis(freshness: &str) -> Option<u128> {
+    let normalized = freshness.trim().to_ascii_lowercase();
+    let value = normalized
+        .strip_prefix("ttl=")
+        .or_else(|| normalized.strip_prefix("ttl:"))
+        .unwrap_or(&normalized)
+        .trim();
+    if value.is_empty() {
+        return None;
+    }
+    let (amount, unit) = if value.chars().all(|character| character.is_ascii_digit()) {
+        return None;
+    } else if value.split_whitespace().count() == 2 {
+        let mut parts = value.split_whitespace();
+        (parts.next()?, parts.next()?)
+    } else {
+        let split_at = value
+            .find(|character: char| !character.is_ascii_digit())
+            .unwrap_or(value.len());
+        value.split_at(split_at)
+    };
+    let amount = amount.parse::<u128>().ok()?;
+    let unit_millis = match unit.trim() {
+        "s" | "sec" | "secs" | "second" | "seconds" => 1_000,
+        "m" | "min" | "mins" | "minute" | "minutes" => 60_000,
+        "h" | "hr" | "hrs" | "hour" | "hours" => 3_600_000,
+        "d" | "day" | "days" => 86_400_000,
+        "w" | "wk" | "wks" | "week" | "weeks" => 7 * 86_400_000,
+        "mo" | "month" | "months" => 30 * 86_400_000,
+        _ => return None,
+    };
+    amount.checked_mul(unit_millis)
 }
 
 fn collect_indexable_files_until(
@@ -1625,14 +1907,23 @@ pub fn query_recall_index(
     limit: usize,
     workspace_slug: Option<&str>,
 ) -> Result<Vec<RecallHit>, String> {
-    query_recall_index_until(connection, fts_query, limit, workspace_slug, None)
+    query_recall_index_until(
+        connection,
+        fts_query,
+        limit,
+        RecallQueryOptions {
+            workspace_affinity: workspace_slug,
+            ..RecallQueryOptions::default()
+        },
+        None,
+    )
 }
 
 fn query_recall_index_until(
     connection: &Connection,
     fts_query: &str,
     limit: usize,
-    workspace_slug: Option<&str>,
+    options: RecallQueryOptions<'_>,
     deadline: Option<Instant>,
 ) -> Result<Vec<RecallHit>, String> {
     check_recall_deadline(deadline)?;
@@ -1645,6 +1936,9 @@ fn query_recall_index_until(
         .saturating_mul(RERANK_CANDIDATE_MULTIPLIER)
         .min(RERANK_CANDIDATE_CAP)
         .max(limit);
+    let now_millis = recall_now_millis();
+    let scope = options.scope.map(str::to_string);
+    let branch = options.branch.map(str::to_string);
     let mut prepared_statement = connection
         .prepare(
             "SELECT \
@@ -1654,10 +1948,14 @@ fn query_recall_index_until(
                  documents.content, \
                  COALESCE(document_meta.start_line, 1) \
              FROM documents \
-             LEFT JOIN document_meta ON document_meta.rowid = documents.rowid \
+             INNER JOIN document_meta ON document_meta.rowid = documents.rowid \
              WHERE documents MATCH ?4 \
+               AND document_meta.lifecycle = 'active' \
+               AND (document_meta.expires_at IS NULL OR document_meta.expires_at > ?5) \
+               AND (?6 IS NULL OR document_meta.scope = ?6) \
+               AND (?7 IS NULL OR document_meta.branch = ?7 OR document_meta.branch = 'unknown') \
              ORDER BY bm25(documents) \
-             LIMIT ?5",
+             LIMIT ?8",
         )
         .map_err(|database_error| format!("prepare query: {database_error}"))?;
     let open_marker = SNIPPET_OPEN_MARKER.to_string();
@@ -1669,6 +1967,9 @@ fn query_recall_index_until(
                 close_marker,
                 SNIPPET_TOKENS,
                 fts_query,
+                now_millis,
+                scope,
+                branch,
                 candidate_limit as i64
             ],
             |row| {
@@ -1704,7 +2005,12 @@ fn query_recall_index_until(
     }
     check_recall_deadline(deadline)?;
     Ok(bound_recall_hits(
-        rerank_by_relevance(candidates, &raw_query_terms, limit, workspace_slug),
+        rerank_by_relevance(
+            candidates,
+            &raw_query_terms,
+            limit,
+            options.workspace_affinity,
+        ),
         limit,
     ))
 }
@@ -1896,14 +2202,23 @@ fn cascade_recall_query(
     limit: usize,
     workspace_slug: Option<&str>,
 ) -> Result<Option<CascadeResult>, String> {
-    cascade_recall_query_until(connection, raw_query, limit, workspace_slug, None)
+    cascade_recall_query_until(
+        connection,
+        raw_query,
+        limit,
+        RecallQueryOptions {
+            workspace_affinity: workspace_slug,
+            ..RecallQueryOptions::default()
+        },
+        None,
+    )
 }
 
 fn cascade_recall_query_until(
     connection: &Connection,
     raw_query: &str,
     limit: usize,
-    workspace_slug: Option<&str>,
+    options: RecallQueryOptions<'_>,
     deadline: Option<Instant>,
 ) -> Result<Option<CascadeResult>, String> {
     check_recall_deadline(deadline)?;
@@ -1913,12 +2228,7 @@ fn cascade_recall_query_until(
         None => return Ok(None),
     };
 
-    let exact_hits = match deadline {
-        Some(deadline) => {
-            query_recall_index_until(connection, &exact, limit, workspace_slug, Some(deadline))?
-        }
-        None => query_recall_index(connection, &exact, limit, workspace_slug)?,
-    };
+    let exact_hits = query_recall_index_until(connection, &exact, limit, options, deadline)?;
     if !exact_hits.is_empty() {
         return Ok(Some(CascadeResult {
             query_expression: exact,
@@ -1931,16 +2241,8 @@ fn cascade_recall_query_until(
     // token's OR and AND expressions are identical, so build_relaxed returns
     // None and we skip straight to fuzzy).
     if let Some(relaxed) = build_relaxed_fts_query(raw_query) {
-        let relaxed_hits = match deadline {
-            Some(deadline) => query_recall_index_until(
-                connection,
-                &relaxed,
-                limit,
-                workspace_slug,
-                Some(deadline),
-            )?,
-            None => query_recall_index(connection, &relaxed, limit, workspace_slug)?,
-        };
+        let relaxed_hits =
+            query_recall_index_until(connection, &relaxed, limit, options, deadline)?;
         if !relaxed_hits.is_empty() {
             return Ok(Some(CascadeResult {
                 query_expression: relaxed,
@@ -1954,7 +2256,7 @@ fn cascade_recall_query_until(
     // matching cannot reach (e.g. "webhok" -> "webhook").
     let tokens = clean_query_tokens(raw_query);
     let fuzzy_hits = bound_recall_hits(
-        query_recall_index_fuzzy_until(connection, &tokens, limit, deadline)?,
+        query_recall_index_fuzzy_until(connection, &tokens, limit, options, deadline)?,
         limit,
     );
     if !fuzzy_hits.is_empty() {
@@ -2030,6 +2332,7 @@ fn query_recall_index_fuzzy_until(
     connection: &Connection,
     query_tokens: &[String],
     limit: usize,
+    options: RecallQueryOptions<'_>,
     deadline: Option<Instant>,
 ) -> Result<Vec<RecallHit>, String> {
     check_recall_deadline(deadline)?;
@@ -2037,11 +2340,22 @@ fn query_recall_index_fuzzy_until(
     if query_tokens.is_empty() {
         return Ok(Vec::new());
     }
+    let now_millis = recall_now_millis();
+    let scope = options.scope.map(str::to_string);
+    let branch = options.branch.map(str::to_string);
     let mut statement = connection
-        .prepare("SELECT path, content FROM documents")
+        .prepare(
+            "SELECT documents.path, documents.content \
+             FROM documents \
+             INNER JOIN document_meta ON document_meta.rowid = documents.rowid \
+             WHERE document_meta.lifecycle = 'active' \
+               AND (document_meta.expires_at IS NULL OR document_meta.expires_at > ?1) \
+               AND (?2 IS NULL OR document_meta.scope = ?2) \
+               AND (?3 IS NULL OR document_meta.branch = ?3 OR document_meta.branch = 'unknown')",
+        )
         .map_err(|database_error| format!("prepare fuzzy scan: {database_error}"))?;
     let row_iterator = statement
-        .query_map([], |row| {
+        .query_map(params![now_millis, scope, branch], |row| {
             let path: String = row.get(0)?;
             let content: String = row.get(1)?;
             Ok((path, content))
@@ -2185,12 +2499,16 @@ fn build_search_json(
     matches: &[RecallHit],
     limit: usize,
     stage: &str,
+    replay_workspace: Option<&str>,
+    local_only: bool,
 ) -> Value {
     let (projected_query, query_truncated) =
         bounded_projection_text(query, MAX_RECALL_QUERY_PROJECTION_CHARS);
     let query_digest = sha256_hex(query.as_bytes());
     let projected_home =
         bounded_projection_text(&display_path(claude_home), MAX_RECALL_HOME_PROJECTION_CHARS).0;
+    let projected_replay_workspace = replay_workspace
+        .map(|value| bounded_projection_text(value, MAX_RECALL_HOME_PROJECTION_CHARS).0);
     let projection = RecallSearchProjection {
         query: &projected_query,
         query_truncated,
@@ -2199,7 +2517,10 @@ fn build_search_json(
         claude_home,
         stage,
         limit,
+        replay_workspace: projected_replay_workspace.as_deref(),
+        local_only,
     };
+
     let mut selected: Vec<RecallHit> = Vec::new();
     let mut seen = std::collections::HashSet::new();
     let mut dropped = false;
@@ -2249,7 +2570,10 @@ fn build_search_json(
         claude_home,
         stage,
         limit,
+        replay_workspace: projection.replay_workspace,
+        local_only: projection.local_only,
     };
+
     recall_search_payload(&fallback_projection, &[], true)
 }
 
@@ -2266,6 +2590,8 @@ fn recall_search_payload(
                 projection.limit,
                 hit,
                 projection.claude_home,
+                projection.replay_workspace,
+                projection.local_only,
             )
         })
         .collect();
@@ -2302,9 +2628,18 @@ struct RecallSearchProjection<'a> {
     claude_home: &'a Path,
     stage: &'a str,
     limit: usize,
+    replay_workspace: Option<&'a str>,
+    local_only: bool,
 }
 
-fn recall_hit_value(query: &str, limit: usize, hit: &RecallHit, claude_home: &Path) -> Value {
+fn recall_hit_value(
+    query: &str,
+    limit: usize,
+    hit: &RecallHit,
+    claude_home: &Path,
+    replay_workspace: Option<&str>,
+    local_only: bool,
+) -> Value {
     let memory_id = sha256_hex(
         format!(
             "recall-memory\0{}\0{}\0{}",
@@ -2322,9 +2657,11 @@ fn recall_hit_value(query: &str, limit: usize, hit: &RecallHit, claude_home: &Pa
     let relative = relativize(claude_home, &PathBuf::from(&hit.absolute_path));
     let retrieval_query = query.to_string();
     let retrieval_limit = limit.clamp(1, MAX_RECALL_LIMIT);
-    let retrieval_ref = format!(
-        "keel memory recall {:?} --limit {retrieval_limit}",
-        retrieval_query
+    let retrieval_ref = recall_retrieval_ref(
+        &retrieval_query,
+        retrieval_limit,
+        replay_workspace,
+        local_only,
     );
     Value::Object(vec![
         ("path".into(), Value::String(relative)),
@@ -2348,6 +2685,22 @@ fn recall_hit_value(query: &str, limit: usize, hit: &RecallHit, claude_home: &Pa
         ),
         ("retrievalRef".into(), Value::String(retrieval_ref)),
     ])
+}
+
+fn recall_retrieval_ref(
+    query: &str,
+    limit: usize,
+    replay_workspace: Option<&str>,
+    local_only: bool,
+) -> String {
+    let mut retrieval_ref = format!("keel memory recall {:?} --limit {limit}", query);
+    if let Some(workspace) = replay_workspace {
+        retrieval_ref.push_str(&format!(" --workspace {workspace:?}"));
+    }
+    if local_only {
+        retrieval_ref.push_str(" --local-only");
+    }
+    retrieval_ref
 }
 
 fn bounded_projection_text(text: &str, max_chars: usize) -> (String, bool) {
@@ -2532,7 +2885,10 @@ mod tests {
             &hits,
             MAX_RECALL_LIMIT,
             "exact",
+            None,
+            false,
         );
+
         let rendered = serialized_value(&payload);
         assert!(
             rendered.len() <= MAX_RECALL_RESULT_BYTES,
@@ -2551,6 +2907,33 @@ mod tests {
             "query bound missing: {text}"
         );
         assert!(serde_json::from_str::<serde_json::Value>(&text).is_ok());
+    }
+
+    #[test]
+    fn recall_recovery_reference_preserves_scope_filters() {
+        let payload = build_search_json(
+            "webhook",
+            Path::new("C:/memory"),
+            &[RecallHit {
+                absolute_path: "C:/memory/notes.md".into(),
+                score: 0.5,
+                line: 1,
+                snippet: "webhook signature".into(),
+            }],
+            1,
+            "exact",
+            Some("project"),
+            true,
+        );
+        let text = String::from_utf8(serialized_value(&payload)).expect("json utf8");
+        let parsed: serde_json::Value = serde_json::from_str(&text).expect("valid recall json");
+        let reference = parsed["matches"][0]["retrievalRef"]
+            .as_str()
+            .expect("retrievalRef is a string");
+        assert!(
+            reference.contains("--workspace \"project\"") && reference.contains("--local-only"),
+            "recovery reference must preserve retrieval scope: {reference}"
+        );
     }
 
     #[test]
@@ -3375,6 +3758,149 @@ mod tests {
         let arguments = vec!["webhook".to_string(), "--limit".to_string()];
         let error_message = split_flags_and_query(&arguments).expect_err("missing value");
         assert!(error_message.contains("--limit"), "error: {error_message}");
+    }
+    #[test]
+    fn scoped_recall_filters_scope_before_exact_and_fuzzy_limits() {
+        run_with_home("keel-recall-scoped-limits", |claude_home| {
+            for index in 0..8 {
+                write_memory(
+                    claude_home,
+                    &format!("memories/workspaces/other/foreign-{index}.md"),
+                    "# Webhook\nforeign workspace webhook notes\n",
+                );
+            }
+            write_memory(
+                claude_home,
+                "memories/workspaces/project/local.md",
+                "# Webhook\ncurrent workspace webhook notes\n",
+            );
+            let options = RecallQueryOptions {
+                scope: Some("project"),
+                ..RecallQueryOptions::default()
+            };
+
+            let exact = search_recall_index_with_options(claude_home, "webhook", 1, options)
+                .expect("scoped exact search")
+                .expect("exact query");
+            assert_eq!(exact.hits.len(), 1);
+            assert!(
+                exact.hits[0]
+                    .absolute_path
+                    .ends_with("workspaces\\project\\local.md")
+                    || exact.hits[0]
+                        .absolute_path
+                        .ends_with("workspaces/project/local.md"),
+                "scope filter must run before LIMIT: {:?}",
+                exact.hits
+            );
+
+            let fuzzy = search_recall_index_with_options(claude_home, "webhok", 1, options)
+                .expect("scoped fuzzy search")
+                .expect("fuzzy query");
+            assert_eq!(fuzzy.stage, "fuzzy");
+            assert_eq!(fuzzy.hits.len(), 1);
+            assert!(
+                fuzzy.hits[0]
+                    .absolute_path
+                    .ends_with("workspaces\\project\\local.md")
+                    || fuzzy.hits[0]
+                        .absolute_path
+                        .ends_with("workspaces/project/local.md"),
+                "fuzzy scope filter must run before LIMIT: {:?}",
+                fuzzy.hits
+            );
+
+            let home_argument = claude_home.to_string_lossy().to_string();
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let exit_code = run_recall_command(
+                "memory",
+                &[
+                    "webhook".to_string(),
+                    "--limit".to_string(),
+                    "1".to_string(),
+                    "--workspace".to_string(),
+                    "project".to_string(),
+                    "--local-only".to_string(),
+                    "--claude-home".to_string(),
+                    home_argument,
+                ],
+                &mut stdout,
+                &mut stderr,
+            );
+            assert_eq!(exit_code, 0, "stderr: {}", String::from_utf8_lossy(&stderr));
+            let rendered = String::from_utf8_lossy(&stdout);
+            assert!(rendered.contains("workspaces/project/local.md"));
+            assert!(!rendered.contains("workspaces/other/foreign-"));
+        });
+    }
+
+    #[test]
+    fn recall_excludes_inactive_structured_memory_but_preserves_files() {
+        run_with_home("keel-recall-lifecycle", |claude_home| {
+            write_memory(
+                claude_home,
+                "memory/research-cache/stale.json",
+                "{\n  \"id\": \"stale\",\n  \"question\": \"lifecycle-boundary\",\n  \"answer\": \"stale answer\",\n  \"state\": \"stale\"\n}\n",
+            );
+            write_memory(
+                claude_home,
+                "memory/research-cache/expired.json",
+                "{\n  \"id\": \"expired\",\n  \"question\": \"lifecycle-boundary\",\n  \"answer\": \"expired answer\",\n  \"state\": \"fresh\",\n  \"expiresAt\": \"1970-01-01T00:00:00Z\"\n}\n",
+            );
+            write_memory(
+                claude_home,
+                "memory/lessons/quarantined.json",
+                "{\n  \"id\": \"quarantined\",\n  \"pattern\": \"lifecycle-boundary\",\n  \"evidence\": \"regressed\",\n  \"response\": \"do not reuse\",\n  \"status\": \"quarantined\"\n}\n",
+            );
+            write_memory(
+                claude_home,
+                "memory/entities/superseded.json",
+                "{\n  \"id\": \"old\",\n  \"name\": \"lifecycle-boundary\",\n  \"summary\": \"old decision\",\n  \"supersededBy\": \"new\"\n}\n",
+            );
+            write_memory(
+                claude_home,
+                "memory/lessons/active.json",
+                "{\n  \"id\": \"active\",\n  \"pattern\": \"lifecycle-boundary\",\n  \"evidence\": \"verified\",\n  \"response\": \"reuse\",\n  \"status\": \"active\"\n}\n",
+            );
+
+            let database_path = recall_database_path(claude_home);
+            let mut connection = open_recall_connection(&database_path).expect("open recall index");
+            sync_recall_index(&mut connection, claude_home, true).expect("sync recall index");
+            let query = build_fts_query("lifecycle-boundary").expect("query");
+            let hits = query_recall_index(&connection, &query, 20, None).expect("query index");
+            let paths: Vec<&str> = hits.iter().map(|hit| hit.absolute_path.as_str()).collect();
+            assert!(
+                paths.iter().any(|path| path.ends_with("active.json")),
+                "active lesson should remain recallable: {paths:?}"
+            );
+            for blocked in [
+                "stale.json",
+                "expired.json",
+                "quarantined.json",
+                "superseded.json",
+            ] {
+                assert!(
+                    paths.iter().all(|path| !path.ends_with(blocked)),
+                    "inactive record leaked into recall: {blocked}; {paths:?}"
+                );
+            }
+
+            let expiry: Option<i64> = connection
+                .query_row(
+                    "SELECT expires_at FROM document_meta WHERE path LIKE ?1 LIMIT 1",
+                    params!["%expired.json"],
+                    |row| row.get(0),
+                )
+                .expect("expired metadata");
+            assert!(expiry.is_some(), "absolute expiry must be indexed");
+            assert!(
+                claude_home
+                    .join("memory/research-cache/expired.json")
+                    .is_file(),
+                "lifecycle filtering must not delete source records"
+            );
+        });
     }
 }
 

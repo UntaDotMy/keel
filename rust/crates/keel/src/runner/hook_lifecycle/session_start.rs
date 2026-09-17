@@ -26,7 +26,7 @@ pub(super) fn run_hook_lifecycle(
         prune_tool_timings_store(standard_error);
         prune_observations_store(standard_error);
         prune_state_marker_stores(standard_error);
-        run_session_end_learning(standard_error);
+        prune_memory_record_stores(standard_error);
     }
 
     // PreCompact is the OTHER point the learning cycle must run. Working memory is

@@ -61,8 +61,9 @@ treated as authenticity proofs. Retention and stale staging cleanup remain
 bounded and recoverable.
 
 Memory recall is pull-based: results contain a bounded excerpt, stable memory
-and provenance ids, a dedupe key, and a retrieval reference. Full durable memory
-stays in the recall index and memory lane.
+and provenance ids, a dedupe key, and a retrieval reference. The reference
+replays the caller's scope, so `--workspace` and `--local-only` survive recovery.
+Full durable memory stays in the recall index and memory lane.
 
 UI verification writes screenshots to RawStore plus compact
 `ui-verification/<task>/manifest.json` and `verdicts.json` artifacts. An unclear
@@ -96,12 +97,21 @@ adapters still expose only the capabilities they can prove; unsupported host
 boundaries remain explicitly unprotected rather than being represented as a
 successful governed path.
 
-Protocol era is stated the same way. The MCP revision in force (`2026-07-28`)
-distinguishes *modern* servers (per-request `_meta` version, `server/discover`,
-`resultType`, `ttlMs`/`cacheScope` on list results), *legacy* servers
-(`initialize` handshake), and *dual-era* servers that serve both. Keel is a
-legacy-era server speaking `2025-11-25`, and it rejects the older `2024-11-05`
-initialize on Streamable HTTP with an explicit migration message instead of
-mis-serving it. A legacy client therefore interoperates and a modern one does
-not; no request silently mixes the two eras. Cleanup status and the full
-limitation list are in [`gateway-cleanup-report.md`](gateway-cleanup-report.md).
+Keel implements only [MCP 2026-07-28](https://modelcontextprotocol.io/specification/2026-07-28/basic/versioning).
+Every request supplies `params._meta["io.modelcontextprotocol/protocolVersion"]`
+and `params._meta["io.modelcontextprotocol/clientCapabilities"]`; client identity
+metadata is optional and does not authorize application state. Query-free
+`server/discover` returns supported versions and capabilities; `keel/discover`
+remains the separate query-based capability search. There is no initialization
+handshake, legacy downgrade, or HTTP protocol session. Legacy requests fail with
+`-32022`; HTTP routing metadata mismatches fail with `-32020`.
+
+HTTP clients send `MCP-Protocol-Version`, `Mcp-Method`, and `Mcp-Name` for named
+operations, matching their JSON-RPC body. Catalog pages preserve callable schemas,
+carry private cache hints, and bind cursors to application identity, snapshot,
+budget and expiry. Continuations never refresh a snapshot's expiry; their cache
+TTL cannot outlive it. Mutable resource reads are private with zero cache TTL.
+See the [HTTP binding](https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http)
+and [cache contract](https://modelcontextprotocol.io/specification/2026-07-28/server/utilities/caching).
+[Cleanup history](gateway-cleanup-report.md) retains earlier measurements, not
+proof of the current implementation's verification.

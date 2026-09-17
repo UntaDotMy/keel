@@ -37,6 +37,14 @@ fn create_test_tree(label: &str) -> TestTree {
 fn keel_cmd(tree: &TestTree) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_keel"));
     cmd.current_dir(&tree.root);
+    for name in [
+        "KEEL_MCP_SESSION_ID",
+        "KEEL_MCP_WORKSPACE_ID",
+        "CLAUDE_CODE_SESSION_ID",
+        "CODEX_THREAD_ID",
+    ] {
+        cmd.env_remove(name);
+    }
     cmd.env("KEEL_HOME", &tree.home);
     cmd.env("CLAUDE_TARGET_OVERRIDE", &tree.home);
     cmd.env("CLAUDE_SKILLS_HOOK", "test");
@@ -72,6 +80,8 @@ fn ui_verify_pass_and_rawstore_retrieval() {
     .expect("write fixture");
 
     let assert_res = keel_cmd(&tree)
+        .env("KEEL_MCP_SESSION_ID", "ui-mcp-session")
+        .env("KEEL_MCP_WORKSPACE_ID", "opaque-ui-workspace")
         .args([
             "verify",
             "ui",
@@ -94,13 +104,20 @@ fn ui_verify_pass_and_rawstore_retrieval() {
     assert_eq!(record["verdict"], "pass");
     let raw_id = record["screenshot_id"].as_str().expect("raw_id present");
 
-    let raw_assert = keel_cmd(&tree).args(["raw", raw_id]).assert().success();
+    let raw_assert = keel_cmd(&tree)
+        .env("KEEL_MCP_SESSION_ID", "ui-mcp-session")
+        .env("KEEL_MCP_WORKSPACE_ID", "opaque-ui-workspace")
+        .args(["raw", raw_id])
+        .assert()
+        .success();
 
     let raw_stdout = String::from_utf8(raw_assert.get_output().stdout.clone()).unwrap();
     assert!(raw_stdout.contains("screenshot:"));
     assert!(raw_stdout.contains("screenshot.png"));
 
     let raw_path_assert = keel_cmd(&tree)
+        .env("KEEL_MCP_SESSION_ID", "ui-mcp-session")
+        .env("KEEL_MCP_WORKSPACE_ID", "opaque-ui-workspace")
         .args(["raw", "--path", raw_id])
         .assert()
         .success();
@@ -339,5 +356,73 @@ fn ui_verify_rejects_fixture_outside_workspace_boundary() {
     assert!(
         stderr.contains("escapes workspace boundary"),
         "stderr: {stderr}"
+    );
+}
+
+#[test]
+fn ui_verify_screenshot_required_missing_data_maps_to_needs_human() {
+    let tree = create_test_tree("missing_screenshot");
+    let fixture_path = tree.root.join("fixture_no_screenshot.json");
+
+    let fixture_content = serde_json::json!({
+        "criterion": {
+            "state_name": "billing_overview",
+            "route_or_screen": "/billing",
+            "preconditions": [],
+            "expected_visible_text": ["Invoices", "Payment Method"],
+            "expected_interactions": [],
+            "screenshot_required": true
+        },
+        "screen_text": ["Invoices", "Payment Method", "Active Subscription"]
+        // Note: screenshot_base64 is intentionally omitted
+    });
+
+    fs::write(
+        &fixture_path,
+        serde_json::to_string(&fixture_content).unwrap(),
+    )
+    .expect("write fixture");
+
+    let assert_res = keel_cmd(&tree)
+        .args([
+            "verify",
+            "ui",
+            "--fixture",
+            "fixture_no_screenshot.json",
+            "--adapter",
+            "playwright",
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let stdout_str = String::from_utf8(assert_res.get_output().stdout.clone()).unwrap();
+    let record: Value = serde_json::from_str(&stdout_str).expect("parse json record");
+
+    assert_eq!(record["state"], "billing_overview");
+    assert_eq!(record["verdict"], "needs_human");
+    assert_eq!(record["review_status"], "needs_human");
+    let reasons = record["reasons"].as_array().expect("reasons array");
+    let combined_reasons = reasons
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>()
+        .join("; ");
+    assert!(combined_reasons
+        .contains("Screenshot proof is required but no screenshot capture was provided"));
+
+    let raw_id = record["screenshot_id"].as_str().expect("raw_id present");
+    let raw_path_assert = keel_cmd(&tree)
+        .args(["raw", "--path", raw_id])
+        .assert()
+        .success();
+    let raw_dir_str = String::from_utf8(raw_path_assert.get_output().stdout.clone())
+        .unwrap()
+        .trim()
+        .to_string();
+    let raw_dir = PathBuf::from(&raw_dir_str);
+    assert!(
+        !raw_dir.join("screenshot.png").is_file(),
+        "placeholder screenshot.png must not be written when missing"
     );
 }

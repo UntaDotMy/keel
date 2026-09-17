@@ -34,6 +34,184 @@ fn seed_brief(claude_home: &std::path::Path, id: &str, request: &str) {
     .expect("seed brief");
 }
 
+/// Build a real plan-bound evidence lane for one brief: a plan whose ticket
+/// carries current, hashed, machine-resolvable evidence, plus a brief pointing
+/// at the workspace with a criterion-specific proof binding.
+fn seed_plan_bound_evidence(
+    workspace: &std::path::Path,
+    claude_home: &std::path::Path,
+    brief_id: &str,
+    request: &str,
+) -> (String, String, String) {
+    use crate::utility::hashing::sha256_hex;
+
+    fs::create_dir_all(workspace.join("src")).expect("create fixture source directory");
+    fs::write(
+        workspace.join("src/lib.rs"),
+        "pub fn sample() -> u8 { 1 }\n",
+    )
+    .expect("write fixture source");
+
+    let plan_arguments = |action: &str, plan_id: &str| -> Vec<String> {
+        let mut arguments = vec![
+            action.to_string(),
+            "--workspace-root".to_string(),
+            workspace.to_string_lossy().into_owned(),
+            "--claude-home".to_string(),
+            claude_home.to_string_lossy().into_owned(),
+            "--json".to_string(),
+        ];
+        if action != "specify" {
+            arguments.extend(["--plan".to_string(), plan_id.to_string()]);
+        } else {
+            arguments.extend(["--request".to_string(), request.to_string()]);
+        }
+        arguments
+    };
+    let run_plan = |arguments: &[String], step: &str| -> serde_json::Value {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = crate::utility::plan::run_plan_command(arguments, &mut stdout, &mut stderr);
+        assert_eq!(
+            code,
+            0,
+            "{step} failed: {}",
+            String::from_utf8_lossy(&stderr)
+        );
+        serde_json::from_slice(&stdout).expect("parse plan JSON output")
+    };
+
+    let payload = run_plan(&plan_arguments("specify", ""), "plan specify");
+    let plan_id = payload["planId"].as_str().expect("plan id").to_string();
+    let plan_path = std::path::PathBuf::from(payload["planPath"].as_str().expect("plan path"));
+    let research_payload = run_plan(
+        &[
+            "research".to_string(),
+            "--plan".to_string(),
+            plan_id.clone(),
+            "--claim".to_string(),
+            "The fixture workspace documents a single sample function.".to_string(),
+            "--source-url".to_string(),
+            "local-code://src/lib.rs".to_string(),
+            "--source-type".to_string(),
+            "local-code".to_string(),
+            "--retrieved-at".to_string(),
+            chrono::Utc::now().to_rfc3339(),
+            "--support".to_string(),
+            "The fixture wrote src/lib.rs with one sample function.".to_string(),
+            "--freshness".to_string(),
+            "local-only".to_string(),
+            "--used-by".to_string(),
+            "REQ-001,AC-001".to_string(),
+            "--workspace-root".to_string(),
+            workspace.to_string_lossy().into_owned(),
+            "--claude-home".to_string(),
+            claude_home.to_string_lossy().into_owned(),
+            "--json".to_string(),
+        ],
+        "plan research",
+    );
+    let _ = research_payload;
+    let architecture = format!(
+        "---\nschema_version: 1\nartifact: architecture\nplan_id: {plan_id}\n---\n\nStatus: complete\n\n# Architecture Note\n\n## 1. Current architecture relevant to scope\n\n[verified: CLM-001] The established source owner was read.\n\n## 2. Proposed architecture\n\n[derived: CLM-002] Change only the existing owner path.\n\nInput bound: One bounded plan artifact.\n\nPolicy owner: The existing planner remains the lifecycle owner.\n\n## 3. Components/files/interfaces changed\n\n- Component: src/lib.rs public command API | Requirements: REQ-001 | Acceptance: AC-001\n\n## 4. Data/control flow\n\nThe command updates the established owner and existing callers observe the result.\n\n## 5. Alternatives considered\n\nAlternative: Add a second owner.\n\nTradeoff: A second owner duplicates the evidence chain and drifts.\n\n## 6. Why the chosen option fits requirements\n\nChosen option: Extend the established owner.\n\nInfrastructure reuse: Reuse the planner and review gate infrastructure.\n\nConstraint fit: The design maps only REQ-001 and AC-001.\n\n## 7. Risks and mitigations\n\nRisk: A stale design could reach review.\n\nMitigation: Pre-PR review validates the named plan architecture.\n\n## 8. Backward compatibility\n\nCompatibility: Existing fields and behavior remain available.\n\nHost impact: none; host contracts remain unchanged.\n\n## 9. Error handling and fallback semantics\n\nFailure status: Invalid architecture blocks pre-PR review.\n\nFallback: none; repair the canonical architecture note.\n\nVisibility: reviewer output lists the design defect.\n\n## 10. Security/privacy implications\n\nSecurity/privacy: The gate reads one local artifact and no credentials.\n\n## 11. Performance/token impact\n\nToken impact: Architecture input stays bounded.\n\nMeasurement plan: Run the fixed-context budget test.\n\n## 12. Test strategy\n\nVerification: Run review unit tests and planner integration tests.\n\nAcceptance references: AC-001\n\n## 13. Rollback strategy\n\nRollback: Revert the implementation commit.\n\n## 14. Requirement and research references\n\nRequirement references: REQ-001\n\nAcceptance references: AC-001\n\nClaim references: CLM-001, CLM-002\n"
+    );
+    std::fs::write(plan_path.join("architecture.md"), &architecture)
+        .expect("write fixture architecture");
+    run_plan(&plan_arguments("design", &plan_id), "plan design");
+    run_plan(&plan_arguments("tasks", &plan_id), "plan tasks");
+
+    let ticket_path = plan_path.join("task-001.json");
+    let mut ticket: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&ticket_path).expect("read task ticket"))
+            .expect("parse task ticket");
+    let source = fs::read(workspace.join("src/lib.rs")).expect("read fixture source");
+    let output = b"command completed successfully\n";
+    fs::write(workspace.join("command-output.txt"), output).expect("write output");
+    fs::create_dir_all(plan_path.join("evidence")).expect("create evidence directory");
+    let recorded_at = chrono::Utc::now().to_rfc3339();
+    for subtasks in ticket["layers"]
+        .as_object_mut()
+        .expect("layers")
+        .values_mut()
+    {
+        for subtask in subtasks.as_array_mut().expect("subtasks") {
+            let evidence_type = subtask["expected_evidence_type"]
+                .as_str()
+                .expect("expected evidence type");
+            let id = subtask["id"].as_str().expect("subtask id").to_string();
+            let path = format!("evidence/{id}.json");
+            let mut evidence = serde_json::json!({
+                "schema_version": 1, "artifact": "task_evidence",
+                "plan_id": plan_id, "task_id": "TASK-001", "subtask_id": id,
+                "evidence_type": evidence_type, "recorded_at": recorded_at,
+                "result": "pass",
+                "source_path": "src/lib.rs",
+                "source_hash": format!("sha256:{}", sha256_hex(&source)),
+                "output_path": "command-output.txt",
+                "output_hash": format!("sha256:{}", sha256_hex(output))
+            });
+            match evidence_type {
+                "command" => {
+                    evidence["command"] = serde_json::json!("fixture verification");
+                    evidence["exit_code"] = serde_json::json!(0);
+                }
+                "named_test" => {
+                    evidence["test_name"] = serde_json::json!("sample returns one");
+                }
+                "lint_diagnostic" => {
+                    evidence["tool"] = serde_json::json!("fixture linter");
+                    evidence["exit_code"] = serde_json::json!(0);
+                }
+                "source_hash" => {}
+                unexpected => panic!("unexpected generated evidence type: {unexpected}"),
+            }
+            let body = serde_json::to_vec(&evidence).expect("serialize evidence");
+            fs::write(plan_path.join(&path), &body).expect("write evidence");
+            subtask["status"] = serde_json::json!("done");
+            subtask["verification_timestamp"] = serde_json::json!(recorded_at);
+            subtask["evidence_ref"] = serde_json::json!({
+                "path": path,
+                "content_hash": format!("sha256:{}", sha256_hex(&body))
+            });
+        }
+    }
+    ticket["status"] = serde_json::json!("done");
+    fs::write(
+        &ticket_path,
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&ticket).expect("render ticket")
+        ),
+    )
+    .expect("write evidence ticket");
+    run_plan(
+        &plan_arguments("tasks", &plan_id),
+        "refresh evidence-bound RTM",
+    );
+    run_plan(
+        &plan_arguments("check", &plan_id),
+        "plan check with evidence",
+    );
+
+    let criterion = "requested behavior is verified";
+    let requirement_id = crate::review::stable_requirement_id(criterion);
+    let proof = format!("{requirement_id}=AC-001");
+    write_brief(
+        claude_home,
+        &create_brief(
+            brief_id.to_string(),
+            request.to_string(),
+            Vec::new(),
+            vec![criterion.to_string()],
+            Vec::new(),
+            workspace.to_string_lossy().into_owned(),
+            "1970-01-01T00:00:00Z".to_string(),
+        ),
+    )
+    .expect("seed plan-bound brief");
+    (plan_id, requirement_id, proof)
+}
+
 #[test]
 fn completion_gate_requires_acceptance_criteria_and_proof() {
     let temporary_directory = tempdir_under("keel-cg-required-evidence");
@@ -590,8 +768,14 @@ fn working_brief_unknown_subcommand_returns_error() {
 fn completion_gate_check_passes_on_fresh_install_and_persists_proof() {
     let temporary_directory = tempdir_under("keel-cg-fresh");
     let claude_home = temporary_directory.join("claude-home");
+    let workspace = temporary_directory.join("workspace");
     fs::create_dir_all(&claude_home).expect("create claude home");
-    seed_brief(&claude_home, "wb-pass", "wire pagination on /users");
+    let (plan_id, _requirement_id, proof) = seed_plan_bound_evidence(
+        &workspace,
+        &claude_home,
+        "wb-pass",
+        "wire pagination on /users",
+    );
 
     let mut stdout: Vec<u8> = Vec::new();
     let mut stderr: Vec<u8> = Vec::new();
@@ -602,15 +786,23 @@ fn completion_gate_check_passes_on_fresh_install_and_persists_proof() {
             "check".to_string(),
             "--brief-id".to_string(),
             "wb-pass".to_string(),
+            "--plan".to_string(),
+            plan_id,
             "--proof".to_string(),
-            "ladder green".to_string(),
+            proof,
             "--claude-home".to_string(),
             claude_home.to_string_lossy().to_string(),
         ],
         &mut stdout,
         &mut stderr,
     );
-    assert_eq!(exit_code, 0, "stderr: {}", String::from_utf8_lossy(&stderr));
+    assert_eq!(
+        exit_code,
+        0,
+        "stderr: {} | stdout: {}",
+        String::from_utf8_lossy(&stderr),
+        String::from_utf8_lossy(&stdout)
+    );
     let output = String::from_utf8_lossy(&stdout).to_string();
     assert!(
         output.contains("brief=wb-pass status=ok"),
@@ -624,7 +816,7 @@ fn completion_gate_check_passes_on_fresh_install_and_persists_proof() {
     let stored = crate::utility::working_brief::read_brief(&claude_home, "wb-pass")
         .expect("read brief")
         .expect("brief exists");
-    assert_eq!(stored.proof, "ladder green");
+    assert!(stored.proof.ends_with("=AC-001"));
 
     let _ = fs::remove_dir_all(&temporary_directory);
 }
@@ -836,8 +1028,10 @@ fn completion_gate_check_fails_on_whitespace_only_proof() {
 fn completion_gate_check_json_emits_structured_payload() {
     let temporary_directory = tempdir_under("keel-cg-json");
     let claude_home = temporary_directory.join("claude-home");
+    let workspace = temporary_directory.join("workspace");
     fs::create_dir_all(&claude_home).expect("create claude home");
-    seed_brief(&claude_home, "wb-json", "structured payload");
+    let (plan_id, _requirement_id, proof) =
+        seed_plan_bound_evidence(&workspace, &claude_home, "wb-json", "structured payload");
 
     let mut stdout: Vec<u8> = Vec::new();
     let mut stderr: Vec<u8> = Vec::new();
@@ -848,8 +1042,10 @@ fn completion_gate_check_json_emits_structured_payload() {
             "check".to_string(),
             "--brief-id".to_string(),
             "wb-json".to_string(),
+            "--plan".to_string(),
+            plan_id,
             "--proof".to_string(),
-            "tests green".to_string(),
+            proof,
             "--json".to_string(),
             "--claude-home".to_string(),
             claude_home.to_string_lossy().to_string(),

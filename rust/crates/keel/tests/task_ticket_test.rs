@@ -1,4 +1,5 @@
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -121,15 +122,6 @@ fn check_failure(tree: &TestTree, plan_id: &str, expected: &str) {
         standard_error.contains(expected),
         "expected {expected:?} in planner error: {standard_error}"
     );
-}
-
-fn fnv1a64_hex(content: &str) -> String {
-    let mut hash: u64 = 14695981039346656037;
-    for byte in content.as_bytes() {
-        hash ^= *byte as u64;
-        hash = hash.wrapping_mul(1099511628211);
-    }
-    format!("{hash:016x}")
 }
 
 #[test]
@@ -286,7 +278,7 @@ fn completion_rejects_done_without_evidence_and_unjustified_not_applicable() {
         Value::String("2026-09-09T00:00:00Z".to_string());
     traversal["layers"]["tests"][0]["evidence_ref"] = json!({
         "path": "../outside.json",
-        "content_hash": "fnv1a64:0000000000000000"
+        "content_hash": format!("sha256:{:x}", Sha256::digest(b"outside"))
     });
     write_json(&ticket_path, &traversal);
     check_failure(&tree, &plan_id, "unsafe evidence path");
@@ -355,7 +347,10 @@ fn evidence_content_fingerprint_detects_tampering() {
         .as_str()
         .expect("subtask id")
         .to_string();
-    let recorded_at = "2026-09-09T00:00:00Z";
+    let recorded_at = chrono::Utc::now().to_rfc3339();
+    let source = fs::read(tree.root.join("planner.rs")).expect("read source anchor");
+    let output = b"task ticket contract: pass\n";
+    fs::write(tree.root.join("test-output.txt"), output).expect("write test output");
     let evidence = json!({
         "schema_version": 1,
         "artifact": "task_evidence",
@@ -366,7 +361,10 @@ fn evidence_content_fingerprint_detects_tampering() {
         "recorded_at": recorded_at,
         "test_name": "task ticket contract",
         "result": "pass",
-        "output_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        "source_path": "planner.rs",
+        "source_hash": format!("sha256:{:x}", Sha256::digest(&source)),
+        "output_path": "test-output.txt",
+        "output_hash": format!("sha256:{:x}", Sha256::digest(output))
     });
     let evidence_body = format!(
         "{}\n",
@@ -379,7 +377,7 @@ fn evidence_content_fingerprint_detects_tampering() {
     ticket["layers"]["tests"][0]["verification_timestamp"] = Value::String(recorded_at.to_string());
     ticket["layers"]["tests"][0]["evidence_ref"] = json!({
         "path": "evidence/tests.json",
-        "content_hash": format!("fnv1a64:{}", fnv1a64_hex(&evidence_body))
+        "content_hash": format!("sha256:{:x}", Sha256::digest(evidence_body.as_bytes()))
     });
     write_json(&ticket_path, &ticket);
 

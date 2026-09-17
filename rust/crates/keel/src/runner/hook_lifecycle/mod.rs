@@ -52,18 +52,17 @@ pub use pre_tool::record_anvil_gate_clear;
 #[cfg(test)]
 pub(crate) use pre_tool::{emit_pretool_deny, iron_law_gate_decision, is_keel_research_tool_name};
 pub(crate) use pre_tool::{
-    is_host_shell_tool_name, markdown_only_edit_path, maybe_mark_iron_law_from_parts,
-    maybe_mark_iron_law_from_tool_event, pre_tool_gate_decision,
-    pre_tool_gate_decision_with_markdown_context, tool_is_iron_law_gated,
+    is_host_shell_tool_name, markdown_only_edit_path, maybe_mark_iron_law_from_tool_event,
+    pre_tool_gate_decision, pre_tool_gate_decision_with_markdown_context, tool_is_iron_law_gated,
 };
 use pre_tool::{run_hook_pre_tool_use, IRON_LAW_LEGACY_GATE_DIR, IRON_LAW_SATISFIED_DIR};
 use prompt_submit::run_hook_user_prompt_submit;
 pub(crate) use prompt_submit::user_prompt_submit_context;
 use session_end::{
-    memory_scope_summary, prune_observations_store, prune_raw_output_store,
-    prune_state_marker_stores, refresh_memory_scope_for_current_directory, run_hook_session_end,
-    truncate_on_line_boundary, workspace_memory_digest, INSTINCT_DIGEST_MAX_BYTES,
-    SYNTHESIS_NUDGE_MAX_BYTES,
+    memory_scope_summary, prune_memory_record_stores, prune_observations_store,
+    prune_raw_output_store, prune_state_marker_stores, refresh_memory_scope_for_current_directory,
+    run_hook_session_end, truncate_on_line_boundary, workspace_memory_digest,
+    INSTINCT_DIGEST_MAX_BYTES, SYNTHESIS_NUDGE_MAX_BYTES,
 };
 pub(crate) use session_end::{
     prune_tool_timings_store, run_bridge_session_end, run_session_end_learning, sanitize_memory_key,

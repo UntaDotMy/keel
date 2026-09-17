@@ -166,6 +166,11 @@ fn validate_source<'a>(
         .and_then(|value| parse_retrieved_at(value, id, issues));
     if let (Some(kind), Some(url)) = (source_type, source_url) {
         validate_source_location(kind, url, id, issues);
+        if !matches!(kind, "local-code" | "user-request") {
+            issues.push(format!(
+                "{id} external acquisition provenance is unverified; resolvable retrieved content, hash, acquisition time, exact relevant version, and claim binding are required; re-search required"
+            ));
+        }
     }
     if let (Some(kind), Some(class)) = (source_type, freshness) {
         validate_freshness_class(
@@ -198,9 +203,13 @@ fn validate_claim<'a>(
     }
     required_field(claim, "claim", id, issues);
     let classification = required_field(claim, "classification", id, issues).unwrap_or_default();
-    if !matches!(classification, "verified" | "assumption" | "derived") {
+    if classification == "unverified" {
         issues.push(format!(
-            "{id} is unclassified; expected verified, assumption, or derived"
+            "{id} is unverified; acquisition evidence is required"
+        ));
+    } else if !matches!(classification, "verified" | "assumption" | "derived") {
+        issues.push(format!(
+            "{id} is unclassified; expected verified, unverified, assumption, or derived"
         ));
     }
     let referenced_sources = string_array(claim, "sourceIds");
@@ -234,14 +243,14 @@ pub(crate) fn detect_research_conflicts(research: &Value) -> Vec<String> {
     let Some(claims) = value_array(research, "claims") else {
         return Vec::new();
     };
-    let verified: Vec<(String, String)> = claims
+    let verified: Vec<(String, BTreeSet<String>)> = claims
         .iter()
         .filter_map(|claim| {
             if string_field(claim, "classification")? != "verified" {
                 return None;
             }
             let text = string_field(claim, "claim").unwrap_or("").to_string();
-            let used_by = string_array(claim, "usedBy").join(",");
+            let used_by = string_array(claim, "usedBy").into_iter().collect();
             Some((text, used_by))
         })
         .collect();
@@ -252,14 +261,15 @@ pub(crate) fn detect_research_conflicts(research: &Value) -> Vec<String> {
         for (second_text, second_used) in verified.iter().skip(index + 1) {
             // why: contradictory evidence asserts an incompatible direction.
             // Surface it rather than silently picking one.
-            if first_used == second_used
-                && !first_used.is_empty()
-                && contradicts(first_text, second_text)
-            {
+            let shared: Vec<&str> = first_used
+                .intersection(second_used)
+                .map(String::as_str)
+                .collect();
+            if !shared.is_empty() && contradicts(first_text, second_text) {
                 conflicts.push(format!(
-                    "research conflict on {first_used}: contradictory verified claims must be resolved explicitly, never treated as verified"
+                    "research conflict on {}: contradictory verified claims must be resolved explicitly, never treated as verified",
+                    shared.join(",")
                 ));
-                break;
             }
         }
     }
@@ -446,6 +456,41 @@ fn string_field<'a>(value: &'a Value, field_name: &str) -> Option<&'a str> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn overlapping_usage_conflicts_survive_order_and_extra_ids() {
+        let mut research = serde_json::json!({"claims": [
+            {"claimId": "A", "claim": "session protocol supports session identifier", "classification": "verified", "usedBy": ["REQ-001", "AC-001"]},
+            {"claimId": "B", "claim": "session protocol never supports session identifier", "classification": "verified", "usedBy": ["AC-002", "AC-001"]}
+        ]});
+        assert_eq!(detect_research_conflicts(&research).len(), 1);
+        research["claims"][1]["usedBy"] = serde_json::json!(["REQ-002"]);
+        assert!(detect_research_conflicts(&research).is_empty());
+        research["claims"][1]["usedBy"] = serde_json::json!(["AC-001", "REQ-001"]);
+        assert_eq!(detect_research_conflicts(&research).len(), 1);
+        // Explicit reclassification retains the rejected claim rather than deleting history.
+        research["claims"][1]["classification"] = serde_json::json!("assumption");
+        research["claims"][1]["resolution"] =
+            serde_json::json!({"reason": "superseded assertion retained for audit"});
+        assert!(detect_research_conflicts(&research).is_empty());
+    }
+
+    #[test]
+    fn verified_external_metadata_cannot_bypass_acquisition_gate() {
+        let research = serde_json::json!({
+            "status": "complete",
+            "sources": [{"sourceId": "S", "sourceType": "official-doc", "sourceUrl": "https://example.invalid/v1", "support": "API supports requests", "freshness": "fresh", "retrievedAt": Utc::now().to_rfc3339(), "usedBy": ["REQ-001"], "contentHash": "sha256:self-asserted", "version": "1", "receipt": "unresolved"}],
+            "claims": [{"claimId": "C", "claim": "API supports requests", "classification": "verified", "sourceIds": ["S"], "usedBy": ["REQ-001"]}]
+        });
+        let issues = validate_research_artifact(
+            &research,
+            &BTreeSet::from(["REQ-001"]),
+            ResearchPolicy::default(),
+            Utc::now(),
+        );
+        assert!(issues
+            .iter()
+            .any(|issue| issue.contains("acquisition provenance is unverified")));
+    }
     #[test]
     fn project_freshness_defers_to_the_per_source_type_window() {
         let workspace = crate::test_support::unique_temp_dir("research-policy-default");

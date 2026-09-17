@@ -1615,7 +1615,9 @@ fn run_retrieve(
     let mut flags = FlagSet::new(label.clone());
     flags.string_flag("query", "");
     flags.string_flag("limit", "");
+    flags.string_flag("workspace", "");
     flags.string_flag("claude-home", "");
+    flags.bool_flag("local-only", false);
     flags.bool_flag("json", false);
     if let Err(error) = flags.parse(arguments) {
         let _ = writeln!(standard_error, "{}", error.message);
@@ -1643,7 +1645,42 @@ fn run_retrieve(
     let Some(home) = resolve_home(flags.string_value("claude-home"), &label, standard_error) else {
         return 1;
     };
-    let result = match crate::utility::recall::search_recall_index(&home, &query, limit, None) {
+    let local_only = flags.bool_value("local-only");
+    let workspace_context = match crate::utility::recall::recall_workspace_context(
+        Some(flags.string_value("workspace")),
+        local_only,
+    ) {
+        Ok(context) => context,
+        Err(error) => {
+            let _ = writeln!(standard_error, "{label}: {error}");
+            return 1;
+        }
+    };
+    let replay_workspace = if local_only {
+        workspace_context.scope.as_deref()
+    } else {
+        let explicit = flags.string_value("workspace").trim();
+        (!explicit.is_empty()).then_some(explicit)
+    };
+    let replay = crate::utility::recall::RecallReplay {
+        workspace: replay_workspace,
+        local_only,
+    };
+    let workspace_affinity = if local_only || !flags.string_value("workspace").trim().is_empty() {
+        workspace_context.affinity.as_deref()
+    } else {
+        None
+    };
+    let result = match crate::utility::recall::search_recall_index_with_options(
+        &home,
+        &query,
+        limit,
+        crate::utility::recall::RecallQueryOptions {
+            workspace_affinity,
+            scope: workspace_context.scope.as_deref(),
+            branch: workspace_context.branch.as_deref(),
+        },
+    ) {
         Ok(Some(result)) => result,
         Ok(None) => {
             let _ = writeln!(standard_error, "{label}: query has no searchable terms");
@@ -1655,9 +1692,9 @@ fn run_retrieve(
         }
     };
     let stage = result.stage;
-    let bounded_hits = bound_retrieve_hits(&query, limit, result.hits);
+    let bounded_hits = bound_retrieve_hits(&query, limit, result.hits, replay);
     let (projected_hits, projection) =
-        bounded_retrieve_projection(&query, stage, limit, &bounded_hits);
+        bounded_retrieve_projection(&query, stage, limit, &bounded_hits, replay);
     if flags.bool_value("json") {
         return render_json(standard_output, standard_error, &projection);
     }
@@ -1670,7 +1707,7 @@ fn run_retrieve(
     );
     for hit in &projected_hits {
         let provenance_id = retrieve_provenance_id(&query, hit);
-        let retrieval_ref = retrieve_ref(&query, limit);
+        let retrieval_ref = retrieve_ref(&query, limit, replay);
         let _ = writeln!(
             standard_output,
             "  {}:{} score={:.4} {} {} provenanceId=prov-sha256:{} retrievalRef={}",
@@ -1693,7 +1730,12 @@ const MEMORY_RETRIEVE_RESULT_OVERHEAD_TOKENS: usize = 192;
 const MAX_MEMORY_QUERY_PROJECTION_CHARS: usize = 256;
 const MAX_MEMORY_EXCERPT_CHARS: usize = 600;
 
-fn retrieve_hit_value(query: &str, limit: usize, hit: &crate::utility::recall::RecallHit) -> Value {
+fn retrieve_hit_value(
+    query: &str,
+    limit: usize,
+    hit: &crate::utility::recall::RecallHit,
+    replay: crate::utility::recall::RecallReplay<'_>,
+) -> Value {
     let provenance_id = retrieve_provenance_id(query, hit);
     Value::Object(vec![
         ("path".into(), Value::String(hit.absolute_path.clone())),
@@ -1709,7 +1751,7 @@ fn retrieve_hit_value(query: &str, limit: usize, hit: &crate::utility::recall::R
         ),
         (
             "retrievalRef".into(),
-            Value::String(retrieve_ref(query, limit)),
+            Value::String(retrieve_ref(query, limit, replay)),
         ),
     ])
 }
@@ -1724,12 +1766,23 @@ fn retrieve_provenance_id(query: &str, hit: &crate::utility::recall::RecallHit) 
     )
 }
 
-fn retrieve_ref(query: &str, limit: usize) -> String {
-    format!(
+fn retrieve_ref(
+    query: &str,
+    limit: usize,
+    replay: crate::utility::recall::RecallReplay<'_>,
+) -> String {
+    let mut retrieval_ref = format!(
         "keel memory retrieve --query {:?} --limit {}",
         query,
         limit.clamp(1, crate::utility::recall::MAX_RECALL_LIMIT)
-    )
+    );
+    if let Some(workspace) = replay.workspace {
+        retrieval_ref.push_str(&format!(" --workspace {workspace:?}"));
+    }
+    if replay.local_only {
+        retrieval_ref.push_str(" --local-only");
+    }
+    retrieval_ref
 }
 
 fn bounded_memory_excerpt(text: &str) -> String {
@@ -1751,28 +1804,45 @@ fn serialized_value(value: &Value) -> Vec<u8> {
     rendered
 }
 
+/// Projection fields shared by every candidate payload measured for one
+/// retrieval response. Grouping them keeps the payload builder signature small
+/// as scope/recovery fields are added.
+#[derive(Clone, Copy, Default)]
+struct RetrieveProjection<'a> {
+    query: &'a str,
+    query_truncated: bool,
+    query_digest: &'a str,
+    stage: &'a str,
+    limit: usize,
+}
+
 fn bounded_retrieve_projection(
     query: &str,
     stage: &str,
     limit: usize,
     hits: &[crate::utility::recall::RecallHit],
+    replay: crate::utility::recall::RecallReplay<'_>,
 ) -> (Vec<crate::utility::recall::RecallHit>, Value) {
     let (projected_query, query_truncated) =
         bounded_projection_text(query, MAX_MEMORY_QUERY_PROJECTION_CHARS);
     let query_digest = sha256_hex(query.as_bytes());
+    let projection = RetrieveProjection {
+        query: &projected_query,
+        query_truncated,
+        query_digest: &query_digest,
+        stage,
+        limit,
+    };
     let mut selected = Vec::new();
     let mut dropped = false;
     for hit in hits {
         let mut candidate = selected.clone();
         candidate.push(hit.clone());
         let payload = retrieve_projection_payload(
-            &projected_query,
-            query_truncated,
-            &query_digest,
-            stage,
-            limit,
+            &projection,
             &candidate,
             dropped || candidate.len() < hits.len(),
+            replay,
         );
         if retrieve_projection_within_budget(&payload) {
             selected.push(hit.clone());
@@ -1781,55 +1851,50 @@ fn bounded_retrieve_projection(
         }
     }
     let payload = retrieve_projection_payload(
-        &projected_query,
-        query_truncated,
-        &query_digest,
-        stage,
-        limit,
+        &projection,
         &selected,
         dropped || selected.len() < hits.len(),
+        replay,
     );
     if retrieve_projection_within_budget(&payload) {
         return (selected, payload);
     }
     let fallback_query = bounded_projection_text(&projected_query, 64).0;
-    let fallback = retrieve_projection_payload(
-        &fallback_query,
-        true,
-        &query_digest,
-        stage,
-        limit,
-        &[],
-        true,
-    );
+    let fallback_projection = RetrieveProjection {
+        query: &fallback_query,
+        query_truncated: true,
+        ..projection
+    };
+    let fallback = retrieve_projection_payload(&fallback_projection, &[], true, replay);
     (Vec::new(), fallback)
 }
 
 fn retrieve_projection_payload(
-    query: &str,
-    query_truncated: bool,
-    query_digest: &str,
-    stage: &str,
-    limit: usize,
+    projection: &RetrieveProjection<'_>,
     hits: &[crate::utility::recall::RecallHit],
     truncated: bool,
+    replay: crate::utility::recall::RecallReplay<'_>,
 ) -> Value {
     let values = hits
         .iter()
-        .map(|hit| retrieve_hit_value(query, limit, hit))
+        .map(|hit| retrieve_hit_value(projection.query, projection.limit, hit, replay))
         .collect();
     Value::Object(vec![
-        ("query".into(), Value::String(query.to_string())),
+        ("query".into(), Value::String(projection.query.to_string())),
         (
             "queryDigest".into(),
-            Value::String(format!("sha256:{query_digest}")),
+            Value::String(format!("sha256:{}", projection.query_digest)),
         ),
-        ("queryTruncated".into(), Value::Bool(query_truncated)),
-        ("stage".into(), Value::String(stage.to_string())),
+        (
+            "queryTruncated".into(),
+            Value::Bool(projection.query_truncated),
+        ),
+        ("stage".into(), Value::String(projection.stage.to_string())),
         (
             "limit".into(),
             Value::Number(
-                limit
+                projection
+                    .limit
                     .min(crate::utility::recall::MAX_RECALL_LIMIT)
                     .to_string(),
             ),
@@ -1864,6 +1929,7 @@ fn bound_retrieve_hits(
     query: &str,
     limit: usize,
     hits: Vec<crate::utility::recall::RecallHit>,
+    replay: crate::utility::recall::RecallReplay<'_>,
 ) -> Vec<crate::utility::recall::RecallHit> {
     let count_limit = limit.min(crate::utility::recall::MAX_RECALL_LIMIT);
     let byte_budget = crate::utility::recall::MAX_RECALL_RESULT_BYTES
@@ -1878,7 +1944,7 @@ fn bound_retrieve_hits(
         if selected.len() >= count_limit {
             break;
         }
-        let rendered = serialized_value(&retrieve_hit_value(query, limit, &hit));
+        let rendered = serialized_value(&retrieve_hit_value(query, limit, &hit, replay));
         let hit_bytes = rendered.len();
         let hit_tokens = TokenMeter::count_bytes(&rendered);
         if hit_bytes > byte_budget.saturating_sub(used_bytes)
@@ -3674,10 +3740,41 @@ pub fn record_failure_event(
     observed: &str,
     recovery: Option<&str>,
 ) -> Result<String, String> {
+    record_failure_event_with_options(
+        claude_home,
+        task_id,
+        event_type,
+        action,
+        result,
+        observed,
+        recovery,
+        true,
+        None,
+    )
+}
+
+/// Internal writer shared by the CLI `events record` path and the public
+/// wrapper. Every field is an independent part of the recorded evidence row, so
+/// grouping them into a struct would only move the same list one level down.
+#[allow(clippy::too_many_arguments)]
+fn record_failure_event_with_options(
+    claude_home: &Path,
+    task_id: Option<&str>,
+    event_type: &str,
+    action: &str,
+    result: &str,
+    observed: &str,
+    recovery: Option<&str>,
+    verified: bool,
+    requested_id: Option<&str>,
+) -> Result<String, String> {
     let store = RecordStore::new(claude_home, "memory/events");
-    let now = current_timestamp_millis();
-    let at = format_timestamp_iso8601(now);
-    let event_id = format!("EVT-{now:x}");
+    let (generated_id, at) = unique_timestamped_id("EVT");
+    let event_id = requested_id
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+        .unwrap_or(generated_id);
     let raw_fp = format!("{event_type}:{action}:{observed}");
     let fingerprint = crate::utility::hashing::fnv1a64_hex(&raw_fp);
 
@@ -3690,7 +3787,7 @@ pub fn record_failure_event(
         ("action".to_string(), action.to_string()),
         ("result".to_string(), result.to_string()),
         ("recovery".to_string(), recovery.unwrap_or("").to_string()),
-        ("verified".to_string(), "true".to_string()),
+        ("verified".to_string(), verified.to_string()),
         ("createdAt".to_string(), at.clone()),
     ];
 
@@ -3698,12 +3795,15 @@ pub fn record_failure_event(
         .write_record(&event_id, &record)
         .map_err(|e| e.to_string())?;
 
-    // Count events in memory/events matching this fingerprint
+    // Only explicitly verified events can become durable learning evidence.
     let matching_count = store
         .list_records()
         .unwrap_or_default()
         .iter()
-        .filter(|(_, r)| field(r, "fingerprint") == Some(fingerprint.as_str()))
+        .filter(|(_, r)| {
+            field(r, "fingerprint") == Some(fingerprint.as_str())
+                && field(r, "verified") == Some("true")
+        })
         .count();
 
     if matching_count >= 2 {
@@ -3715,7 +3815,7 @@ pub fn record_failure_event(
             .any(|(_, r)| field(r, "evidence").is_some_and(|ev| ev.contains(&fingerprint)));
 
         if !already_has_lesson {
-            let lesson_id = format!("les-{now:x}");
+            let (lesson_id, _) = unique_timestamped_id("les");
             let lesson_record = vec![
                 ("id".to_string(), lesson_id.clone()),
                 (
@@ -3724,7 +3824,9 @@ pub fn record_failure_event(
                 ),
                 (
                     "evidence".to_string(),
-                    format!("Observed repeated failure events with fingerprint {fingerprint}"),
+                    format!(
+                        "Observed repeated verified failure events with fingerprint {fingerprint}"
+                    ),
                 ),
                 (
                     "causeHypothesis".to_string(),
@@ -3765,7 +3867,6 @@ fn events_record_cmd(
     flags.string_flag("claude-home", "");
     flags.bool_flag("verified", false);
     flags.bool_flag("json", false);
-
     if let Err(error) = flags.parse(arguments) {
         let _ = writeln!(standard_error, "{label}: {}", error.message);
         return 1;
@@ -3792,7 +3893,9 @@ fn events_record_cmd(
         Some(recovery)
     };
 
-    match record_failure_event(
+    let requested_id = flags.string_value("id").trim();
+    let requested_id = (!requested_id.is_empty()).then_some(requested_id);
+    match record_failure_event_with_options(
         &home,
         task_opt,
         flags.string_value("type"),
@@ -3800,6 +3903,8 @@ fn events_record_cmd(
         result,
         observed,
         rec_opt,
+        flags.bool_value("verified"),
+        requested_id,
     ) {
         Ok(event_id) => {
             if flags.bool_value("json") {
@@ -4082,7 +4187,7 @@ fn complete_research_cache_hit(record: &Record) -> Option<ResearchCacheHit> {
     })
 }
 
-fn research_cache_record_is_stale(record: &Record, now: &str) -> bool {
+pub(crate) fn research_cache_record_is_stale(record: &Record, now: &str) -> bool {
     matches!(
         field(record, "state")
             .unwrap_or("")
@@ -4459,6 +4564,90 @@ mod tests {
         );
         assert_eq!(code, 0, "stderr: {err}");
         assert!(out.contains("eval target"), "stdout: {out}");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn events_record_honors_verification_and_generates_unique_evidence() {
+        let home = temp_home("events");
+        let h = home.to_string_lossy().to_string();
+        let unverified = [
+            "record",
+            "--type",
+            "command_failure",
+            "--observed",
+            "same failure",
+            "--action",
+            "cargo test",
+            "--result",
+            "exit code 101",
+            "--claude-home",
+            &h,
+        ];
+        let (code, _, err) = run("memory", "events", &unverified);
+        assert_eq!(code, 0, "stderr: {err}");
+        let (code, _, err) = run("memory", "events", &unverified);
+        assert_eq!(code, 0, "stderr: {err}");
+
+        let verified = [
+            "record",
+            "--type",
+            "command_failure",
+            "--observed",
+            "same failure",
+            "--action",
+            "cargo test",
+            "--result",
+            "exit code 101",
+            "--verified",
+            "--claude-home",
+            &h,
+        ];
+        let (code, _, err) = run("memory", "events", &verified);
+        assert_eq!(code, 0, "stderr: {err}");
+        let (code, _, err) = run("memory", "events", &verified);
+        assert_eq!(code, 0, "stderr: {err}");
+
+        let events = RecordStore::new(&home, "memory/events")
+            .list_records()
+            .expect("event records");
+        let event_ids: std::collections::BTreeSet<&str> =
+            events.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(
+            event_ids.len(),
+            4,
+            "same-millisecond events must not overwrite"
+        );
+        assert!(
+            events
+                .iter()
+                .filter(|(_, record)| field(record, "verified") == Some("false"))
+                .count()
+                == 2,
+            "the default CLI path must remain unverified"
+        );
+        assert!(
+            events
+                .iter()
+                .filter(|(_, record)| field(record, "verified") == Some("true"))
+                .count()
+                == 2,
+            "only --verified records may carry verified evidence"
+        );
+
+        let lessons = RecordStore::new(&home, "memory/lessons")
+            .list_records()
+            .expect("lesson records");
+        assert_eq!(
+            lessons.len(),
+            1,
+            "repeated verified failures synthesize one candidate lesson"
+        );
+        assert!(
+            field(&lessons[0].1, "evidence")
+                .is_some_and(|evidence| evidence.contains("verified failure events")),
+            "lesson evidence must state its verification boundary"
+        );
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -5006,6 +5195,52 @@ mod tests {
     }
 
     #[test]
+    fn retrieve_recovery_reference_preserves_explicit_workspace() {
+        // A recovery reference that drops --workspace replays an unscoped
+        // search, which can surface another workspace's memory.
+        let home = temp_home("retr-scope");
+        let h = home.to_string_lossy().to_string();
+        run(
+            "memory",
+            "research-cache",
+            &[
+                "record",
+                "--question",
+                "scoped recall query",
+                "--answer",
+                "scoped answer",
+                "--claude-home",
+                &h,
+            ],
+        );
+
+        let (code, out, err) = run(
+            "memory",
+            "retrieve",
+            &[
+                "--query",
+                "scoped",
+                "--workspace",
+                "project-alpha",
+                "--json",
+                "--claude-home",
+                &h,
+            ],
+        );
+        assert_eq!(code, 0, "stderr: {err}");
+        let parsed: serde_json::Value =
+            serde_json::from_str(out.trim()).expect("retrieve json output is valid");
+        let reference = parsed["hits"][0]["retrievalRef"]
+            .as_str()
+            .expect("retrievalRef is a string");
+        assert!(
+            reference.contains("--workspace \"project-alpha\""),
+            "recovery reference must keep the workspace filter: {reference}"
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
     fn retrieve_hits_respect_serialized_result_budgets() {
         let hits = (0..crate::utility::recall::MAX_RECALL_LIMIT + 10)
             .map(|index| crate::utility::recall::RecallHit {
@@ -5015,11 +5250,12 @@ mod tests {
                 snippet: format!("[match] memory result {index}"),
             })
             .collect();
-        let bounded = bound_retrieve_hits("memory", usize::MAX, hits);
+        let replay = crate::utility::recall::RecallReplay::default();
+        let bounded = bound_retrieve_hits("memory", usize::MAX, hits, replay);
         assert!(bounded.len() <= crate::utility::recall::MAX_RECALL_LIMIT);
         let values = bounded
             .iter()
-            .map(|hit| retrieve_hit_value("memory", usize::MAX, hit))
+            .map(|hit| retrieve_hit_value("memory", usize::MAX, hit, replay))
             .collect();
         let rendered = serialized_value(&Value::Array(values));
         assert!(
@@ -5049,7 +5285,8 @@ mod tests {
                 snippet: "[match] long memory result ".repeat(80),
             })
             .collect::<Vec<_>>();
-        let (_, payload) = bounded_retrieve_projection(&query, "exact", usize::MAX, &hits);
+        let replay = crate::utility::recall::RecallReplay::default();
+        let (_, payload) = bounded_retrieve_projection(&query, "exact", usize::MAX, &hits, replay);
         let rendered = serialized_value(&payload);
         assert!(
             rendered.len() <= crate::utility::recall::MAX_RECALL_RESULT_BYTES,

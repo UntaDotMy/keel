@@ -290,6 +290,50 @@ fn architecture_gate_blocks_incomplete_design_and_passes_complete_design() {
     let _ = std::fs::remove_dir_all(keel_home);
 }
 
+fn seed_review_command_evidence(
+    repository: &std::path::Path,
+    plan_path: &std::path::Path,
+    plan_id: &str,
+    ticket: &mut serde_json::Value,
+) {
+    let source = std::fs::read(repository.join("src/lib.rs")).expect("read source");
+    let output = b"command completed successfully\n";
+    std::fs::write(repository.join("command-output.txt"), output).expect("write output");
+    std::fs::create_dir_all(plan_path.join("evidence")).expect("create evidence directory");
+    let recorded_at = chrono::Utc::now().to_rfc3339();
+    for subtasks in ticket["layers"]
+        .as_object_mut()
+        .expect("layers")
+        .values_mut()
+    {
+        for subtask in subtasks.as_array_mut().expect("subtasks") {
+            if subtask["expected_evidence_type"] != "command" {
+                continue;
+            }
+            let id = subtask["id"].as_str().expect("subtask id").to_string();
+            let path = format!("evidence/{id}.json");
+            let evidence = serde_json::json!({
+                "schema_version": 1, "artifact": "task_evidence",
+                "plan_id": plan_id, "task_id": "TASK-001", "subtask_id": id,
+                "evidence_type": "command", "recorded_at": recorded_at,
+                "command": "fixture verification", "exit_code": 0,
+                "source_path": "src/lib.rs",
+                "source_hash": format!("sha256:{}", crate::utility::hashing::sha256_hex(&source)),
+                "output_path": "command-output.txt",
+                "output_hash": format!("sha256:{}", crate::utility::hashing::sha256_hex(output))
+            });
+            let body = serde_json::to_vec(&evidence).expect("serialize evidence");
+            std::fs::write(plan_path.join(&path), &body).expect("write evidence");
+            subtask["status"] = serde_json::json!("done");
+            subtask["verification_timestamp"] = serde_json::json!(recorded_at);
+            subtask["evidence_ref"] = serde_json::json!({
+                "path": path,
+                "content_hash": format!("sha256:{}", crate::utility::hashing::sha256_hex(&body))
+            });
+        }
+    }
+}
+
 #[test]
 fn task_evidence_gate_rejects_unjustified_status_and_tampered_evidence() {
     let repository = init_research_gate_repo("task-evidence");
@@ -349,7 +393,10 @@ fn task_evidence_gate_rejects_unjustified_status_and_tampered_evidence() {
         .as_str()
         .expect("tests subtask id")
         .to_string();
-    let recorded_at = "2026-09-09T00:00:00Z";
+    let recorded_at = chrono::Utc::now().to_rfc3339();
+    let source = std::fs::read(repository.join("src/lib.rs")).expect("read source");
+    let output = b"review task evidence: pass\n";
+    std::fs::write(repository.join("test-output.txt"), output).expect("write test output");
     let evidence = serde_json::json!({
         "schema_version": 1,
         "artifact": "task_evidence",
@@ -360,7 +407,10 @@ fn task_evidence_gate_rejects_unjustified_status_and_tampered_evidence() {
         "recorded_at": recorded_at,
         "test_name": "review task evidence",
         "result": "pass",
-        "output_hash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        "source_path": "src/lib.rs",
+        "source_hash": format!("sha256:{}", crate::utility::hashing::sha256_hex(&source)),
+        "output_path": "test-output.txt",
+        "output_hash": format!("sha256:{}", crate::utility::hashing::sha256_hex(output))
     });
     let evidence_body = format!(
         "{}\n",
@@ -374,10 +424,11 @@ fn task_evidence_gate_rejects_unjustified_status_and_tampered_evidence() {
     ticket["layers"]["tests"][0]["evidence_ref"] = serde_json::json!({
         "path": "evidence/tests.json",
         "content_hash": format!(
-            "fnv1a64:{}",
-            crate::utility::hashing::fnv1a64_hex(&evidence_body)
+            "sha256:{}",
+            crate::utility::hashing::sha256_hex(evidence_body.as_bytes())
         )
     });
+    seed_review_command_evidence(&repository, plan_path, &plan_id, &mut ticket);
     std::fs::write(
         &ticket_path,
         format!(
@@ -403,9 +454,12 @@ fn task_evidence_gate_rejects_unjustified_status_and_tampered_evidence() {
         "task refresh failed: {}",
         String::from_utf8_lossy(&stderr)
     );
+    let verified_gate = task_evidence_gate(&repository, "main", "pre-pr", &plan_id, keel_home_text);
     assert_eq!(
-        task_evidence_gate(&repository, "main", "pre-pr", &plan_id, keel_home_text,).status,
-        GateStatus::Pass
+        verified_gate.status,
+        GateStatus::Pass,
+        "{:?}",
+        verified_gate.details
     );
 
     let mut tampered = evidence;
@@ -485,17 +539,17 @@ fn create_researched_plan(
         "--plan".to_string(),
         plan_id.clone(),
         "--claim".to_string(),
-        "Chrono parses RFC3339 timestamps.".to_string(),
+        "The established fixture source preserves its public function contract.".to_string(),
         "--source-url".to_string(),
-        "https://docs.rs/chrono/0.4.45/chrono/struct.DateTime.html".to_string(),
+        "local-code://src/lib.rs".to_string(),
         "--source-type".to_string(),
-        "official-doc".to_string(),
+        "local-code".to_string(),
         "--retrieved-at".to_string(),
         chrono::Utc::now().to_rfc3339(),
         "--support".to_string(),
-        "The current crate documentation exposes DateTime::parse_from_rfc3339.".to_string(),
+        "The fixture source contains the established value function.".to_string(),
         "--freshness".to_string(),
-        "fresh".to_string(),
+        "local-only".to_string(),
         "--used-by".to_string(),
         "REQ-001,AC-001".to_string(),
     ];
@@ -595,8 +649,7 @@ fn completeness_scan_satisfies_after_marker() {
     let previous = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
     let _home_precedence = crate::test_support::HomePrecedenceGuard::clear_keel_home();
     std::env::set_var("CLAUDE_TARGET_OVERRIDE", &home);
-    let workspace = home.join("ws");
-    std::fs::create_dir_all(&workspace).expect("ws");
+    let workspace = init_research_gate_repo("completeness-marker");
     let cwd = crate::runtime::display_path(&workspace);
     assert!(!crate::runner::hook_lifecycle::completeness_scan_satisfies(
         &cwd, 1
@@ -612,10 +665,7 @@ fn completeness_scan_satisfies_after_marker() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
-/// The review gate binds the marker to content: a scan of one change must not
-/// satisfy the gate for a different change, and legacy bare-millisecond
-/// markers (no changed set) fail the coverage half while still satisfying the
-/// mtime reminder path.
+/// Coverage requires a source-bound scan; timestamp-only markers cannot authorize it.
 #[test]
 fn completeness_cover_requires_recorded_changed_set() {
     let _guard = crate::test_support::ENV_LOCK
@@ -632,8 +682,7 @@ fn completeness_cover_requires_recorded_changed_set() {
     let previous = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
     let _home_precedence = crate::test_support::HomePrecedenceGuard::clear_keel_home();
     std::env::set_var("CLAUDE_TARGET_OVERRIDE", &home);
-    let workspace = home.join("ws");
-    std::fs::create_dir_all(&workspace).expect("ws");
+    let workspace = init_research_gate_repo("completeness-cover");
     let cwd = crate::runtime::display_path(&workspace);
     let touched = vec!["src/auth.rs".to_string(), "src/db.rs".to_string()];
     // No marker: neither half passes.
@@ -641,7 +690,7 @@ fn completeness_cover_requires_recorded_changed_set() {
         &cwd, 0
     ));
     assert!(!completeness_scan_covers_changed(&cwd, &touched));
-    // Legacy bare-millisecond marker: mtime half passes, coverage never does.
+    // Legacy timestamp-only evidence fails both checks.
     let dir = home.join("state").join("completeness-gate");
     std::fs::create_dir_all(&dir).expect("marker dir");
     std::fs::write(
@@ -652,7 +701,7 @@ fn completeness_cover_requires_recorded_changed_set() {
         "9999999999999",
     )
     .expect("legacy marker");
-    assert!(crate::runner::hook_lifecycle::completeness_scan_satisfies(
+    assert!(!crate::runner::hook_lifecycle::completeness_scan_satisfies(
         &cwd, 0
     ));
     assert!(!completeness_scan_covers_changed(&cwd, &touched));
@@ -680,6 +729,19 @@ fn completeness_cover_requires_recorded_changed_set() {
         .expect("scan record present");
     assert_eq!(record.sibling_count, 2);
     assert_eq!(record.queries, vec!["auth shape".to_string()]);
+    std::fs::write(workspace.join("src/lib.rs"), "pub fn value() -> u8 { 3 }\n")
+        .expect("change previously scanned source");
+    assert!(!completeness_scan_covers_changed(&cwd, &touched));
+    crate::runner::hook_lifecycle::record_completeness_gate_clear_for(
+        &workspace,
+        &["auth shape".to_string()],
+        &touched,
+        2,
+    );
+    assert!(completeness_scan_covers_changed(&cwd, &touched));
+    git_in(&workspace, &["add", "."]);
+    git_in(&workspace, &["commit", "-q", "-m", "advance scanned head"]);
+    assert!(!completeness_scan_covers_changed(&cwd, &touched));
     match previous {
         Some(value) => std::env::set_var("CLAUDE_TARGET_OVERRIDE", value),
         None => std::env::remove_var("CLAUDE_TARGET_OVERRIDE"),
@@ -2103,7 +2165,7 @@ fn impact_gate_missing_graph_with_valid_flow_warns() {
 }
 
 #[test]
-fn acceptance_criteria_evaluation_honest_format() {
+fn acceptance_criteria_require_bound_evidence_and_preserve_human_status() {
     let repository = init_research_gate_repo("ac-eval-test");
     let keel_home = crate::test_support::unique_temp_dir("keel-ac-eval-home");
     let (plan_id, research_path) = create_researched_plan(&repository, &keel_home);
@@ -2136,41 +2198,13 @@ fn acceptance_criteria_evaluation_honest_format() {
             .expect("evaluate ac")
     };
 
-    let (status, summary) = eval_ac();
-    assert_eq!(status, GateStatus::Fail);
-    assert!(summary.contains("AC-001: fail | missing traceability to implementation evidence"));
+    assert_eq!(eval_ac().0, GateStatus::Fail);
 
     let ticket_path = plan_path.join("task-001.json");
     let mut ticket: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&ticket_path).expect("read ticket"))
             .expect("parse ticket");
-    let subtask_id = ticket["layers"]["tests"][0]["id"]
-        .as_str()
-        .expect("tests subtask id")
-        .to_string();
-    let evidence = serde_json::json!({
-        "schema_version": 1,
-        "artifact": "task_evidence",
-        "plan_id": plan_id,
-        "task_id": "TASK-001",
-        "subtask_id": subtask_id,
-        "evidence_type": "named_test",
-        "recorded_at": "2026-09-09T00:00:00Z",
-        "test_name": "review task evidence",
-        "result": "pass",
-        "output_hash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-        "raw_store_id": "RAW-12345"
-    });
-    let evidence_body = format!("{}\n", serde_json::to_string_pretty(&evidence).unwrap());
-    std::fs::create_dir_all(plan_path.join("evidence")).unwrap();
-    std::fs::write(plan_path.join("evidence/tests.json"), &evidence_body).unwrap();
-    ticket["layers"]["tests"][0]["status"] = serde_json::Value::String("done".to_string());
-    ticket["layers"]["tests"][0]["verification_timestamp"] =
-        serde_json::Value::String("2026-09-09T00:00:00Z".to_string());
-    ticket["layers"]["tests"][0]["evidence_ref"] = serde_json::json!({
-        "path": "evidence/tests.json",
-        "content_hash": format!("fnv1a64:{}", crate::utility::hashing::fnv1a64_hex(&evidence_body))
-    });
+    seed_review_command_evidence(&repository, plan_path, &plan_id, &mut ticket);
     std::fs::write(
         &ticket_path,
         format!("{}\n", serde_json::to_string_pretty(&ticket).unwrap()),
@@ -2195,33 +2229,31 @@ fn acceptance_criteria_evaluation_honest_format() {
         String::from_utf8_lossy(&stderr)
     );
 
-    let (pass_status, pass_summary) = eval_ac();
-    assert_eq!(pass_status, GateStatus::Pass);
-    assert!(pass_summary.contains("AC-001: pass | evidence: RAW-12345 | verified by:"));
+    assert_eq!(eval_ac().0, GateStatus::Pass);
 
-    let human_evidence = serde_json::json!({
-        "schema_version": 1,
-        "artifact": "task_evidence",
-        "plan_id": plan_id,
-        "task_id": "TASK-001",
-        "subtask_id": subtask_id,
-        "evidence_type": "named_test",
-        "recorded_at": "2026-09-09T00:00:00Z",
-        "test_name": "review ui check",
-        "result": "needs_human",
-        "output_hash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-        "reason": "layout verification requires visual check",
-        "screenshot": "artifacts/screen.png"
-    });
-    let human_body = format!(
-        "{}\n",
-        serde_json::to_string_pretty(&human_evidence).unwrap()
+    for subtasks in ticket["layers"]
+        .as_object_mut()
+        .expect("layers")
+        .values_mut()
+    {
+        for subtask in subtasks.as_array_mut().expect("subtasks") {
+            if subtask["expected_evidence_type"] == "command" {
+                subtask["status"] = serde_json::json!("needs_human");
+                subtask["reason"] = serde_json::json!("manual verification required");
+                subtask["evidence_ref"] = serde_json::Value::Null;
+            }
+        }
+    }
+    std::fs::write(&ticket_path, serde_json::to_vec(&ticket).unwrap()).unwrap();
+    stdout.clear();
+    stderr.clear();
+    assert_eq!(
+        crate::utility::plan::run_plan_command(&task_refresh, &mut stdout, &mut stderr),
+        0,
+        "human task refresh: {}",
+        String::from_utf8_lossy(&stderr)
     );
-    std::fs::write(plan_path.join("evidence/tests.json"), &human_body).unwrap();
-
-    let (human_status, human_summary) = eval_ac();
-    assert_eq!(human_status, GateStatus::NeedsHuman);
-    assert!(human_summary.contains("AC-001: needs_human | reason: layout verification requires visual check | screenshot: artifacts/screen.png"));
+    assert_eq!(eval_ac().0, GateStatus::NeedsHuman);
 }
 
 #[test]

@@ -17,9 +17,12 @@
 //! rather than introducing a second serialization concept.
 
 use std::fs;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use fs2::FileExt;
 
 use crate::error::KeelError;
 use crate::json::{write_indented, Value};
@@ -35,6 +38,75 @@ pub type Record = Vec<(String, String)>;
 /// collections without inventing a second path scheme.
 pub struct RecordStore {
     directory: PathBuf,
+}
+
+/// Bound one record before serialization can become a disk or memory sink.
+const MAX_RECORD_BYTES: usize = 1024 * 1024;
+/// Bound one collection independently of its retention policy.
+const MAX_RECORD_STORE_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_RECORD_STORE_RECORDS: usize = 10_000;
+const RECORD_STORE_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
+const RECORD_STORE_LOCK_RETRY_MS: u64 = 25;
+
+struct RecordStoreLock {
+    file: fs::File,
+}
+
+impl Drop for RecordStoreLock {
+    fn drop(&mut self) {
+        // Qualify the trait method: rustc 1.89 added an inherent `File::unlock`
+        // that would otherwise shadow this and break the declared 1.80 MSRV.
+        let _ = fs2::FileExt::unlock(&self.file);
+    }
+}
+
+fn lock_record_store(directory: &Path) -> io::Result<RecordStoreLock> {
+    fs::create_dir_all(directory)?;
+    let path = directory.join(".store.lock");
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(path)?;
+    let deadline = Instant::now() + RECORD_STORE_LOCK_TIMEOUT;
+    loop {
+        match file.try_lock_exclusive() {
+            Ok(()) => return Ok(RecordStoreLock { file }),
+            Err(error) if record_store_lock_contention(&error) => {
+                if Instant::now() >= deadline {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "record store lock remained held",
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(RECORD_STORE_LOCK_RETRY_MS));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn record_store_lock_contention(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::WouldBlock
+        || error
+            .raw_os_error()
+            .is_some_and(|code| matches!(code, 32 | 33))
+}
+
+fn read_record_text_bounded(path: &Path) -> Result<Option<String>, String> {
+    let file =
+        fs::File::open(path).map_err(|error| format!("read {}: {error}", display_path(path)))?;
+    let mut bytes = Vec::new();
+    file.take((MAX_RECORD_BYTES as u64).saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("read {}: {error}", display_path(path)))?;
+    if bytes.len() > MAX_RECORD_BYTES {
+        return Ok(None);
+    }
+    String::from_utf8(bytes)
+        .map(Some)
+        .map_err(|error| format!("read {}: non-utf8 output: {error}", display_path(path)))
 }
 
 impl RecordStore {
@@ -77,12 +149,49 @@ impl RecordStore {
 
     pub fn write_record(&self, id: &str, fields: &Record) -> Result<PathBuf, KeelError> {
         let path = self.validated_record_path(id)?;
-        fs::create_dir_all(&self.directory)
-            .map_err(|error| format!("create {}: {error}", display_path(&self.directory)))?;
         let value = record_to_storage_value(fields);
         let mut serialized = Vec::<u8>::new();
         write_indented(&mut serialized, &value)
             .map_err(|error| format!("serialize record {id}: {error}"))?;
+        if serialized.len() > MAX_RECORD_BYTES {
+            return Err(
+                format!("record {id:?} exceeds maximum size of {MAX_RECORD_BYTES} bytes").into(),
+            );
+        }
+        fs::create_dir_all(&self.directory)
+            .map_err(|error| format!("create {}: {error}", display_path(&self.directory)))?;
+        let _lock = lock_record_store(&self.directory)
+            .map_err(|error| format!("lock {}: {error}", display_path(&self.directory)))?;
+        let existing = match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(
+                    format!("record path must not be a symlink: {}", display_path(&path)).into(),
+                )
+            }
+            Ok(metadata) => Some(metadata),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => return Err(format!("stat {}: {error}", display_path(&path)).into()),
+        };
+        let (record_count, store_bytes) = store_usage(&self.directory)?;
+        if existing.is_none() && record_count >= MAX_RECORD_STORE_RECORDS {
+            return Err(format!(
+                "record store {} exceeds maximum of {MAX_RECORD_STORE_RECORDS} records",
+                display_path(&self.directory)
+            )
+            .into());
+        }
+        let existing_bytes = existing.map(|metadata| metadata.len()).unwrap_or(0);
+        if store_bytes
+            .saturating_sub(existing_bytes)
+            .saturating_add(serialized.len() as u64)
+            > MAX_RECORD_STORE_BYTES
+        {
+            return Err(format!(
+                "record store {} exceeds maximum size of {MAX_RECORD_STORE_BYTES} bytes",
+                display_path(&self.directory)
+            )
+            .into());
+        }
         let text = String::from_utf8(serialized)
             .map_err(|error| format!("serialize record {id}: non-utf8 output: {error}"))?;
         // Atomic temp+fsync+rename so a crash or concurrent reader never observes
@@ -93,11 +202,33 @@ impl RecordStore {
 
     pub fn read_record(&self, id: &str) -> Result<Option<Record>, KeelError> {
         let path = self.validated_record_path(id)?;
-        let text = match fs::read_to_string(&path) {
-            Ok(text) => text,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(format!("read {}: {error}", display_path(&path)).into()),
         };
+        if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+            return Err(format!(
+                "record path must be a regular file: {}",
+                display_path(&path)
+            )
+            .into());
+        }
+        if metadata.len() > MAX_RECORD_BYTES as u64 {
+            return Err(format!(
+                "record {} exceeds maximum size of {MAX_RECORD_BYTES} bytes",
+                display_path(&path)
+            )
+            .into());
+        }
+        let text = read_record_text_bounded(&path)
+            .map_err(KeelError::Custom)?
+            .ok_or_else(|| {
+                KeelError::Custom(format!(
+                    "record {} exceeds maximum size of {MAX_RECORD_BYTES} bytes",
+                    display_path(&path)
+                ))
+            })?;
         let fields = parse_object_of_strings(&text)
             .map_err(|error| format!("parse {}: {error}", display_path(&path)))?;
         Ok(Some(fields))
@@ -116,37 +247,24 @@ impl RecordStore {
         if !self.directory.is_dir() {
             return Ok(Vec::new());
         }
-        let read_iter = fs::read_dir(&self.directory)
-            .map_err(|error| format!("read {}: {error}", display_path(&self.directory)))?;
-        let mut records = Vec::new();
-        for read_result in read_iter {
-            let dir_entry = read_result
-                .map_err(|error| format!("read {}: {error}", display_path(&self.directory)))?;
-            let path = dir_entry.path();
-            if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
-                continue;
-            }
-            let id = match path.file_stem().and_then(|stem| stem.to_str()) {
-                Some(stem) => stem.to_string(),
-                None => continue,
-            };
-            let text = match fs::read_to_string(&path) {
-                Ok(text) => text,
-                Err(error) => {
-                    eprintln!("skip {}: {error}", display_path(&path));
-                    continue;
-                }
-            };
-            match parse_object_of_strings(&text) {
-                Ok(fields) => records.push((id, fields)),
-                Err(error) => {
-                    eprintln!("skip {}: {error}", display_path(&path));
-                    continue;
-                }
-            }
+        let _lock = lock_record_store(&self.directory)
+            .map_err(|error| format!("lock {}: {error}", display_path(&self.directory)))?;
+        let (record_count, store_bytes) = store_usage(&self.directory)?;
+        if record_count > MAX_RECORD_STORE_RECORDS {
+            return Err(format!(
+                "record store {} exceeds maximum of {MAX_RECORD_STORE_RECORDS} records",
+                display_path(&self.directory)
+            )
+            .into());
         }
-        records.sort_by(|left, right| left.0.cmp(&right.0));
-        Ok(records)
+        if store_bytes > MAX_RECORD_STORE_BYTES {
+            return Err(format!(
+                "record store {} exceeds maximum size of {MAX_RECORD_STORE_BYTES} bytes",
+                display_path(&self.directory)
+            )
+            .into());
+        }
+        read_records_unlocked(&self.directory)
     }
 
     /// Remove a record, returning whether it existed. Used by the learning
@@ -154,12 +272,177 @@ impl RecordStore {
     /// aged out, and by family `forget`/`remove` actions.
     pub fn delete_record(&self, id: &str) -> Result<bool, KeelError> {
         let path = self.validated_record_path(id)?;
+        if !self.directory.is_dir() {
+            return Ok(false);
+        }
+        let _lock = lock_record_store(&self.directory)
+            .map_err(|error| format!("lock {}: {error}", display_path(&self.directory)))?;
         match fs::remove_file(&path) {
             Ok(()) => Ok(true),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
             Err(error) => Err(format!("remove {}: {error}", display_path(&path)).into()),
         }
     }
+
+    /// Remove records whose explicit timestamp is older than `days`.
+    ///
+    /// Records without a recognized RFC3339 timestamp are retained: pruning
+    /// must not turn legacy or hand-authored evidence into silent data loss.
+    pub fn prune_older_than(&self, days: u64) -> Result<usize, KeelError> {
+        if !self.directory.is_dir() {
+            return Ok(0);
+        }
+        let _lock = lock_record_store(&self.directory)
+            .map_err(|error| format!("lock {}: {error}", display_path(&self.directory)))?;
+        let read_iter = fs::read_dir(&self.directory)
+            .map_err(|error| format!("read {}: {error}", display_path(&self.directory)))?;
+        let cutoff =
+            current_timestamp_millis().saturating_sub(u128::from(days).saturating_mul(86_400_000));
+        let mut removed = 0usize;
+        for read_result in read_iter {
+            let entry = read_result
+                .map_err(|error| format!("read {}: {error}", display_path(&self.directory)))?;
+            let path = entry.path();
+            if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+                continue;
+            }
+            let metadata = match fs::symlink_metadata(&path) {
+                Ok(metadata) if metadata.file_type().is_file() => metadata,
+                Ok(_) => continue,
+                Err(error) => {
+                    eprintln!("skip {}: {error}", display_path(&path));
+                    continue;
+                }
+            };
+            if metadata.len() > MAX_RECORD_BYTES as u64 {
+                eprintln!(
+                    "skip {}: record exceeds maximum size of {MAX_RECORD_BYTES} bytes",
+                    display_path(&path)
+                );
+                continue;
+            }
+            let text = match read_record_text_bounded(&path) {
+                Ok(Some(text)) => text,
+                Ok(None) => {
+                    eprintln!(
+                        "skip {}: record exceeds maximum size of {MAX_RECORD_BYTES} bytes",
+                        display_path(&path)
+                    );
+                    continue;
+                }
+                Err(error) => {
+                    eprintln!("skip {}: {error}", display_path(&path));
+                    continue;
+                }
+            };
+            let record = match parse_object_of_strings(&text) {
+                Ok(record) => record,
+                Err(error) => {
+                    eprintln!("skip {}: {error}", display_path(&path));
+                    continue;
+                }
+            };
+            let Some(recorded_at) = record_timestamp_millis(&record) else {
+                continue;
+            };
+            if recorded_at < cutoff {
+                match fs::remove_file(&path) {
+                    Ok(()) => removed += 1,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error.into()),
+                }
+            }
+        }
+        Ok(removed)
+    }
+}
+
+fn store_usage(directory: &Path) -> Result<(usize, u64), KeelError> {
+    let read_iter = fs::read_dir(directory)
+        .map_err(|error| format!("read {}: {error}", display_path(directory)))?;
+    let mut count = 0usize;
+    let mut bytes = 0u64;
+    for read_result in read_iter {
+        let entry =
+            read_result.map_err(|error| format!("read {}: {error}", display_path(directory)))?;
+        let path = entry.path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+            continue;
+        }
+        let metadata = fs::symlink_metadata(&path)
+            .map_err(|error| format!("stat {}: {error}", display_path(&path)))?;
+        if !metadata.file_type().is_file() {
+            continue;
+        }
+        count = count.saturating_add(1);
+        bytes = bytes.saturating_add(metadata.len());
+    }
+    Ok((count, bytes))
+}
+
+fn read_records_unlocked(directory: &Path) -> Result<Vec<(String, Record)>, KeelError> {
+    let read_iter = fs::read_dir(directory)
+        .map_err(|error| format!("read {}: {error}", display_path(directory)))?;
+    let mut records = Vec::new();
+    for read_result in read_iter {
+        let dir_entry =
+            read_result.map_err(|error| format!("read {}: {error}", display_path(directory)))?;
+        let path = dir_entry.path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+            continue;
+        }
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_file() => metadata,
+            Ok(_) => continue,
+            Err(error) => {
+                eprintln!("skip {}: {error}", display_path(&path));
+                continue;
+            }
+        };
+        if metadata.len() > MAX_RECORD_BYTES as u64 {
+            eprintln!(
+                "skip {}: record exceeds maximum size of {MAX_RECORD_BYTES} bytes",
+                display_path(&path)
+            );
+            continue;
+        }
+        let id = match path.file_stem().and_then(|stem| stem.to_str()) {
+            Some(stem) => stem.to_string(),
+            None => continue,
+        };
+        let text = match read_record_text_bounded(&path) {
+            Ok(Some(text)) => text,
+            Ok(None) => {
+                eprintln!(
+                    "skip {}: record exceeds maximum size of {MAX_RECORD_BYTES} bytes",
+                    display_path(&path)
+                );
+                continue;
+            }
+            Err(error) => {
+                eprintln!("skip {}: {error}", display_path(&path));
+                continue;
+            }
+        };
+        match parse_object_of_strings(&text) {
+            Ok(fields) => records.push((id, fields)),
+            Err(error) => {
+                eprintln!("skip {}: {error}", display_path(&path));
+                continue;
+            }
+        }
+    }
+    records.sort_by(|left, right| left.0.cmp(&right.0));
+    Ok(records)
+}
+fn record_timestamp_millis(record: &Record) -> Option<u128> {
+    ["recordedAt", "createdAt", "updatedAt"]
+        .into_iter()
+        .find_map(|key| {
+            field(record, key)
+                .and_then(|value| chrono::DateTime::parse_from_rfc3339(value.trim()).ok())
+                .map(|value| value.timestamp_millis().max(0) as u128)
+        })
 }
 
 /// Look up a single field value from a record by key.
@@ -361,7 +644,7 @@ fn parse_string_literal(bytes: &[u8], index: &mut usize) -> Result<String, Strin
                         let low_hex = std::str::from_utf8(&bytes[*index + 7..*index + 11])
                             .map_err(|_| "non-utf8 in \\u low surrogate".to_string())?;
                         let low = u32::from_str_radix(low_hex, 16)
-                            .map_err(|_| format!("invalid \\u hex: {low_hex}"))?;
+                            .map_err(|_| format!("invalid low surrogate \\u hex: {low_hex}"))?;
                         if !(0xDC00..=0xDFFF).contains(&low) {
                             return Err("invalid low surrogate after high surrogate".into());
                         }
@@ -404,7 +687,6 @@ fn skip_whitespace(bytes: &[u8], index: &mut usize) {
         }
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -568,5 +850,90 @@ mod tests {
         // Non-string values and non-objects are outside the dialect.
         assert!(parse_object_of_strings("{\"n\": 1}").is_err());
         assert!(parse_object_of_strings("[]").is_err());
+    }
+    #[test]
+    fn oversized_record_is_rejected_before_store_creation() {
+        let home = temp_home("record-cap");
+        let store = RecordStore::new(&home, "memory/lessons");
+        let oversized = vec![("body".into(), "x".repeat(MAX_RECORD_BYTES))];
+        let error = store
+            .write_record("too-large", &oversized)
+            .expect_err("oversized records must fail closed");
+        assert!(error.to_string().contains("maximum size"));
+        assert!(
+            !store.directory().exists(),
+            "rejected records must not create a store directory"
+        );
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn list_rejects_an_oversized_store_before_loading_records() {
+        let home = temp_home("store-cap");
+        let store = RecordStore::new(&home, "memory/entities");
+        fs::create_dir_all(store.directory()).expect("create store");
+        let path = store.directory().join("oversized.json");
+        let file = fs::File::create(&path).expect("create oversized record");
+        file.set_len(MAX_RECORD_STORE_BYTES + 1)
+            .expect("set store fixture size");
+        let error = store
+            .list_records()
+            .expect_err("oversized stores must fail closed");
+        assert!(error.to_string().contains("maximum size"));
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn retention_prune_uses_recorded_at_and_keeps_legacy_records() {
+        let home = temp_home("record-prune");
+        let store = RecordStore::new(&home, "memory/events");
+        store
+            .write_record(
+                "old",
+                &vec![("recordedAt".into(), "1970-01-01T00:00:00Z".into())],
+            )
+            .expect("write old");
+        store
+            .write_record(
+                "fresh",
+                &vec![(
+                    "recordedAt".into(),
+                    format_timestamp_iso8601(current_timestamp_millis()),
+                )],
+            )
+            .expect("write fresh");
+        store
+            .write_record("legacy", &vec![("note".into(), "keep".into())])
+            .expect("write legacy");
+
+        assert_eq!(store.prune_older_than(30).expect("prune"), 1);
+        assert!(store.read_record("old").expect("read old").is_none());
+        assert!(store.read_record("fresh").expect("read fresh").is_some());
+        assert!(store.read_record("legacy").expect("read legacy").is_some());
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn concurrent_record_writes_are_serialized_without_losing_records() {
+        let home = temp_home("record-concurrent");
+        let store = std::sync::Arc::new(RecordStore::new(&home, "memory/agent-packets"));
+        let mut workers = Vec::new();
+        for index in 0..16 {
+            let store = std::sync::Arc::clone(&store);
+            workers.push(std::thread::spawn(move || {
+                let id = format!("packet-{index}");
+                store
+                    .write_record(&id, &vec![("id".into(), id.clone())])
+                    .expect("concurrent write");
+            }));
+        }
+        for worker in workers {
+            worker.join().expect("worker join");
+        }
+        assert_eq!(
+            store.list_records().expect("list concurrent records").len(),
+            16
+        );
+        let _ = fs::remove_dir_all(&home);
     }
 }

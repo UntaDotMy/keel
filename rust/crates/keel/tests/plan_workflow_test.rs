@@ -289,7 +289,7 @@ fn empty_research_blocks_non_greenfield_task_progression() {
 }
 
 #[test]
-fn fresh_official_and_historical_paper_sources_pass() {
+fn fresh_official_and_historical_metadata_remain_unverified() {
     let tree = isolated_tree("external-freshness");
     let retrieved_at = chrono::Utc::now().to_rfc3339();
 
@@ -316,8 +316,13 @@ fn fresh_official_and_historical_paper_sources_pass() {
             "REQ-001,AC-001",
         ],
     );
-    assert_success(&official, "fresh official research");
-    assert_eq!(json_output(&official)["grounding"], "fresh");
+    assert!(!official.status.success());
+    let official_artifact = read_json(&official_path.join("research.json"));
+    assert_eq!(official_artifact["status"], "invalid");
+    assert_eq!(
+        official_artifact["claims"][0]["classification"],
+        "unverified"
+    );
     assert_eq!(
         read_json(&official_path.join("research.json"))["sources"][0]["sourceType"],
         "official-doc"
@@ -348,8 +353,15 @@ fn fresh_official_and_historical_paper_sources_pass() {
             "REQ-001,AC-001",
         ],
     );
-    assert_success(&paper, "historical paper research");
-    assert_eq!(json_output(&paper)["grounding"], "historical");
+    assert!(!paper.status.success());
+    assert_eq!(
+        read_json(&paper_path.join("research.json"))["grounding"],
+        "historical"
+    );
+    assert_eq!(
+        read_json(&paper_path.join("research.json"))["claims"][0]["classification"],
+        "unverified"
+    );
     assert_eq!(
         read_json(&paper_path.join("research.json"))["sources"][0]["publicationDate"],
         "2023-05-23"
@@ -357,7 +369,7 @@ fn fresh_official_and_historical_paper_sources_pass() {
 }
 
 #[test]
-fn historical_standard_is_accepted_and_labeled() {
+fn historical_standard_metadata_cannot_verify_research() {
     let tree = isolated_tree("historical-standard");
     let standard_retrieved_at = chrono::Utc::now().to_rfc3339();
     let (standard_id, standard_path) = specify(&tree, SPECIFIC_REQUEST);
@@ -385,8 +397,15 @@ fn historical_standard_is_accepted_and_labeled() {
             "REQ-001,AC-001",
         ],
     );
-    assert_success(&standard, "historical standard research");
-    assert_eq!(json_output(&standard)["grounding"], "historical");
+    assert!(!standard.status.success());
+    assert_eq!(
+        read_json(&standard_path.join("research.json"))["status"],
+        "invalid"
+    );
+    assert_eq!(
+        read_json(&standard_path.join("research.json"))["grounding"],
+        "historical"
+    );
     assert_eq!(
         read_json(&standard_path.join("research.json"))["sources"][0]["sourceType"],
         "standard"
@@ -436,7 +455,7 @@ fn local_research_is_visibly_local_only() {
 }
 
 #[test]
-fn fresh_research_cache_preserves_citation_metadata_and_is_reused() {
+fn fresh_research_cache_metadata_is_preserved_but_not_verified() {
     let tree = isolated_tree("research-cache");
     let cache_retrieved_at = chrono::Utc::now().to_rfc3339();
     let cached = research_cache_command(
@@ -472,15 +491,16 @@ fn fresh_research_cache_preserves_citation_metadata_and_is_reused() {
 
     let (cached_id, cached_path) = specify(&tree, SPECIFIC_REQUEST);
     let cached_research = plan_command(&tree, &["research", "--plan", &cached_id]);
-    assert_success(&cached_research, "cached plan research");
-    assert_eq!(json_output(&cached_research)["researchSource"], "cache");
+    assert!(!cached_research.status.success());
     let artifact = read_json(&cached_path.join("research.json"));
     assert_eq!(artifact["sources"][0]["sourceType"], "official-doc");
     assert!(artifact["sources"][0]["cacheId"].is_string());
+    assert_eq!(artifact["status"], "invalid");
+    assert_eq!(artifact["claims"][0]["classification"], "unverified");
 }
 
 #[test]
-fn research_cache_prefers_current_official_documentation() {
+fn research_cache_retains_competing_sources_without_verifying_metadata() {
     let tree = isolated_tree("research-cache-precedence");
     let precedence_retrieved_at = chrono::Utc::now().to_rfc3339();
     for record in [
@@ -535,10 +555,24 @@ fn research_cache_prefers_current_official_documentation() {
 
     let (preferred_id, preferred_path) = specify(&tree, SPECIFIC_REQUEST);
     let preferred_research = plan_command(&tree, &["research", "--plan", &preferred_id]);
-    assert_success(&preferred_research, "preferred cached research");
+    assert!(!preferred_research.status.success());
     let artifact = read_json(&preferred_path.join("research.json"));
     assert_eq!(artifact["researchSource"], "cache");
     assert_eq!(artifact["sources"][0]["sourceType"], "official-doc");
+    assert_eq!(artifact["sources"][1]["sourceType"], "paper");
+    assert_ne!(
+        artifact["sources"][0]["sourceId"],
+        artifact["sources"][1]["sourceId"]
+    );
+    assert!(
+        artifact["claims"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|claim| claim["classification"] == "unverified")
+            .count()
+            == 2
+    );
 }
 
 #[test]

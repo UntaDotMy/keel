@@ -195,20 +195,14 @@ change can revisit it with the same evidence.
 
 ## Remaining known limitations
 
-1. **Keel is a legacy-era MCP server, not a dual-era one.** The current MCP
-   revision (`2026-07-28`) names three implementation eras: *modern* (per-request
-   `_meta` version, `server/discover`, `resultType`, and `ttlMs`/`cacheScope` on
-   list results), *legacy* (`initialize` handshake, `2025-11-25` and earlier), and
-   *dual-era* (both). Keel implements `2025-11-25` plus the earlier `2024-11-05`,
-   which it rejects on Streamable HTTP with an explicit migration message rather
-   than mis-serving. Per that revision's own compatibility matrix, a legacy client
-   interoperates with Keel and a modern `2026-07-28` client does not. Becoming
-   dual-era is a scoped feature, not a defect fix; it is recorded as verified
-   research `CLM-007` in the plan evidence.
-   Keel does now emit the modern *result* fields (`resultType` on every result and
-   `ttlMs`/`cacheScope` on `tools/list`), so a peer that reads those fields sees the
-   shape it expects. That narrows the gap but does not close it: era membership is
-   decided by the handshake and per-request versioning, neither of which keel has.
+1. **Protocol-era limitation superseded by P03/P04.** Keel now targets only MCP
+   `2026-07-28`: per-request version and client capabilities, query-free
+   `server/discover`, no `initialize` handshake or HTTP protocol session, and
+   explicit legacy rejection. List results use private cache scope; cursor
+   continuation cache TTL is capped by the original snapshot deadline. Resource
+   reads are private and immediately stale. See [current protocol contract](context-gateway.md#scope-honesty).
+   Earlier test counts and packaged measurements in this report are historical
+   evidence and do not establish validation of this cutover.
 2. **The fixed-context ledger now reports the emitted handshake separately.**
    `mcp.tools_list.handshake` measures the dispatcher's own default response (687
    tokens against the packer's 1200-token hard limit), and `mcp.tools_list.catalog`

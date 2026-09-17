@@ -556,6 +556,107 @@ pub fn read_text_if_exists(path: &Path) -> Result<String, String> {
     }
 }
 
+/// Read a bounded UTF-8 tail of an append-only log from one file handle.
+/// Discard a leading partial record and report omitted bytes to the supplied writer.
+/// Read errors remain errors so each caller preserves its own failure policy.
+pub fn read_tail_text(
+    path: &Path,
+    max_bytes: u64,
+    standard_error: &mut dyn Write,
+) -> std::io::Result<String> {
+    use std::io::{Seek, SeekFrom};
+
+    let mut file = fs::File::open(path)?;
+    let size = file.metadata()?.len();
+    let read_limit = size.min(max_bytes.saturating_add(1));
+    let offset = size.saturating_sub(read_limit);
+    file.seek(SeekFrom::Start(offset))?;
+    let mut tail = Vec::new();
+    file.take(read_limit).read_to_end(&mut tail)?;
+    // The extra byte preserves a record beginning exactly at the cap boundary.
+    let start = if size > max_bytes {
+        tail.iter()
+            .position(|&byte| byte == b'\n')
+            .map_or(tail.len(), |index| index + 1)
+    } else {
+        0
+    };
+    let omitted = offset.saturating_add(start as u64);
+    if omitted > 0 {
+        writeln!(standard_error,
+            "keel: partial summary for {}: omitted {omitted} leading bytes (tail limit {max_bytes} bytes)",
+            display_path(path)
+        )?;
+    }
+    tail.drain(..start);
+    String::from_utf8(tail)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+}
+
+#[cfg(test)]
+mod bounded_tail_tests {
+    use super::*;
+
+    #[test]
+    fn bounded_tail_preserves_exact_boundary_record() {
+        let root = crate::test_support::unique_temp_dir("bounded-tail-boundary");
+        let path = root.join("events.jsonl");
+        fs::write(&path, "old\néé\n").expect("write fixture");
+        let mut errors = Vec::new();
+        assert_eq!(
+            read_tail_text(&path, 5, &mut errors).expect("read tail"),
+            "éé\n"
+        );
+        assert!(String::from_utf8(errors)
+            .expect("warning UTF-8")
+            .contains("omitted 4 leading bytes"));
+    }
+
+    #[test]
+    fn bounded_tail_discards_fragment_and_enforces_zero_cap() {
+        let root = crate::test_support::unique_temp_dir("bounded-tail-fragment");
+        let path = root.join("events.jsonl");
+        fs::write(&path, "oversized\nnew\n").expect("write fixture");
+        assert_eq!(
+            read_tail_text(&path, 6, &mut Vec::new()).expect("read tail"),
+            "new\n"
+        );
+        assert_eq!(
+            read_tail_text(&path, 0, &mut Vec::new()).expect("read zero tail"),
+            ""
+        );
+        fs::write(&path, "oversized").expect("write oversized record");
+        assert_eq!(
+            read_tail_text(&path, 3, &mut Vec::new()).expect("read oversized tail"),
+            ""
+        );
+    }
+
+    #[test]
+    fn bounded_tail_preserves_small_files_and_read_errors() {
+        let root = crate::test_support::unique_temp_dir("bounded-tail-errors");
+        let path = root.join("events.jsonl");
+        assert_eq!(
+            read_tail_text(&path, 32, &mut Vec::new())
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::NotFound
+        );
+        fs::write(&path, "complete\nlast").expect("write fixture");
+        assert_eq!(
+            read_tail_text(&path, 32, &mut Vec::new()).expect("read small file"),
+            "complete\nlast"
+        );
+        fs::write(&path, [0xff]).expect("write invalid UTF-8");
+        assert_eq!(
+            read_tail_text(&path, 32, &mut Vec::new())
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::InvalidData
+        );
+    }
+}
+
 /// Atomically write `text` to `path`.
 ///
 /// Writes to a sibling temp file, flushes it, then renames it over the target.

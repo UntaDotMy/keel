@@ -124,19 +124,19 @@ pub(super) fn hook_str<'a>(input: &'a JsonDocument, keys: &[&str]) -> &'a str {
 
 pub(super) fn hook_tool_name(input: &JsonDocument) -> &str {
     let tool_name = hook_str(input, &["tool_name", "toolName"]);
-    let tool_input = input
-        .get("tool_input")
-        .or_else(|| input.get("toolInput"))
-        .or_else(|| input.get("input"));
+    let tool_input = ["args", "tool_input", "toolInput", "input"]
+        .iter()
+        .filter_map(|key| input.get(*key))
+        .find(|value| value.is_object());
+    let path_keys = &["path", "file_path", "filePath"];
     let path = tool_input
-        .and_then(|value| {
-            value
-                .get("path")
-                .or_else(|| value.get("file_path"))
-                .or_else(|| value.get("filePath"))
-        })
-        .and_then(JsonDocument::as_str)
+        .map(|value| hook_str(value, path_keys))
         .unwrap_or("");
+    let path = if path.is_empty() {
+        hook_str(input, path_keys)
+    } else {
+        path
+    };
     effective_tool_name(tool_name, path)
 }
 

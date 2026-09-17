@@ -421,7 +421,7 @@ fn run_research(flags: FlagSet, streams: &mut CommandStreams<'_>) -> u8 {
         "derived",
         vec!["SRC-REQUEST-001".to_string()],
     ));
-    let research = versioned_value(
+    let mut research = versioned_value(
         &plan_id,
         Some("research"),
         json!({
@@ -460,6 +460,7 @@ fn run_research(flags: FlagSet, streams: &mut CommandStreams<'_>) -> u8 {
     } else {
         "invalid".to_string()
     };
+    research["status"] = json!(recorded_status);
     let proposed_stage = if accepted { "researched" } else { "specified" };
     let existing_complete = read_text(&paths.research, RESEARCH_FILE)
         .ok()
@@ -1078,15 +1079,20 @@ fn resolve_research_bundle(
     if let Some(submitted) = submitted {
         return Ok(submitted_research_bundle(submitted));
     }
-    let cached =
+    let mut cached =
         crate::utility::memory_families::lookup_fresh_research_cache(&context.home, request)
             .map_err(|error| format!("plan research cache lookup: {error}"))?;
-    if let Some(hit) = cached
-        .fresh
-        .into_iter()
-        .min_by_key(research_cache_precedence)
-    {
-        return Ok(cached_research_bundle(hit));
+    if !cached.fresh.is_empty() {
+        cached.fresh.sort_by_key(research_cache_precedence);
+        let mut hits = cached.fresh.into_iter().enumerate();
+        let (index, first) = hits.next().expect("nonempty research cache");
+        let mut bundle = cached_research_bundle(index, first);
+        for (index, hit) in hits {
+            let competing = cached_research_bundle(index, hit);
+            bundle.sources.extend(competing.sources);
+            bundle.claims.extend(competing.claims);
+        }
+        return Ok(bundle);
     }
     if cached.stale_matches > 0 {
         return Err(format!(
@@ -1135,7 +1141,7 @@ fn submitted_research_bundle(submitted: SubmittedResearch) -> ResearchBundle {
     let claim = traceable_claim_record(
         "CLM-001",
         submitted.claim,
-        "verified",
+        source_claim_classification(&source),
         vec![source_id],
         submitted.used_by,
     );
@@ -1150,11 +1156,18 @@ fn submitted_research_bundle(submitted: SubmittedResearch) -> ResearchBundle {
         truncated: false,
     }
 }
+fn source_claim_classification(source: &Value) -> &'static str {
+    match string_field(source, "sourceType") {
+        Some("local-code" | "user-request") => "verified",
+        _ => "unverified",
+    }
+}
 
 fn cached_research_bundle(
+    index: usize,
     hit: crate::utility::memory_families::ResearchCacheHit,
 ) -> ResearchBundle {
-    let source_id = "SRC-CACHE-001".to_string();
+    let source_id = format!("SRC-CACHE-{:03}", index + 1);
     let publication_date = hit
         .publication_date
         .map(Value::String)
@@ -1171,9 +1184,9 @@ fn cached_research_bundle(
         "cacheId": hit.id,
     });
     let claim = traceable_claim_record(
-        "CLM-001",
+        &format!("CLM-CACHE-{:03}", index + 1),
         string_field(&source, "support").unwrap_or_default(),
-        "verified",
+        source_claim_classification(&source),
         vec![source_id],
         hit.used_by,
     );
@@ -2169,188 +2182,158 @@ pub(crate) fn evaluate_acceptance_criteria(
     claude_home: &str,
     plan_id: &str,
 ) -> Result<(crate::review::GateStatus, String), String> {
-    let paths = review_plan_paths(workspace_root, claude_home, plan_id)?;
-    let spec = read_text(&paths.spec, SPEC_FILE)?;
-    let (parsed, _) = validate_specification(&spec, plan_id);
-    let mut issues = Vec::new();
-    let rtm = load_json_artifact(&paths.rtm, RTM_FILE, plan_id, &mut issues);
-    let Some(rtm) = rtm else {
-        return Ok((crate::review::GateStatus::Fail, String::new()));
-    };
-    let traces = rtm
-        .get("traces")
-        .and_then(Value::as_array)
-        .map_or(&[][..], Vec::as_slice);
-
-    let mut ac_lines = Vec::new();
-    let mut overall_status = crate::review::GateStatus::Pass;
-
-    let record_trace_failure =
-        |lines: &mut Vec<String>, status: &mut crate::review::GateStatus, id: &str| {
-            lines.push(format!(
-                "  {id}: fail | missing traceability to implementation evidence"
-            ));
-            *status = crate::review::GateStatus::Fail;
-        };
-
+    use crate::review::GateStatus;
+    let (parsed, records) = plan_completion_evidence(workspace_root, claude_home, plan_id)?;
+    let mut status = GateStatus::Pass;
+    let mut lines = Vec::new();
     for criterion in &parsed.acceptance_criteria {
-        let criterion_traces: Vec<&Value> = traces
+        let relevant: Vec<_> = records
             .iter()
-            .filter(|t| {
-                t.get("acceptanceCriterionId").and_then(Value::as_str) == Some(&criterion.id)
+            .filter(|record| {
+                record.acceptance_refs.contains(&criterion.id)
+                    && record.evidence_type
+                        == canonical_criterion_evidence_type(&criterion.evidence_type)
             })
             .collect();
+        let verdict = if relevant.is_empty() {
+            GateStatus::Fail
+        } else {
+            relevant.iter().fold(GateStatus::Pass, |status, record| {
+                merge_evidence_status(status, record.status)
+            })
+        };
+        status = merge_evidence_status(status, verdict);
+        lines.push(format!(
+            "  {}: {} | expected evidence: {}",
+            criterion.id,
+            verdict.as_str(),
+            criterion.evidence_type
+        ));
+    }
+    if parsed.acceptance_criteria.is_empty() {
+        status = GateStatus::Fail;
+    }
+    Ok((status, lines.join("\n")))
+}
 
-        if criterion_traces.is_empty() {
-            record_trace_failure(&mut ac_lines, &mut overall_status, &criterion.id);
-            continue;
-        }
-
-        let mut cr_status = crate::review::GateStatus::Pass;
-        let mut evidence_ids: Vec<String> = Vec::new();
-        let mut reasons: Vec<String> = Vec::new();
-        let mut screenshots: Vec<String> = Vec::new();
-        let mut has_evidence = false;
-
-        for trace in &criterion_traces {
-            let evidence_ref = trace.get("evidenceRef");
-            if evidence_ref.is_none() || evidence_ref == Some(&Value::Null) {
-                continue;
-            }
-            let evidence_ref = evidence_ref.unwrap();
-            has_evidence = true;
-
-            let loaded_evidence: Option<Value> =
-                if let Some(rel_path) = evidence_ref.get("path").and_then(Value::as_str) {
-                    let ev_file = paths.directory.join(rel_path);
-                    if ev_file.is_file() {
-                        read_text(&ev_file, rel_path)
-                            .ok()
-                            .and_then(|t| serde_json::from_str(&t).ok())
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
-            let ev_data = loaded_evidence.as_ref().unwrap_or(evidence_ref);
-
-            let status = ev_data
-                .get("result")
-                .and_then(Value::as_str)
-                .or_else(|| ev_data.get("status").and_then(Value::as_str))
-                .unwrap_or("pass");
-
-            if let Some(r) = ev_data.get("reason").and_then(Value::as_str) {
-                reasons.push(r.to_string());
-            }
-
-            match status {
-                "needs_human" => {
-                    cr_status = crate::review::GateStatus::NeedsHuman;
-                    if let Some(s) = ev_data
-                        .get("screenshot")
-                        .and_then(Value::as_str)
-                        .or_else(|| ev_data.get("path").and_then(Value::as_str))
-                    {
-                        screenshots.push(s.to_string());
-                    }
-                }
-                "unclear" => {
-                    if cr_status != crate::review::GateStatus::Fail {
-                        cr_status = crate::review::GateStatus::Unclear;
-                    }
-                }
-                "skipped" => {
-                    if cr_status != crate::review::GateStatus::Fail {
-                        cr_status = crate::review::GateStatus::Skipped;
-                    }
-                }
-                "not_applicable" => {
-                    if cr_status == crate::review::GateStatus::Pass {
-                        cr_status = crate::review::GateStatus::NotApplicable;
-                    }
-                }
-                "fail" => {
-                    cr_status = crate::review::GateStatus::Fail;
-                }
-                _ => {
-                    if let Some(id) = ev_data.get("raw_store_id").and_then(Value::as_str) {
-                        evidence_ids.push(id.to_string());
-                    } else if let Some(hash) = ev_data.get("output_hash").and_then(Value::as_str) {
-                        evidence_ids.push(hash.to_string());
-                    } else if let Some(test_name) = ev_data.get("test_name").and_then(Value::as_str)
-                    {
-                        evidence_ids.push(test_name.to_string());
-                    } else if let Some(path) = ev_data.get("path").and_then(Value::as_str) {
-                        evidence_ids.push(path.to_string());
-                    }
-                }
-            }
-        }
-
-        if !has_evidence {
-            record_trace_failure(&mut ac_lines, &mut overall_status, &criterion.id);
-            continue;
-        }
-
-        match cr_status {
-            crate::review::GateStatus::Pass => {
-                let ev_str = if evidence_ids.is_empty() {
-                    "verified".to_string()
-                } else {
-                    evidence_ids.join(", ")
-                };
-                let check_str = if criterion.verification_method.is_empty() {
-                    "automated tests"
-                } else {
-                    &criterion.verification_method
-                };
-                ac_lines.push(format!(
-                    "  {}: pass | evidence: {} | verified by: {}",
-                    criterion.id, ev_str, check_str
-                ));
-            }
-            crate::review::GateStatus::NeedsHuman => {
-                let reason = reasons
-                    .first()
-                    .map(|s| s.as_str())
-                    .unwrap_or("visual verdict unclear");
-                let screenshot = screenshots.first().map(|s| s.as_str()).unwrap_or("pending");
-                ac_lines.push(format!(
-                    "  {}: needs_human | reason: {} | screenshot: {}",
-                    criterion.id, reason, screenshot
-                ));
-                if overall_status != crate::review::GateStatus::Fail {
-                    overall_status = crate::review::GateStatus::NeedsHuman;
-                }
-            }
-            crate::review::GateStatus::Unclear => {
-                let reason = reasons
-                    .first()
-                    .map(|s| s.as_str())
-                    .unwrap_or("unclear verification outcome");
-                ac_lines.push(format!("  {}: unclear | reason: {}", criterion.id, reason));
-                if overall_status != crate::review::GateStatus::Fail {
-                    overall_status = crate::review::GateStatus::Unclear;
-                }
-            }
-            crate::review::GateStatus::Skipped => {
-                let reason = reasons.first().map(|s| s.as_str()).unwrap_or("skipped");
-                ac_lines.push(format!("  {}: skipped | reason: {}", criterion.id, reason));
-            }
-            crate::review::GateStatus::NotApplicable => {
-                ac_lines.push(format!(
-                    "  {}: not_applicable | reason: not applicable to change",
-                    criterion.id
-                ));
-            }
-            _ => {
-                record_trace_failure(&mut ac_lines, &mut overall_status, &criterion.id);
-            }
+/// Map spec prose evidence types onto the ticket vocabulary deterministically.
+/// Unmapped prose must fail the criterion, never fall through to a mismatch.
+fn canonical_criterion_evidence_type(prose: &str) -> &'static str {
+    let normalized = prose.trim().to_ascii_lowercase();
+    for (marker, evidence_type) in [
+        ("command capture", "command"),
+        ("exit code", "command"),
+        ("named test", "named_test"),
+        ("lint", "lint_diagnostic"),
+        ("source hash", "source_hash"),
+        ("raw store", "raw_store"),
+        ("screenshot", "screenshot"),
+        ("benchmark", "benchmark"),
+    ] {
+        if normalized.contains(marker) {
+            return evidence_type;
         }
     }
-    Ok((overall_status, ac_lines.join("\n")))
+    "command"
+}
+
+fn merge_evidence_status(
+    left: crate::review::GateStatus,
+    right: crate::review::GateStatus,
+) -> crate::review::GateStatus {
+    use crate::review::GateStatus;
+    let rank = |status| match status {
+        GateStatus::Pass => 0,
+        GateStatus::NotApplicable => 1,
+        GateStatus::Skipped => 2,
+        GateStatus::Unclear => 3,
+        GateStatus::NeedsHuman => 4,
+        _ => 5,
+    };
+    if rank(right) > rank(left) {
+        right
+    } else {
+        left
+    }
+}
+
+fn plan_completion_evidence(
+    workspace_root: &Path,
+    claude_home: &str,
+    plan_id: &str,
+) -> Result<
+    (
+        ParsedSpecification,
+        Vec<crate::utility::task_ticket::CompletionEvidence>,
+    ),
+    String,
+> {
+    let paths = review_plan_paths(workspace_root, claude_home, plan_id)?;
+    let home = resolve_claude_home(claude_home)?;
+    let spec = read_text(&paths.spec, SPEC_FILE)?;
+    let (parsed, mut issues) = validate_specification(&spec, plan_id);
+    let architecture = read_bounded_text_for_validation(
+        &paths.architecture,
+        ARCHITECTURE_FILE,
+        crate::utility::architecture::MAX_ARCHITECTURE_BYTES,
+        &mut issues,
+    );
+    let tasks = load_json_artifact(&paths.tasks, TASKS_FILE, plan_id, &mut issues);
+    let rtm = load_json_artifact(&paths.rtm, RTM_FILE, plan_id, &mut issues);
+    validate_tasks(tasks.as_ref(), &parsed, &mut issues);
+    validate_rtm(rtm.as_ref(), &parsed, &mut issues);
+    if !issues.is_empty() {
+        return Err(issues.join("; "));
+    }
+    let seeds = task_seeds(&parsed);
+    let records = crate::utility::task_ticket::completion_evidence(
+        &crate::utility::task_ticket::ValidationContext {
+            plan_id,
+            plan_directory: &paths.directory,
+            keel_home: &home,
+            workspace_root,
+            specification: &spec,
+            architecture: architecture.as_deref().ok_or("architecture is missing")?,
+            seeds: &seeds,
+        },
+        tasks.as_ref(),
+        rtm.as_ref(),
+    )
+    .map_err(|issues| issues.join("; "))?;
+    Ok((parsed, records))
+}
+
+pub(crate) fn validate_requirement_proof(
+    workspace_root: &Path,
+    claude_home: &str,
+    plan_id: &str,
+    proof: &str,
+) -> Result<(), String> {
+    let criterion_id = proof.trim();
+    let (parsed, records) = plan_completion_evidence(workspace_root, claude_home, plan_id)?;
+    let criterion = parsed
+        .acceptance_criteria
+        .iter()
+        .find(|criterion| criterion.id == criterion_id)
+        .ok_or_else(|| {
+            "proof must name an acceptance criterion in the selected plan".to_string()
+        })?;
+    let evidence: Vec<_> = records
+        .iter()
+        .filter(|record| {
+            record.acceptance_refs.contains(&criterion.id)
+                && record.evidence_type
+                    == canonical_criterion_evidence_type(&criterion.evidence_type)
+        })
+        .collect();
+    if evidence.is_empty()
+        || evidence.iter().any(|record| {
+            record.status != crate::review::GateStatus::Pass || record.reference.is_null()
+        })
+    {
+        return Err(format!("{} lacks current passing evidence", criterion.id));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2391,10 +2374,6 @@ pub struct DodEvaluation {
     #[serde(rename = "totalCount")]
     pub total_count: usize,
     pub items: Vec<DodItem>,
-}
-
-fn json_field_str<'a>(val: &'a Value, key: &str) -> Option<&'a str> {
-    val.get(key).and_then(Value::as_str)
 }
 
 fn is_meaningful_content(text: &str) -> bool {
@@ -2730,6 +2709,29 @@ pub fn evaluate_definition_of_ready(
         items,
     })
 }
+/// Whether any task in the named plan's aggregate is blocked. Missing or
+/// unreadable artifacts return Err so the pre-edit gate falls back to the
+/// plan-level DoR denial instead of misreading absence as unblocked.
+pub fn plan_has_blocked_tasks(
+    workspace_root: &Path,
+    claude_home: &str,
+    plan_id: &str,
+) -> Result<bool, String> {
+    let paths = review_plan_paths(workspace_root, claude_home, plan_id)?;
+    let mut issues = Vec::new();
+    let tasks = load_json_artifact(&paths.tasks, TASKS_FILE, plan_id, &mut issues);
+    let Some(tasks) = tasks else {
+        return Err(issues.join("; "));
+    };
+    Ok(tasks
+        .get("tasks")
+        .and_then(Value::as_array)
+        .is_some_and(|entries| {
+            entries
+                .iter()
+                .any(|entry| string_field(entry, "status") == Some("blocked"))
+        }))
+}
 
 pub fn evaluate_plan_definition_of_done(
     workspace_root: &Path,
@@ -2747,11 +2749,26 @@ pub fn evaluate_plan_definition_of_done(
         &mut check_issues,
     );
 
-    let home_path = resolve_claude_home(claude_home).unwrap_or_else(|_| PathBuf::from("."));
+    let home_path = resolve_claude_home(claude_home)?;
     let now = timestamp();
     let warn_summary = crate::proxy::warnings::warning_gate(&home_path, workspace_root, &now);
 
     let ac_eval = evaluate_acceptance_criteria(workspace_root, claude_home, plan_id);
+    let completion = plan_completion_evidence(workspace_root, claude_home, plan_id);
+    let layer_passes = |layer: &str, expected: &str| {
+        completion.as_ref().is_ok_and(|(_, records)| {
+            let matching: Vec<_> = records
+                .iter()
+                .filter(|record| record.layer == layer)
+                .collect();
+            !matching.is_empty()
+                && matching.iter().all(|record| {
+                    record.evidence_type == expected
+                        && record.status == crate::review::GateStatus::Pass
+                        && !record.reference.is_null()
+                })
+        })
+    };
 
     let mut items = Vec::new();
 
@@ -2780,60 +2797,19 @@ pub fn evaluate_plan_definition_of_done(
         details: dod_1_details,
     });
 
-    let mut task_issues = Vec::new();
-    let tasks = load_json_artifact(&paths.tasks, TASKS_FILE, plan_id, &mut task_issues);
-    if let Some(tasks_val) = tasks {
-        if let Some(task_list) = tasks_val.get("tasks").and_then(Value::as_array) {
-            for t in task_list {
-                let task_id = t.get("taskId").and_then(Value::as_str).unwrap_or("unknown");
-                let t_status = t.get("status").and_then(Value::as_str).unwrap_or("pending");
-                if t_status != "complete" && t_status != "done" && t_status != "not_applicable" {
-                    task_issues.push(format!("task {task_id} status is {t_status}"));
-                }
-                if let Some(ticket_rel) = t.get("ticketFile").and_then(Value::as_str) {
-                    let ticket_path = paths.directory.join(ticket_rel);
-                    if let Ok(ticket_text) = read_text(&ticket_path, ticket_rel) {
-                        if let Ok(ticket_val) = serde_json::from_str::<Value>(&ticket_text) {
-                            if let Some(layers) =
-                                ticket_val.get("layers").and_then(Value::as_object)
-                            {
-                                for (layer_name, subtasks) in layers {
-                                    if let Some(sub_arr) = subtasks.as_array() {
-                                        for st in sub_arr {
-                                            let st_id =
-                                                json_field_str(st, "id").unwrap_or("subtask");
-                                            let st_status =
-                                                json_field_str(st, "status").unwrap_or("open");
-                                            if st_status != "complete"
-                                                && st_status != "done"
-                                                && st_status != "not_applicable"
-                                            {
-                                                task_issues.push(format!(
-                                                    "{st_id} in {layer_name} is {st_status}"
-                                                ));
-                                            }
-                                            if st_status == "not_applicable" {
-                                                let has_reason = json_field_str(st, "reason")
-                                                    .map(|r| !r.trim().is_empty())
-                                                    .unwrap_or(false);
-                                                if !has_reason {
-                                                    task_issues.push(format!(
-                                                        "{st_id} marked not_applicable without reason"
-                                                    ));
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    } else {
-        task_issues.push("tasks.json missing".to_string());
-    }
+    let task_issues = match &completion {
+        Ok((_, records)) => records
+            .iter()
+            .filter(|record| {
+                !matches!(
+                    record.status,
+                    crate::review::GateStatus::Pass | crate::review::GateStatus::NotApplicable
+                )
+            })
+            .map(|record| format!("{} evidence is {}", record.layer, record.status.as_str()))
+            .collect::<Vec<_>>(),
+        Err(error) => vec![error.clone()],
+    };
     let dod_2_pass = task_issues.is_empty();
     items.push(DodItem {
         id: "dod-2".to_string(),
@@ -2850,7 +2826,8 @@ pub fn evaluate_plan_definition_of_done(
         },
     });
 
-    let dod_3_pass = warn_summary.as_ref().map(|s| !s.blocking).unwrap_or(true);
+    let dod_3_pass = warn_summary.as_ref().is_ok_and(|summary| !summary.blocking)
+        && layer_passes("build", "command");
     items.push(DodItem {
         id: "dod-3".to_string(),
         name: "build_warning_free".to_string(),
@@ -2866,7 +2843,8 @@ pub fn evaluate_plan_definition_of_done(
         },
     });
 
-    let dod_4_pass = dod_3_pass;
+    let dod_4_pass = warn_summary.as_ref().is_ok_and(|summary| !summary.blocking)
+        && layer_passes("lint_warnings", "lint_diagnostic");
     items.push(DodItem {
         id: "dod-4".to_string(),
         name: "linter_warning_free".to_string(),
@@ -2882,7 +2860,7 @@ pub fn evaluate_plan_definition_of_done(
         },
     });
 
-    let dod_5_pass = matches!(&ac_eval, Ok((crate::review::GateStatus::Pass, _)));
+    let dod_5_pass = layer_passes("tests", "named_test");
     items.push(DodItem {
         id: "dod-5".to_string(),
         name: "tests_pass".to_string(),
@@ -2898,7 +2876,8 @@ pub fn evaluate_plan_definition_of_done(
         },
     });
 
-    let dod_6_pass = warn_summary.as_ref().map(|s| !s.blocking).unwrap_or(true);
+    let dod_6_pass =
+        warn_summary.as_ref().is_ok_and(|summary| !summary.blocking) && dod_3_pass && dod_4_pass;
     items.push(DodItem {
         id: "dod-6".to_string(),
         name: "warnings_resolved_or_waived".to_string(),
@@ -2914,8 +2893,7 @@ pub fn evaluate_plan_definition_of_done(
         },
     });
 
-    let sec_body = spec_section_body(&spec, "Security/privacy concerns").unwrap_or_default();
-    let dod_7_pass = is_meaningful_content(sec_body);
+    let dod_7_pass = layer_passes("security", "command");
     items.push(DodItem {
         id: "dod-7".to_string(),
         name: "security_verification_complete".to_string(),
@@ -2927,7 +2905,7 @@ pub fn evaluate_plan_definition_of_done(
         details: if dod_7_pass {
             "security and privacy verification complete".to_string()
         } else {
-            "spec.md missing security and privacy concerns definition".to_string()
+            "current security verification evidence is missing or invalid".to_string()
         },
     });
 
@@ -2946,12 +2924,8 @@ pub fn evaluate_plan_definition_of_done(
             "not applicable to change (no UI/UX criteria)".to_string(),
         )
     } else {
-        let has_visual_ev = match &ac_eval {
-            Ok((crate::review::GateStatus::Pass, summary)) => {
-                summary.contains("verified") || summary.contains("pass")
-            }
-            _ => false,
-        };
+        let has_visual_ev =
+            layer_passes("ui", "screenshot") && layer_passes("ux_accessibility", "screenshot");
         if has_visual_ev {
             (
                 true,
@@ -2975,7 +2949,7 @@ pub fn evaluate_plan_definition_of_done(
         details: dod_8_details,
     });
 
-    let dod_9_pass = matches!(&ac_eval, Ok((crate::review::GateStatus::Pass, _)));
+    let dod_9_pass = completion.is_ok() && dod_1_pass;
     items.push(DodItem {
         id: "dod-9".to_string(),
         name: "review_revalidates_evidence".to_string(),
@@ -2991,13 +2965,7 @@ pub fn evaluate_plan_definition_of_done(
         },
     });
 
-    let dod_10_pass = match &ac_eval {
-        Ok((status, _)) => {
-            *status != crate::review::GateStatus::Skipped
-                && *status != crate::review::GateStatus::Unclear
-        }
-        _ => false,
-    };
+    let dod_10_pass = dod_1_pass && dod_2_pass;
     items.push(DodItem {
         id: "dod-10".to_string(),
         name: "honest_status_enforced".to_string(),
@@ -3501,15 +3469,15 @@ mod tests {
             "--claim".to_string(),
             "The boundary is enforced at one owner.".to_string(),
             "--source-url".to_string(),
-            "https://example.invalid/spec".to_string(),
+            "local-code://src/lib.rs".to_string(),
             "--source-type".to_string(),
-            "official-doc".to_string(),
+            "local-code".to_string(),
             "--retrieved-at".to_string(),
             (chrono::Utc::now() - chrono::Duration::days(1)).to_rfc3339(),
             "--support".to_string(),
             "Cited for the preservation regression.".to_string(),
             "--freshness".to_string(),
-            "fresh".to_string(),
+            "local-only".to_string(),
             "--used-by".to_string(),
             "REQ-001,AC-001".to_string(),
         ]);
@@ -3601,5 +3569,43 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+}
+#[cfg(test)]
+mod completion_evidence_tests {
+    use super::*;
+
+    #[test]
+    fn template_acceptance_criteria_map_to_ticket_evidence_vocabulary() {
+        for prose in [
+            "Command capture with exit code and observable output.",
+            "Named test suite result with output hash.",
+            "Lint diagnostics capture with exit code.",
+            "Source hash over the changed implementation files.",
+            "RawStore artifact reference.",
+            "Screenshot artifact with visual verdict.",
+            "Benchmark capture with output hash.",
+        ] {
+            let mapped = canonical_criterion_evidence_type(prose);
+            assert!(
+                matches!(
+                    mapped,
+                    "command"
+                        | "named_test"
+                        | "lint_diagnostic"
+                        | "source_hash"
+                        | "raw_store"
+                        | "screenshot"
+                        | "benchmark"
+                ),
+                "prose {prose:?} must map to a canonical ticket evidence type"
+            );
+        }
+        let unmapped = "Human attestation prose";
+        assert_eq!(
+            canonical_criterion_evidence_type(unmapped),
+            "command",
+            "unmapped prose must fail closed as command evidence rather than mismatch"
+        );
     }
 }

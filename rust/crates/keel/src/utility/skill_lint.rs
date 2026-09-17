@@ -181,6 +181,14 @@ pub fn run_skill_lint_command(
 
     let mut all_reports: Vec<SkillReport> =
         skill_files.iter().map(|path| lint_skill(path)).collect();
+    let catalog = crate::utility::skill_match::load_skill_catalog_for_dir(&repository_root);
+    for report in &mut all_reports {
+        if let Err(error) =
+            crate::utility::skill_match::validate_skill_dependencies(&report.name, &catalog)
+        {
+            report.errors.push(error);
+        }
+    }
     // Treat exact normalized-body duplicates as warnings for deliberate
     // consolidation; near-duplicate prose remains a human-review concern.
     let mut duplicate_groups: BTreeMap<String, Vec<usize>> = BTreeMap::new();
@@ -593,9 +601,12 @@ fn resource_reference_tokens(body: &str) -> Vec<String> {
                 '`' | '(' | ')' | '[' | ']' | '{' | '}' | '"' | '\''
             )
     }) {
+        let token = token.strip_prefix("./").unwrap_or(token);
         let cleaned = token
-            .trim_start_matches("./")
-            .trim_matches(|character: char| matches!(character, ',' | '.' | ':' | ';' | '!' | '?'))
+            .trim_end_matches([',', '.', ':', ';', '!'])
+            .split('#')
+            .next()
+            .unwrap_or_default()
             .trim();
         let has_resource_file = RESOURCE_DIRECTORY_NAMES.iter().any(|prefix| {
             cleaned
@@ -1036,6 +1047,21 @@ fn lint_skill(skill_path: &Path) -> SkillReport {
                 "S2 resource `{}` is {} tokens, over the {}-token hard limit",
                 resource.relative_path, tokens, limits.s2_hard_tokens
             ));
+        }
+    }
+    for resource in &resources {
+        if resource.tokens.is_none() || resource.bytes > SKILL_RESOURCE_MAX_BYTES as u64 {
+            continue;
+        }
+        if let Ok(text) = fs::read_to_string(skill_root.join(&resource.relative_path)) {
+            for referenced in resource_reference_tokens(&text) {
+                if !resource_reference_exists(skill_root, &referenced) {
+                    report.errors.push(format!(
+                        "resource `{}` references missing file `{referenced}`",
+                        resource.relative_path
+                    ));
+                }
+            }
         }
     }
     if report.package_bytes > limits.package_max_bytes {

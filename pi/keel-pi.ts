@@ -38,7 +38,6 @@ import {
   clearIronLawMarker,
   clearSessionStarted,
   hasSessionStarted,
-  ironLawSatisfied,
   isAlreadyCompacted,
   isEditClassTool,
   isKeelReadingCommand,
@@ -303,15 +302,7 @@ function handleToolCall(
       }
     }
 
-    if (editTool && !ironLawSatisfied(sessionID)) {
-      return {
-        block: true,
-        reason:
-          "IRON LAW ENFORCED (STRICT): Use a keel reading tool before editing.",
-      };
-    }
-
-    if (event?.toolCallId && event?.input) {
+    if (event?.toolCallId && event?.input && !recentToolInputs.has(event.toolCallId)) {
       recentToolInputs.set(event.toolCallId, event.input);
     }
 

@@ -13,14 +13,21 @@ use std::fs;
 use std::io;
 #[cfg(unix)]
 use std::io::Write;
+use std::path::Path;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use fs2::FileExt;
 /// Defense-in-depth disk cap. The capture chokepoint (runtime::run_command and
 /// the streaming path) already caps at MAX_CAPTURED_OUTPUT_BYTES, but a future
 /// caller could construct a RawRun directly — this ensures save() never writes
 /// an unbounded stream to disk. Matches the capture cap.
 const MAX_RAW_WRITE_BYTES: usize = 64 * 1024 * 1024;
+/// Combined cap for persisted stdout, stderr, compact text, and screenshots
+/// belonging to one raw artifact. Keeping the aggregate equal to the existing
+/// per-stream cap prevents two independent 64 MiB streams from doubling the
+/// disk budget for one recovery record.
+const MAX_RAW_ARTIFACT_BYTES: usize = MAX_RAW_WRITE_BYTES;
 /// Version that marks manifests written with the execution-receipt contract.
 /// Version 1 remains readable for artifacts created by UI verification.
 pub(crate) const EXECUTION_RECEIPT_INTEGRITY_SCHEMA_VERSION: u32 = 2;
@@ -44,6 +51,100 @@ const RAW_AUTO_PRUNE_INTERVAL_SECS: u64 = 6 * 60 * 60;
 /// next bounded maintenance sweep instead of forcing every save to enumerate all
 /// historical date directories.
 const RAW_STAGING_CLEANUP_INTERVAL_SECS: u64 = 6 * 60 * 60;
+
+/// One lock serializes publish/prune operations across short-lived hook
+/// processes. The lock is advisory to readers because publication is an atomic
+/// directory rename, but it prevents a prune from racing a writer between
+/// staging and publish.
+const RAW_STORE_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
+const RAW_STORE_LOCK_RETRY_MS: u64 = 25;
+
+struct RawStoreLock {
+    file: fs::File,
+}
+
+impl Drop for RawStoreLock {
+    fn drop(&mut self) {
+        // Qualify the trait method: rustc 1.89 added an inherent `File::unlock`
+        // that would otherwise shadow this and break the declared 1.80 MSRV.
+        let _ = fs2::FileExt::unlock(&self.file);
+    }
+}
+
+fn lock_raw_store(root: &Path) -> io::Result<RawStoreLock> {
+    reject_path_components(root)?;
+    fs::create_dir_all(root)?;
+    reject_symlink(root)?;
+    let path = root.join(".store.lock");
+    reject_symlink_if_exists(&path)?;
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&path)?;
+    let deadline = std::time::Instant::now() + RAW_STORE_LOCK_TIMEOUT;
+    loop {
+        match file.try_lock_exclusive() {
+            Ok(()) => return Ok(RawStoreLock { file }),
+            Err(error) if raw_store_lock_contention(&error) => {
+                if std::time::Instant::now() >= deadline {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "raw store lock remained held",
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(RAW_STORE_LOCK_RETRY_MS));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn raw_store_lock_contention(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::WouldBlock
+        || error
+            .raw_os_error()
+            .is_some_and(|code| matches!(code, 32 | 33))
+}
+
+fn bounded_capture_lengths(first: usize, second: usize) -> (usize, usize) {
+    let first = first.min(MAX_RAW_WRITE_BYTES);
+    let second = second
+        .min(MAX_RAW_WRITE_BYTES)
+        .min(MAX_RAW_ARTIFACT_BYTES.saturating_sub(first));
+    (first, second)
+}
+
+fn bounded_screenshot_capture_lengths(
+    stdout: usize,
+    stderr: usize,
+    screenshot: usize,
+) -> (usize, usize) {
+    let remaining = MAX_RAW_ARTIFACT_BYTES.saturating_sub(screenshot);
+    let stdout = stdout.min(MAX_RAW_WRITE_BYTES).min(remaining);
+    let stderr = stderr
+        .min(MAX_RAW_WRITE_BYTES)
+        .min(remaining.saturating_sub(stdout));
+    (stdout, stderr)
+}
+
+fn existing_capture_bytes(
+    directory: &std::path::Path,
+    compact_path: &std::path::Path,
+) -> io::Result<u64> {
+    let mut bytes = 0u64;
+    for name in ["stdout.log", "stderr.log", "screenshot.png"] {
+        let path = directory.join(name);
+        if let Ok(metadata) = fs::metadata(path) {
+            bytes = bytes.saturating_add(metadata.len());
+        }
+    }
+    if let Ok(metadata) = fs::metadata(compact_path) {
+        bytes = bytes.saturating_add(metadata.len());
+    }
+    Ok(bytes)
+}
 
 /// Resolve the raw-output retention in days using the same precedence as the
 /// SessionEnd prune: plugin userConfig env, then the operator env var, then the
@@ -110,6 +211,40 @@ pub struct RawStore {
 pub struct RawNamespace {
     pub workspace_id: String,
     pub session_id: String,
+}
+
+impl RawNamespace {
+    /// MCP identifiers are opaque and override each fallback independently.
+    /// Filesystem fallbacks preserve lexical identities used by existing artifacts.
+    pub(crate) fn for_workspace(workspace: &std::path::Path) -> Self {
+        Self {
+            workspace_id: raw_identity_env("KEEL_MCP_WORKSPACE_ID").unwrap_or_else(|| {
+                crate::runtime::clean_path(workspace)
+                    .to_string_lossy()
+                    .into_owned()
+            }),
+            session_id: [
+                "KEEL_MCP_SESSION_ID",
+                "CLAUDE_CODE_SESSION_ID",
+                "CODEX_THREAD_ID",
+            ]
+            .into_iter()
+            .find_map(raw_identity_env)
+            .unwrap_or_else(|| "default".to_string()),
+        }
+    }
+
+    pub(crate) fn has_mcp_context() -> bool {
+        raw_identity_env("KEEL_MCP_SESSION_ID").is_some()
+            || raw_identity_env("KEEL_MCP_WORKSPACE_ID").is_some()
+    }
+}
+
+fn raw_identity_env(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -214,10 +349,10 @@ impl RawStore {
     pub fn save(&self, meta: &mut RunMeta, run: &RawRun) -> std::io::Result<()> {
         validate_raw_id(&meta.raw_id)?;
         self.validate_namespace()?;
+        let _store_lock = lock_raw_store(&self.root)?;
         let date = chrono::Local::now().format("%Y-%m-%d").to_string();
         let day_dir = self.root.join(date);
         let dir = day_dir.join(&meta.raw_id);
-        reject_path_components(&self.root)?;
         reject_path_components(&day_dir)?;
         fs::create_dir_all(&day_dir)?;
         restrict_directory(&self.root)?;
@@ -234,20 +369,16 @@ impl RawStore {
         fs::create_dir(&staging_dir)?;
         restrict_directory(&staging_dir)?;
 
-        // Defense-in-depth: never write an unbounded stream to disk. The capture
-        // chokepoint already caps, but a direct RawRun caller could bypass it.
-        let stdout_bytes = if run.stdout.len() > MAX_RAW_WRITE_BYTES {
-            &run.stdout[..MAX_RAW_WRITE_BYTES]
-        } else {
-            &run.stdout[..]
-        };
-        let stderr_bytes = if run.stderr.len() > MAX_RAW_WRITE_BYTES {
-            &run.stderr[..MAX_RAW_WRITE_BYTES]
-        } else {
-            &run.stderr[..]
-        };
+        // Defense-in-depth: cap combined capture with stdout prioritized over
+        // stderr to satisfy the aggregate artifact budget.
+        let (stdout_len, stderr_len) = bounded_capture_lengths(run.stdout.len(), run.stderr.len());
+        let stdout_bytes = &run.stdout[..stdout_len];
+        let stderr_bytes = &run.stderr[..stderr_len];
         let previous_raw_path = meta.raw_path.clone();
+        let previous_stream_lengths = (meta.stdout_bytes, meta.stderr_bytes);
         meta.raw_path = dir.clone();
+        meta.stdout_bytes = stdout_len;
+        meta.stderr_bytes = stderr_len;
         let staged = (|| -> std::io::Result<()> {
             write_private(&staging_dir.join("stdout.log"), stdout_bytes)?;
             write_private(&staging_dir.join("stderr.log"), stderr_bytes)?;
@@ -264,6 +395,8 @@ impl RawStore {
         })();
         if let Err(error) = staged {
             meta.raw_path = previous_raw_path;
+            meta.stdout_bytes = previous_stream_lengths.0;
+            meta.stderr_bytes = previous_stream_lengths.1;
             let _ = fs::remove_dir_all(&staging_dir);
             return Err(error);
         }
@@ -284,8 +417,20 @@ impl RawStore {
                 ),
             ));
         }
+        let _store_lock = lock_raw_store(&self.root)?;
         let directory = self.find_dir(&meta.raw_id)?;
         validate_compact_path(&directory, &meta.compact_path)?;
+        let existing_capture = existing_capture_bytes(&directory, &meta.compact_path)?;
+        if existing_capture.saturating_add(compact_output.len() as u64)
+            > MAX_RAW_ARTIFACT_BYTES as u64
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "raw artifact captures exceed maximum aggregate size of {MAX_RAW_ARTIFACT_BYTES} bytes"
+                ),
+            ));
+        }
         reject_path_components(&self.root)?;
         reject_path_components(&directory)?;
         restrict_directory(&self.root)?;
@@ -310,6 +455,7 @@ impl RawStore {
     ) -> std::io::Result<PathBuf> {
         validate_raw_id(raw_id)?;
         self.validate_namespace()?;
+        let _store_lock = lock_raw_store(&self.root)?;
         let directory = self.find_dir(raw_id)?;
         restrict_directory(&self.root)?;
         restrict_directory(&directory)?;
@@ -341,18 +487,18 @@ impl RawStore {
     ) -> std::io::Result<PathBuf> {
         validate_raw_id(raw_id)?;
         self.validate_namespace()?;
-        if screenshot_png.len() > MAX_RAW_WRITE_BYTES {
+        if screenshot_png.len() > MAX_RAW_ARTIFACT_BYTES {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!(
-                    "screenshot exceeds maximum raw artifact size of {MAX_RAW_WRITE_BYTES} bytes"
+                    "screenshot exceeds maximum raw artifact size of {MAX_RAW_ARTIFACT_BYTES} bytes"
                 ),
             ));
         }
+        let _store_lock = lock_raw_store(&self.root)?;
         let date = chrono::Local::now().format("%Y-%m-%d").to_string();
         let day_dir = self.root.join(date);
         let dir = day_dir.join(raw_id);
-        reject_path_components(&self.root)?;
         reject_path_components(&day_dir)?;
         fs::create_dir_all(&day_dir)?;
         restrict_directory(&self.root)?;
@@ -369,19 +515,12 @@ impl RawStore {
         fs::create_dir(&staging_dir)?;
         restrict_directory(&staging_dir)?;
 
-        // Bound direct callers too; rejected screenshots and text streams use
-        // the same capture cap so no artifact grows without limit.
-        let stdout_bytes = if stdout.len() > MAX_RAW_WRITE_BYTES {
-            &stdout[..MAX_RAW_WRITE_BYTES]
-        } else {
-            stdout
-        };
-        let stderr_bytes = if stderr.len() > MAX_RAW_WRITE_BYTES {
-            &stderr[..MAX_RAW_WRITE_BYTES]
-        } else {
-            stderr
-        };
-
+        // A visual artifact is one aggregate capture: retain the screenshot
+        // first, then bound stdout and stderr against its remaining budget.
+        let (stdout_len, stderr_len) =
+            bounded_screenshot_capture_lengths(stdout.len(), stderr.len(), screenshot_png.len());
+        let stdout_bytes = &stdout[..stdout_len];
+        let stderr_bytes = &stderr[..stderr_len];
         let now = chrono::Local::now().timestamp_millis() as u64;
         let meta = RunMeta {
             raw_id: raw_id.to_string(),
@@ -397,11 +536,11 @@ impl RawStore {
             compact_path: PathBuf::new(),
             agent: "keel".to_string(),
             workspace: PathBuf::from("."),
-            stdout_bytes: stdout.len(),
-            stderr_bytes: stderr.len(),
+            stdout_bytes: stdout_len,
+            stderr_bytes: stderr_len,
             compact_stdout_bytes: 0,
             compact_stderr_bytes: 0,
-            estimated_tokens_before: (stdout.len() + stderr.len()) / 4,
+            estimated_tokens_before: (stdout_len + stderr_len) / 4,
             estimated_tokens_after: 0,
             estimated_tokens_saved: 0,
             savings_pct: 0.0,
@@ -775,6 +914,7 @@ impl RawStore {
         if !self.root.exists() {
             return Ok(0);
         }
+        let _store_lock = lock_raw_store(&self.root)?;
         let cutoff = SystemTime::now()
             .checked_sub(Duration::from_secs(days.saturating_mul(86_400)))
             .unwrap_or(UNIX_EPOCH);
@@ -1527,6 +1667,40 @@ mod tests {
                 .len() as usize,
             super::MAX_RAW_WRITE_BYTES
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn raw_store_caps_combined_stdout_and_stderr() {
+        let root = crate::test_support::unique_temp_dir("keel-raw-aggregate-cap");
+        let store = RawStore::with_root(root.to_path_buf());
+        let raw_id = "20260512-143012-aggregate0001";
+        let mut meta = sample_meta(raw_id);
+        let stdout = vec![b'o'; super::MAX_RAW_ARTIFACT_BYTES * 3 / 4];
+        let stderr = vec![b'e'; super::MAX_RAW_ARTIFACT_BYTES * 3 / 4];
+        store
+            .save(
+                &mut meta,
+                &RawRun {
+                    stdout,
+                    stderr,
+                    exit_code: 0,
+                },
+            )
+            .expect("aggregate-capped save");
+        let stdout_len = std::fs::metadata(meta.raw_path.join("stdout.log"))
+            .expect("stdout metadata")
+            .len() as usize;
+        let stderr_len = std::fs::metadata(meta.raw_path.join("stderr.log"))
+            .expect("stderr metadata")
+            .len() as usize;
+        assert_eq!(
+            stdout_len + stderr_len,
+            super::MAX_RAW_ARTIFACT_BYTES,
+            "combined stream payload must stop at the aggregate cap"
+        );
+        assert_eq!(meta.stdout_bytes, stdout_len);
+        assert_eq!(meta.stderr_bytes, stderr_len);
         let _ = std::fs::remove_dir_all(root);
     }
 

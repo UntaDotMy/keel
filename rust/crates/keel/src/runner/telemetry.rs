@@ -12,7 +12,6 @@
 //! A `--session` filter or `--top` truncation never propagates a non-zero
 //! exit code to the caller.
 
-use std::fs;
 use std::io::Write;
 
 use serde_json::Value as JsonDocument;
@@ -127,6 +126,7 @@ fn run_telemetry_summary(
     let rows = read_rows(
         day_files.iter().map(|(_, path)| path.as_path()),
         session_filter_opt,
+        standard_error,
     );
     let summaries = aggregate_rows(rows, top);
 
@@ -145,19 +145,17 @@ fn run_telemetry_summary(
     0
 }
 
-/// Read every line of every day file, drop malformed rows silently, and
-/// optionally restrict to a single session. Returns a `Vec` (not an
-/// iterator) because each call site immediately collects into the
-/// aggregator and the row volume is bounded by the user's daily tool use.
+/// Read at most 4 MiB per day file and drop malformed rows silently.
+/// Optionally restrict to a single session. Truncated files report omitted bytes.
 pub fn read_rows<'a>(
     day_files: impl IntoIterator<Item = &'a std::path::Path>,
     session_filter: Option<&str>,
+    standard_error: &mut dyn Write,
 ) -> Vec<TimingRow> {
     let mut out: Vec<TimingRow> = Vec::new();
     for path in day_files {
-        let Ok(body) = fs::read_to_string(path) else {
-            // Day file vanished between iter_day_files and now (e.g. a
-            // concurrent prune). Skip silently — reader contract.
+        let Ok(body) = crate::runtime::read_tail_text(path, 4 * 1024 * 1024, standard_error) else {
+            // Concurrent pruning can remove a day file; preserve skip-on-error.
             continue;
         };
         for line in body.lines() {
@@ -513,7 +511,7 @@ mod tests {
                 ],
             );
 
-            let rows = read_rows([path.as_path()], None);
+            let rows = read_rows([path.as_path()], None, &mut Vec::new());
             assert_eq!(
                 rows.len(),
                 3,
@@ -539,7 +537,7 @@ mod tests {
                 ],
             );
 
-            let rows = read_rows([path.as_path()], Some("alpha"));
+            let rows = read_rows([path.as_path()], Some("alpha"), &mut Vec::new());
             assert_eq!(rows.len(), 2);
             assert_eq!(rows[0].tool_name, "Bash");
             assert_eq!(rows[1].tool_name, "Edit");

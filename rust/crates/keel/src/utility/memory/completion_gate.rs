@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 
 use crate::args::FlagSet;
 use crate::json::Value;
-use crate::runtime::{resolve_claude_home, resolve_repository_root};
+use crate::runtime::resolve_claude_home;
 use crate::utility::working_brief::{list_briefs, read_brief, write_brief};
 
 use super::shared::{is_help_argument, probe_marker, probe_value, render_workflow_json};
@@ -229,11 +229,43 @@ fn run_completion_gate_check(
     } else {
         Ok(proof_input.clone())
     };
+    let proof_probe = proof_probe.and_then(|proof| {
+        let plan = flag_set.string_value("plan").trim();
+        if !plan.is_empty() {
+            let brief = brief_probe.as_ref().map_err(Clone::clone)?;
+            if brief.workspace.trim().is_empty() {
+                return Err("evidence requires the brief workspace".to_string());
+            }
+            for criterion in brief
+                .acceptance_criteria
+                .iter()
+                .filter(|value| !value.trim().is_empty())
+            {
+                let id = crate::review::stable_requirement_id(criterion);
+                let binding = proof
+                    .lines()
+                    .find_map(|line| {
+                        let (key, value) = line.split_once('=')?;
+                        (key.trim() == id).then_some(value.trim())
+                    })
+                    .ok_or_else(|| {
+                        format!("missing criterion-specific evidence binding {id}=AC-...")
+                    })?;
+                crate::utility::plan::validate_requirement_proof(
+                    Path::new(brief.workspace.trim()),
+                    &claude_home.to_string_lossy(),
+                    plan,
+                    binding,
+                )?;
+            }
+        }
+        Ok(proof)
+    });
     let proof_status = proof_probe.as_ref().map_or_else(Clone::clone, Clone::clone);
 
     let warnings_probe: Result<String, String> = match &brief_probe {
         Ok(brief) if brief.workspace.trim().is_empty() => {
-            Ok("no workspace recorded on brief".to_string())
+            Err("warnings require the brief workspace".to_string())
         }
         Ok(brief) => {
             let workspace = PathBuf::from(brief.workspace.trim());
@@ -256,7 +288,7 @@ fn run_completion_gate_check(
             Ok(brief) if !brief.workspace.trim().is_empty() => {
                 PathBuf::from(brief.workspace.trim())
             }
-            _ => resolve_repository_root("").unwrap_or_else(|_| PathBuf::from(".")),
+            _ => PathBuf::new(),
         };
         Some(
             match crate::utility::plan::evaluate_plan_definition_of_done(

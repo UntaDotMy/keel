@@ -378,27 +378,24 @@ pub fn run_verify_ui_command(
         }
     };
 
-    let (verdict, reasons) = evaluate_visual_criterion(&criterion, fixture_val.as_ref(), adapter);
+    let (mut verdict, mut reasons) =
+        evaluate_visual_criterion(&criterion, fixture_val.as_ref(), adapter);
+    if criterion.screenshot_required && screenshot_data.is_none() && verdict == VisualVerdict::Pass
+    {
+        verdict = VisualVerdict::NeedsHuman;
+        reasons.push(
+            "Screenshot proof is required but no screenshot capture was provided; cannot substitute placeholder PNG for visual acceptance"
+                .to_string(),
+        );
+    }
     let reasons = bound_ui_reasons(reasons);
 
     let raw_store_root = resolve_claude_home(claude_home_flag)
         .map(|home| home.join("raw-output"))
         .unwrap_or_else(|_| repository_root.join(".keel/raw-output"));
-    let session_id = ["CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID"]
-        .iter()
-        .find_map(|name| {
-            std::env::var(name)
-                .ok()
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty())
-        })
-        .unwrap_or_else(|| "default".to_string());
     let store = RawStore::with_namespace(
         raw_store_root,
-        RawNamespace {
-            workspace_id: repository_root.to_string_lossy().to_string(),
-            session_id,
-        },
+        RawNamespace::for_workspace(&repository_root),
     );
 
     let raw_id = RawStore::generate_id();
@@ -407,7 +404,12 @@ pub fn run_verify_ui_command(
 
     let exit_code = if verdict == VisualVerdict::Fail { 1 } else { 0 };
 
-    let png_bytes = screenshot_data.as_deref().unwrap_or(MINIMAL_PNG_BYTES);
+    let empty_png: &[u8] = &[];
+    let png_bytes = match screenshot_data.as_deref() {
+        Some(bytes) => bytes,
+        None if criterion.screenshot_required => empty_png,
+        None => MINIMAL_PNG_BYTES,
+    };
 
     let stdout_summary = format!(
         "state: {}\nadapter: {}\nverdict: {}\nreasons: {}\n",
@@ -530,15 +532,7 @@ fn project_ui_evidence(
     evidence: &UiEvidenceRecord,
     repository_root: &Path,
 ) -> Result<crate::proxy::context::ContextProjection, String> {
-    let session_id = ["CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID"]
-        .iter()
-        .find_map(|name| {
-            std::env::var(name)
-                .ok()
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty())
-        })
-        .unwrap_or_else(|| "default".to_string());
+    let namespace = RawNamespace::for_workspace(repository_root);
     let summary = format!(
         "UI Verification Result:\nstate: {}\nadapter: {}\nverdict: {}\nreview_status: {}\nscreenshot_id: {}\nreasons: {}",
         evidence.state,
@@ -556,8 +550,8 @@ fn project_ui_evidence(
             crate::proxy::context::ContextSource::UiVerification,
             summary,
             Some(evidence.screenshot_id.clone()),
-            repository_root.to_string_lossy().to_string(),
-            session_id,
+            namespace.workspace_id,
+            namespace.session_id,
         )
         .with_cache_class(crate::proxy::context::CacheClass::Session),
     )

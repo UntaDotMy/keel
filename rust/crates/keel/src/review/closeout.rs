@@ -1153,7 +1153,7 @@ pub(crate) fn run_review_closeout_command(
             return 1;
         }
     };
-    let claude_home = match resolve_claude_home("") {
+    let claude_home = match resolve_claude_home(flags.string_value("claude-home")) {
         Ok(path) => path,
         Err(error) => {
             let _ = writeln!(standard_error, "{error}");
@@ -1249,6 +1249,15 @@ pub(crate) fn run_review_closeout_command(
                             text: text.clone(),
                             status: ReviewFindingStatus::Open,
                             evidence: requirement_proof(proof, &stable_requirement_id(text))
+                                .filter(|criterion| {
+                                    crate::utility::plan::validate_requirement_proof(
+                                        &repository_root,
+                                        &claude_home.to_string_lossy(),
+                                        flags.string_value("plan"),
+                                        criterion,
+                                    )
+                                    .is_ok()
+                                })
                                 .into_iter()
                                 .collect(),
                         }
@@ -1266,7 +1275,7 @@ pub(crate) fn run_review_closeout_command(
                                 requirement.id
                             ),
                             format!(
-                                "provide `{}=<command or artifact evidence>` in --proof",
+                                "provide `{}=AC-...` in --proof and --plan with current validated evidence",
                                 requirement.id
                             ),
                             &head_sha,

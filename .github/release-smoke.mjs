@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { createInterface } from "node:readline";
 
-const MCP_PROTOCOL_VERSION = "2025-11-25";
+const MCP_PROTOCOL_VERSION = "2026-07-28";
 const MCP_FRAME_LIMIT_BYTES = 24_000;
 const MCP_TEXT_LIMIT_CHARS = 12_000;
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -99,7 +99,9 @@ class McpSession {
     this.waiters.delete(message.id);
     clearTimeout(waiter.timer);
     if (message.error) {
-      waiter.reject(new Error(`MCP request ${waiter.method} failed: ${JSON.stringify(message.error)}`));
+      const error = new Error(`MCP request ${waiter.method} failed: ${JSON.stringify(message.error)}`);
+      error.mcpError = message.error;
+      waiter.reject(error);
     } else {
       waiter.resolve(message.result);
     }
@@ -117,11 +119,20 @@ class McpSession {
     if (this.closed) {
       throw new Error(`cannot notify closed MCP server: ${method}`);
     }
-    const request = { jsonrpc: "2.0", method };
-    if (params !== undefined) {
-      request.params = params;
+    this.child.stdin.write(`${JSON.stringify(this.modernize({ jsonrpc: "2.0", method, params }))}\n`);
+  }
+
+  // Every modern request self-describes its era; there is no handshake step.
+  modernize(message) {
+    if (message.params === undefined) {
+      message.params = {};
     }
-    this.child.stdin.write(`${JSON.stringify(request)}\n`);
+    message.params._meta = {
+      "io.modelcontextprotocol/protocolVersion": MCP_PROTOCOL_VERSION,
+      "io.modelcontextprotocol/clientCapabilities": {},
+      "io.modelcontextprotocol/clientInfo": { name: "keel-release-smoke", version: "1" },
+    };
+    return message;
   }
 
   request(method, params) {
@@ -134,6 +145,7 @@ class McpSession {
     if (params !== undefined) {
       request.params = params;
     }
+    this.modernize(request);
     return new Promise((resolveResult, rejectResult) => {
       const timer = setTimeout(() => {
         this.waiters.delete(id);
@@ -248,26 +260,50 @@ async function runSmoke(options) {
   try {
     session = new McpSession(options.binary, options.bundleRoot, options.claudeHome);
 
-    await recordCheck(checks, "initialize", async () => {
-      const result = await session.request("initialize", {
-        protocolVersion: MCP_PROTOCOL_VERSION,
-        capabilities: {},
-        clientInfo: { name: "keel-release-smoke", version: "1" },
-      });
-      if (result?.protocolVersion !== MCP_PROTOCOL_VERSION || result?.serverInfo?.name !== "keel") {
-        throw new Error(`unexpected initialize result: ${JSON.stringify(result)}`);
+    await recordCheck(checks, "server-discover", async () => {
+      const result = await session.request("server/discover", {});
+      if (result?.resultType !== "complete" || !Array.isArray(result?.supportedVersions)
+        || !result.supportedVersions.includes(MCP_PROTOCOL_VERSION)
+        || result?.capabilities?.tools === undefined
+        || result?.capabilities?.resources === undefined
+        || result?._meta?.["io.modelcontextprotocol/serverInfo"]?.name !== "keel") {
+        throw new Error(`unexpected server/discover result: ${JSON.stringify(result)}`);
       }
-      return { protocolVersion: result.protocolVersion, server: result.serverInfo };
+      await recordCheck(checks, "legacy-initialize-rejected", async () => {
+        const id = session.nextId;
+        session.nextId += 1;
+        const rejection = await new Promise((resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error("legacy initialize not rejected within 30s")), REQUEST_TIMEOUT_MS);
+          session.waiters.set(id, { method: "initialize", resolve: () => reject(new Error("legacy initialize unexpectedly succeeded")), reject: resolve, timer });
+          session.child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, method: "initialize", params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "keel-release-smoke-legacy", version: "1" } } })}\n`);
+        });
+        if (rejection?.mcpError?.code !== -32022 || rejection?.mcpError?.data?.requested !== "2025-11-25") {
+          throw new Error(`legacy initialize was not rejected with -32022: ${JSON.stringify(rejection)}`);
+        }
+        return { rejected: rejection.mcpError.code };
+      });
+      return { supportedVersions: result.supportedVersions, server: result._meta["io.modelcontextprotocol/serverInfo"] };
     });
-    session.notify("notifications/initialized");
 
     await recordCheck(checks, "tools-list", async () => {
-      const result = await session.request("tools/list", {});
-      const tools = result?.tools;
+      const tools = [];
+      const seenCursors = new Set();
+      let cursor;
+      do {
+        const page = await session.request("tools/list", cursor ? { cursor } : {});
+        if (!Array.isArray(page.tools) || page.cacheScope !== "private" || page.resultType !== "complete") {
+          throw new Error(`invalid catalog page: ${JSON.stringify(page)}`);
+        }
+        tools.push(...page.tools);
+        cursor = page.nextCursor;
+        if (cursor && seenCursors.has(cursor)) throw new Error("catalog cursor repeated");
+        if (cursor) seenCursors.add(cursor);
+      } while (cursor);
       if (!Array.isArray(tools) || tools.length < 7) {
-        throw new Error(`tools/list returned an unexpectedly small catalog: ${JSON.stringify(result)}`);
+        throw new Error(`tools/list returned an unexpectedly small catalog: ${JSON.stringify(tools)}`);
       }
       const names = new Set(tools.map((tool) => tool?.name));
+      if (names.size !== tools.length) throw new Error("catalog traversal duplicated tools");
       for (const required of ["run_command", "skill_route", "skill_get", "memory_status", "brief_create", "recall"]) {
         if (!names.has(required)) {
           throw new Error(`tools/list omitted required tool ${required}`);
@@ -278,7 +314,7 @@ async function runSmoke(options) {
           throw new Error(`tool ${tool?.name ?? "<unnamed>"} has an invalid inputSchema`);
         }
       }
-      return { toolCount: tools.length, nextCursor: result.nextCursor ?? null };
+      return { toolCount: tools.length, nextCursor: null };
     });
 
     await recordCheck(checks, "memory-write-seed", async () => {
@@ -368,22 +404,14 @@ async function runSmoke(options) {
     await session.close();
     session = new McpSession(options.binary, options.bundleRoot, options.claudeHome);
     await recordCheck(checks, "restart-and-reconnect", async () => {
-      const result = await session.request("initialize", {
-        protocolVersion: MCP_PROTOCOL_VERSION,
-        capabilities: {},
-        clientInfo: { name: "keel-release-smoke-reconnect", version: "1" },
-      });
-      if (result?.protocolVersion !== MCP_PROTOCOL_VERSION || result?.serverInfo?.name !== "keel") {
-        throw new Error(`unexpected reconnect initialize result: ${JSON.stringify(result)}`);
-      }
-      session.notify("notifications/initialized");
+      await session.request("server/discover", {});
       const recalled = await callTool(session, "recall", { query: marker, limit: 1 });
       const { value } = parseToolJson(recalled, "reconnect recall");
       const context = requireBoundedContext(recalled, "reconnect recall");
       if (!Array.isArray(value.matches) || value.matches.length < 1) {
         throw new Error(`reconnect could not retrieve persisted memory: ${JSON.stringify(value)}`);
       }
-      return { ...context, matchCount: value.matches.length };
+      return { context };
     });
   } catch (error) {
     error.checks = checks;
