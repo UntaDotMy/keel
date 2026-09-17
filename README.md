@@ -60,7 +60,7 @@ Anvil never commits or pushes.
 | --- | --- |
 | Iron-law hooks | Session start, per-prompt restatement, reviewer nudge, map refresh across compaction. |
 | Skills + install | Multi-host install into Claude/Cursor/Codex and related harnesses; managed skills and slash wrappers. |
-| MCP | `keel mcp serve` (stdio) and `keel mcp serve-http` (loopback). |
+| MCP | `keel mcp serve` (stdio) and `keel mcp serve-http` (loopback). Manifest tools: `recall`, `system_map`, `run_command`, `command_output`, `command_kill`, `recall_status`, `skill_route`, `skill_get`, `skill_list`, `memory_status`, `brief_list`, `brief_get`, `brief_create`, `system_map_refresh`, `context_brief`, `cli`, `anvil`, `review`, `git_workflow`, `memory`, `gain`, `raw`, `config_audit`, `skill_lint`, `telemetry`, `session`, `doctor`, `code_search`, `code_index`, `flow`, `code_graph`, `learn`, `observe`, `rewrite`, `skill_eval`, `design_intelligence`, and `stats`, plus `keel://system-map` and `keel://recall/status`. |
 | Anvil + review | Fail-closed delivery loop and local review gates so non-trivial work does not self-merge on vibes. |
 | Brownfield flow check | For edits to established source, review can require owner-path evidence (`keel flow …`) before gates pass. Soft claim only — not a bakeoff-proven uniqueness line. |
 
