@@ -506,7 +506,10 @@ fn mcp_stdio_classic_initialize_handshake_succeeds() {
     // Classic path: tools/list and ping without `_meta` after initialize.
     server.send(&json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}));
     let listed = server.recv();
-    assert!(listed.get("result").is_some(), "classic tools/list: {listed}");
+    assert!(
+        listed.get("result").is_some(),
+        "classic tools/list: {listed}"
+    );
     assert!(listed["result"]["tools"].is_array());
     server.send(&json!({"jsonrpc":"2.0","id":3,"method":"ping"}));
     assert_eq!(server.recv()["result"]["resultType"], "complete");
@@ -529,7 +532,10 @@ fn mcp_stdio_discover_then_initialize_fallback() {
     server.send(&json!({"jsonrpc":"2.0","method":"notifications/initialized"}));
     server.send(&json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"recall_status","arguments":{}}}));
     let call = server.recv();
-    assert!(call.get("result").is_some(), "tools/call after fallback: {call}");
+    assert!(
+        call.get("result").is_some(),
+        "tools/call after fallback: {call}"
+    );
     server.close();
     let _ = std::fs::remove_dir_all(home);
 }
@@ -542,15 +548,26 @@ fn mcp_stdio_modern_minimal_meta_tools_after_discover() {
         "io.modelcontextprotocol/protocolVersion": "2026-07-28",
         "io.modelcontextprotocol/clientCapabilities": {}
     });
-    server.send(&json!({"jsonrpc":"2.0","id":1,"method":"server/discover","params":{"_meta":minimal}}));
+    server.send(
+        &json!({"jsonrpc":"2.0","id":1,"method":"server/discover","params":{"_meta":minimal}}),
+    );
     let discovery = server.recv();
-    assert_eq!(discovery["result"]["supportedVersions"], json!(["2026-07-28"]));
+    assert_eq!(
+        discovery["result"]["supportedVersions"],
+        json!(["2026-07-28"])
+    );
     server.send(&json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{"_meta":minimal}}));
     let listed = server.recv();
-    assert!(listed.get("result").is_some(), "minimal-meta tools/list: {listed}");
+    assert!(
+        listed.get("result").is_some(),
+        "minimal-meta tools/list: {listed}"
+    );
     server.send(&json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"recall_status","arguments":{},"_meta":minimal}}));
     let call = server.recv();
-    assert!(call.get("result").is_some(), "minimal-meta tools/call: {call}");
+    assert!(
+        call.get("result").is_some(),
+        "minimal-meta tools/call: {call}"
+    );
     server.close();
     let _ = std::fs::remove_dir_all(home);
 }
@@ -563,10 +580,14 @@ fn mcp_stdio_unsupported_initialize_lists_both_eras() {
     let rejected = server.recv();
     assert_eq!(rejected["error"]["code"], -32022);
     assert_eq!(rejected["error"]["data"]["requested"], "1999-01-01");
-    let supported = rejected["error"]["data"]["supported"].as_array().expect("supported list");
+    let supported = rejected["error"]["data"]["supported"]
+        .as_array()
+        .expect("supported list");
     for version in ["2024-11-05", "2025-03-26", "2025-11-25", "2026-07-28"] {
         assert!(
-            supported.iter().any(|entry| entry.as_str() == Some(version)),
+            supported
+                .iter()
+                .any(|entry| entry.as_str() == Some(version)),
             "missing {version} in {supported:?}"
         );
     }

@@ -270,8 +270,7 @@ pub(super) const MCP_CAPABILITIES_META: &str = "io.modelcontextprotocol/clientCa
 
 /// Classic initialize revisions (Stack A) accepted without `_meta`.
 /// Cursor / Antigravity-class hosts speak these; keep them additive with modern.
-pub(super) const CLASSIC_PROTOCOL_VERSIONS: &[&str] =
-    &["2024-11-05", "2025-03-26", "2025-11-25"];
+pub(super) const CLASSIC_PROTOCOL_VERSIONS: &[&str] = &["2024-11-05", "2025-03-26", "2025-11-25"];
 
 /// Every version Keel advertises in `-32022` `data.supported` (both eras).
 pub(super) fn all_supported_protocol_versions() -> Vec<&'static str> {
@@ -2333,30 +2332,33 @@ mod tests {
                 "io.modelcontextprotocol/clientCapabilities": {}
             }}
         });
-        let listed = dispatch_cancellable_with_context(&list_after_discover, &cancel, &context)
-            .unwrap();
-        assert!(listed.get("result").is_some(), "post-discover tools/list: {listed}");
+        let listed =
+            dispatch_cancellable_with_context(&list_after_discover, &cancel, &context).unwrap();
+        assert!(
+            listed.get("result").is_some(),
+            "post-discover tools/list: {listed}"
+        );
         assert!(listed["result"]["tools"].is_array());
 
         // G4: bare discover params:{} fails closed with -32602 (missing _meta), not hang.
         reset_wire_era_for_test();
-        let bare = serde_json::json!({"jsonrpc":"2.0","id":12,"method":"server/discover","params":{}});
+        let bare =
+            serde_json::json!({"jsonrpc":"2.0","id":12,"method":"server/discover","params":{}});
         let bare_response = dispatch_cancellable_with_context(&bare, &cancel, &context).unwrap();
         assert_eq!(bare_response["error"]["code"], -32602);
 
         // G1 / G2: classic initialize for supported revisions succeeds (no _meta).
         reset_wire_era_for_test();
-        for (id, version) in [
-            (2, "2024-11-05"),
-            (3, "2025-03-26"),
-            (4, "2025-11-25"),
-        ] {
+        for (id, version) in [(2, "2024-11-05"), (3, "2025-03-26"), (4, "2025-11-25")] {
             let legacy = serde_json::json!({
                 "jsonrpc":"2.0","id":id,"method":"initialize",
                 "params":{"protocolVersion":version,"capabilities":{},"clientInfo":{"name":"classic","version":"1"}}
             });
             let response = dispatch_cancellable_with_context(&legacy, &cancel, &context).unwrap();
-            assert!(response.get("error").is_none(), "classic initialize {version}: {response}");
+            assert!(
+                response.get("error").is_none(),
+                "classic initialize {version}: {response}"
+            );
             assert_eq!(response["result"]["protocolVersion"], version);
             assert!(response["result"]["capabilities"]["tools"].is_object());
             assert_eq!(response["result"]["serverInfo"]["name"], MCP_SERVER_NAME);
@@ -2365,13 +2367,19 @@ mod tests {
         // G5: tools/list + tools/call without _meta after classic initialize.
         let list = serde_json::json!({"jsonrpc":"2.0","id":5,"method":"tools/list","params":{}});
         let listed = dispatch_cancellable_with_context(&list, &cancel, &context).unwrap();
-        assert!(listed.get("result").is_some(), "classic tools/list: {listed}");
+        assert!(
+            listed.get("result").is_some(),
+            "classic tools/list: {listed}"
+        );
         let call = serde_json::json!({
             "jsonrpc":"2.0","id":6,"method":"tools/call",
             "params":{"name":"recall_status","arguments":{}}
         });
         let called = dispatch_cancellable_with_context(&call, &cancel, &context).unwrap();
-        assert!(called.get("result").is_some(), "classic tools/call: {called}");
+        assert!(
+            called.get("result").is_some(),
+            "classic tools/call: {called}"
+        );
 
         // G6: unknown version fail-closed with -32022 listing BOTH eras.
         reset_wire_era_for_test();
@@ -2389,7 +2397,8 @@ mod tests {
 
         // G2: discover → initialize fallback (Antigravity-like) still completes.
         reset_wire_era_for_test();
-        let discover_attempt = serde_json::json!({"jsonrpc":"2.0","id":8,"method":"server/discover","params":{}});
+        let discover_attempt =
+            serde_json::json!({"jsonrpc":"2.0","id":8,"method":"server/discover","params":{}});
         let _ = dispatch_cancellable_with_context(&discover_attempt, &cancel, &context);
         let fallback = serde_json::json!({
             "jsonrpc":"2.0","id":9,"method":"initialize",
