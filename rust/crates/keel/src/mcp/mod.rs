@@ -184,11 +184,16 @@ pub(crate) fn current_mcp_session_id() -> Option<String> {
 /// server-issued `MCP-Session-Id` header; stdio falls back to the host session
 /// environment. The workspace is always the server process cwd. Client
 /// arguments may describe a requested identity, but they never establish it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `wire_era` is session/connection scoped via `Arc`: clones share handshake
+/// state (stdio one-process-per-session). HTTP is sessionless and builds a
+/// fresh context per request so Classic↔Modern clients cannot cross-contaminate.
+#[derive(Debug, Clone)]
 pub(crate) struct McpRequestContext {
     pub(crate) session_id: String,
     pub(crate) workspace_id: String,
     pub(crate) request_id: Option<String>,
+    pub(crate) wire_era_state: Arc<std::sync::atomic::AtomicU8>,
 }
 
 impl McpRequestContext {
@@ -208,6 +213,7 @@ impl McpRequestContext {
             session_id,
             workspace_id,
             request_id: None,
+            wire_era_state: Arc::new(std::sync::atomic::AtomicU8::new(WireEra::Unset as u8)),
         }
     }
 
@@ -215,6 +221,29 @@ impl McpRequestContext {
         let mut scoped = self.clone();
         scoped.request_id = request_id.map(ToString::to_string);
         scoped
+    }
+
+    fn wire_era(&self) -> WireEra {
+        match self.wire_era_state.load(Ordering::Acquire) {
+            1 => WireEra::Classic,
+            2 => WireEra::Modern,
+            _ => WireEra::Unset,
+        }
+    }
+
+    fn set_wire_era(&self, era: WireEra) {
+        // Refuse Classic downgrade once Modern for this session/connection so a
+        // late classic initialize cannot weaken `_meta` on an established modern path.
+        if era == WireEra::Classic && self.wire_era() == WireEra::Modern {
+            return;
+        }
+        self.wire_era_state.store(era as u8, Ordering::Release);
+    }
+
+    #[cfg(test)]
+    pub(super) fn reset_wire_era(&self) {
+        self.wire_era_state
+            .store(WireEra::Unset as u8, Ordering::Release);
     }
 }
 
@@ -287,32 +316,14 @@ fn is_negotiable_initialize_version(version: &str) -> bool {
     is_classic_protocol_version(version) || version == MCP_PROTOCOL_VERSION
 }
 
-/// Process-wide wire era for one `mcp serve` / `serve-http` process.
-/// Stdio is one process per host session; HTTP shares one listener process.
+/// Negotiated wire era for one MCP session / request context.
+/// Stdio shares one context across the process (one host session).
+/// HTTP builds a fresh context per request (sessionless multi-client).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum WireEra {
     Unset = 0,
     Classic = 1,
     Modern = 2,
-}
-
-static WIRE_ERA: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
-
-fn wire_era() -> WireEra {
-    match WIRE_ERA.load(Ordering::Acquire) {
-        1 => WireEra::Classic,
-        2 => WireEra::Modern,
-        _ => WireEra::Unset,
-    }
-}
-
-fn set_wire_era(era: WireEra) {
-    WIRE_ERA.store(era as u8, Ordering::Release);
-}
-
-#[cfg(test)]
-pub(super) fn reset_wire_era_for_test() {
-    set_wire_era(WireEra::Unset);
 }
 
 /// Server identity returned in per-response metadata. The version mirrors
@@ -1191,6 +1202,9 @@ fn run_serve_event_loop(
     let idle_budget = idle_timeout();
     let parent = ParentWatch::capture();
     let mut last_frame_at = std::time::Instant::now();
+    // One shared context for the stdio session so Classic/Modern handshake sticks
+    // across worker threads without a process-global era (HTTP isolates per request).
+    let session_context = McpRequestContext::authoritative(None);
 
     loop {
         // why: block only up to the remaining idle budget so an abandoned session
@@ -1469,7 +1483,7 @@ fn run_serve_event_loop(
             let worker_cancellation_key = cancellation_key.clone();
             let worker_cancellation = Arc::clone(&cancellation);
             let request = job.request;
-            let request_context = McpRequestContext::authoritative(None);
+            let request_context = session_context.clone();
             let spawn_result =
                 thread::Builder::new()
                     .name("keel-mcp-req".into())
@@ -1809,12 +1823,16 @@ pub(super) fn dispatch_cancellable_with_context(
     }
     // Stack A: classic initialize — negotiate without requiring `_meta`.
     if method == "initialize" {
-        return Some(handle_initialize_request(&params, request_id));
+        return Some(handle_initialize_request(
+            &params,
+            request_id,
+            &request_context,
+        ));
     }
 
     let requires_modern_meta = method == "server/discover"
         || params.get("_meta").is_some()
-        || wire_era() == WireEra::Modern;
+        || request_context.wire_era() == WireEra::Modern;
     if requires_modern_meta {
         if let Err(response) = validate_request_metadata(&params, &request_id) {
             return Some(response);
@@ -1825,7 +1843,7 @@ pub(super) fn dispatch_cancellable_with_context(
         match handle_method_cancellable(&method, &params, cancellation, &request_context) {
             Ok(result) => {
                 if method == "server/discover" {
-                    set_wire_era(WireEra::Modern);
+                    request_context.set_wire_era(WireEra::Modern);
                 }
                 success_response(request_id, result)
             }
@@ -1834,7 +1852,11 @@ pub(super) fn dispatch_cancellable_with_context(
     )
 }
 
-fn handle_initialize_request(params: &Value, request_id: Value) -> Value {
+fn handle_initialize_request(
+    params: &Value,
+    request_id: Value,
+    context: &McpRequestContext,
+) -> Value {
     let requested = params
         .get("protocolVersion")
         .and_then(Value::as_str)
@@ -1849,7 +1871,7 @@ fn handle_initialize_request(params: &Value, request_id: Value) -> Value {
     if !is_negotiable_initialize_version(requested) {
         return unsupported_version_response(request_id, requested);
     }
-    set_wire_era(WireEra::Classic);
+    context.set_wire_era(WireEra::Classic);
     success_response(
         request_id,
         json!({
@@ -2307,7 +2329,6 @@ mod tests {
     #[test]
     fn modern_discovery_is_query_free_and_classic_initialize_succeeds() {
         // G1–G6 dual-era gates (Architect tip).
-        reset_wire_era_for_test();
         let context = McpRequestContext::authoritative(None);
         let cancel = Arc::new(AtomicBool::new(false));
 
@@ -2341,20 +2362,23 @@ mod tests {
         assert!(listed["result"]["tools"].is_array());
 
         // G4: bare discover params:{} fails closed with -32602 (missing _meta), not hang.
-        reset_wire_era_for_test();
+        context.reset_wire_era();
         let bare =
             serde_json::json!({"jsonrpc":"2.0","id":12,"method":"server/discover","params":{}});
         let bare_response = dispatch_cancellable_with_context(&bare, &cancel, &context).unwrap();
         assert_eq!(bare_response["error"]["code"], -32602);
 
         // G1 / G2: classic initialize for supported revisions succeeds (no _meta).
-        reset_wire_era_for_test();
+        // Fresh classic session context: Modern→Classic downgrade is refused on a
+        // shared modern session, so classic soft-default needs an isolated era.
+        let classic_context = McpRequestContext::authoritative(None);
         for (id, version) in [(2, "2024-11-05"), (3, "2025-03-26"), (4, "2025-11-25")] {
             let legacy = serde_json::json!({
                 "jsonrpc":"2.0","id":id,"method":"initialize",
                 "params":{"protocolVersion":version,"capabilities":{},"clientInfo":{"name":"classic","version":"1"}}
             });
-            let response = dispatch_cancellable_with_context(&legacy, &cancel, &context).unwrap();
+            let response =
+                dispatch_cancellable_with_context(&legacy, &cancel, &classic_context).unwrap();
             assert!(
                 response.get("error").is_none(),
                 "classic initialize {version}: {response}"
@@ -2366,7 +2390,7 @@ mod tests {
 
         // G5: tools/list + tools/call without _meta after classic initialize.
         let list = serde_json::json!({"jsonrpc":"2.0","id":5,"method":"tools/list","params":{}});
-        let listed = dispatch_cancellable_with_context(&list, &cancel, &context).unwrap();
+        let listed = dispatch_cancellable_with_context(&list, &cancel, &classic_context).unwrap();
         assert!(
             listed.get("result").is_some(),
             "classic tools/list: {listed}"
@@ -2375,19 +2399,20 @@ mod tests {
             "jsonrpc":"2.0","id":6,"method":"tools/call",
             "params":{"name":"recall_status","arguments":{}}
         });
-        let called = dispatch_cancellable_with_context(&call, &cancel, &context).unwrap();
+        let called = dispatch_cancellable_with_context(&call, &cancel, &classic_context).unwrap();
         assert!(
             called.get("result").is_some(),
             "classic tools/call: {called}"
         );
 
         // G6: unknown version fail-closed with -32022 listing BOTH eras.
-        reset_wire_era_for_test();
+        let unknown_context = McpRequestContext::authoritative(None);
         let unknown = serde_json::json!({
             "jsonrpc":"2.0","id":7,"method":"initialize",
             "params":{"protocolVersion":"1999-01-01"}
         });
-        let rejected = dispatch_cancellable_with_context(&unknown, &cancel, &context).unwrap();
+        let rejected =
+            dispatch_cancellable_with_context(&unknown, &cancel, &unknown_context).unwrap();
         assert_eq!(rejected["error"]["code"], -32022);
         assert_eq!(
             rejected["error"]["data"]["supported"],
@@ -2396,15 +2421,16 @@ mod tests {
         assert_eq!(rejected["error"]["data"]["requested"], "1999-01-01");
 
         // G2: discover → initialize fallback (Antigravity-like) still completes.
-        reset_wire_era_for_test();
+        let fallback_context = McpRequestContext::authoritative(None);
         let discover_attempt =
             serde_json::json!({"jsonrpc":"2.0","id":8,"method":"server/discover","params":{}});
-        let _ = dispatch_cancellable_with_context(&discover_attempt, &cancel, &context);
+        let _ = dispatch_cancellable_with_context(&discover_attempt, &cancel, &fallback_context);
         let fallback = serde_json::json!({
             "jsonrpc":"2.0","id":9,"method":"initialize",
             "params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"antigravity","version":"1"}}
         });
-        let fallback_ok = dispatch_cancellable_with_context(&fallback, &cancel, &context).unwrap();
+        let fallback_ok =
+            dispatch_cancellable_with_context(&fallback, &cancel, &fallback_context).unwrap();
         assert!(
             fallback_ok.get("result").is_some(),
             "discover→initialize fallback: {fallback_ok}"
@@ -2414,9 +2440,8 @@ mod tests {
 
     #[test]
     fn metadata_is_required_on_every_request_and_versions_never_downgrade() {
-        reset_wire_era_for_test();
-        set_wire_era(WireEra::Modern);
         let context = McpRequestContext::authoritative(None);
+        context.set_wire_era(WireEra::Modern);
         let cancel = Arc::new(AtomicBool::new(false));
         for meta in [
             json!({}),
@@ -2438,6 +2463,129 @@ mod tests {
             response["error"]["data"]["supported"],
             serde_json::json!(all_supported_protocol_versions())
         );
+    }
+
+    #[test]
+    fn mixed_classic_and_modern_contexts_do_not_contaminate_wire_era() {
+        // Regression: process-global WIRE_ERA let Classic↔Modern HTTP/dispatch
+        // clients cross-contaminate. Per-context era must isolate them.
+        let cancel = Arc::new(AtomicBool::new(false));
+        let classic = McpRequestContext::authoritative(None);
+        let modern = McpRequestContext::authoritative(None);
+
+        let discover = serde_json::json!({
+            "jsonrpc":"2.0","id":1,"method":"server/discover",
+            "params":{"_meta":{
+                "io.modelcontextprotocol/protocolVersion": MCP_PROTOCOL_VERSION,
+                "io.modelcontextprotocol/clientCapabilities": {}
+            }}
+        });
+        let discovered = dispatch_cancellable_with_context(&discover, &cancel, &modern).unwrap();
+        assert!(
+            discovered.get("result").is_some(),
+            "modern discover: {discovered}"
+        );
+        assert_eq!(modern.wire_era(), WireEra::Modern);
+
+        let initialize = serde_json::json!({
+            "jsonrpc":"2.0","id":2,"method":"initialize",
+            "params":{
+                "protocolVersion":"2025-03-26",
+                "capabilities":{},
+                "clientInfo":{"name":"classic-http","version":"1"}
+            }
+        });
+        let initialized =
+            dispatch_cancellable_with_context(&initialize, &cancel, &classic).unwrap();
+        assert!(
+            initialized.get("error").is_none(),
+            "classic initialize after modern: {initialized}"
+        );
+        assert_eq!(classic.wire_era(), WireEra::Classic);
+        assert_eq!(
+            modern.wire_era(),
+            WireEra::Modern,
+            "classic handshake must not downgrade a peer modern context"
+        );
+
+        // Classic soft-default still works without `_meta`.
+        let classic_list =
+            serde_json::json!({"jsonrpc":"2.0","id":3,"method":"tools/list","params":{}});
+        let listed = dispatch_cancellable_with_context(&classic_list, &cancel, &classic).unwrap();
+        assert!(
+            listed.get("result").is_some(),
+            "classic tools/list without _meta: {listed}"
+        );
+
+        // Modern path still requires `_meta` (no classic soft-default bleed-in).
+        let modern_bare_ping =
+            serde_json::json!({"jsonrpc":"2.0","id":4,"method":"ping","params":{}});
+        let rejected =
+            dispatch_cancellable_with_context(&modern_bare_ping, &cancel, &modern).unwrap();
+        assert_eq!(rejected["error"]["code"], -32602);
+
+        let modern_ping = serde_json::json!({
+            "jsonrpc":"2.0","id":5,"method":"ping",
+            "params":{"_meta":{
+                "io.modelcontextprotocol/protocolVersion": MCP_PROTOCOL_VERSION,
+                "io.modelcontextprotocol/clientCapabilities": {}
+            }}
+        });
+        let pinged = dispatch_cancellable_with_context(&modern_ping, &cancel, &modern).unwrap();
+        assert!(
+            pinged.get("result").is_some(),
+            "modern ping with _meta: {pinged}"
+        );
+
+        // Reverse order: classic first must not force `_meta` onto a later modern
+        // peer, and modern must not force `_meta` onto the classic peer.
+        let classic2 = McpRequestContext::authoritative(None);
+        let modern2 = McpRequestContext::authoritative(None);
+        let _ = dispatch_cancellable_with_context(&initialize, &cancel, &classic2).unwrap();
+        let _ = dispatch_cancellable_with_context(&discover, &cancel, &modern2).unwrap();
+        let listed2 = dispatch_cancellable_with_context(&classic_list, &cancel, &classic2).unwrap();
+        assert!(
+            listed2.get("result").is_some(),
+            "classic soft-default after peer modern: {listed2}"
+        );
+        let rejected2 =
+            dispatch_cancellable_with_context(&modern_bare_ping, &cancel, &modern2).unwrap();
+        assert_eq!(rejected2["error"]["code"], -32602);
+
+        // Concurrent dispatch across isolated contexts stays isolated.
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let classic3 = McpRequestContext::authoritative(None);
+        let modern3 = McpRequestContext::authoritative(None);
+        let cancel_a = Arc::clone(&cancel);
+        let cancel_b = Arc::clone(&cancel);
+        let barrier_a = Arc::clone(&barrier);
+        let barrier_b = Arc::clone(&barrier);
+        let initialize_a = initialize.clone();
+        let classic_list_a = classic_list.clone();
+        let discover_b = discover.clone();
+        let modern_bare_b = modern_bare_ping.clone();
+        let classic_handle = std::thread::spawn(move || {
+            barrier_a.wait();
+            let response =
+                dispatch_cancellable_with_context(&initialize_a, &cancel_a, &classic3).unwrap();
+            assert!(response.get("error").is_none(), "{response}");
+            let list =
+                dispatch_cancellable_with_context(&classic_list_a, &cancel_a, &classic3).unwrap();
+            assert!(list.get("result").is_some(), "{list}");
+            classic3.wire_era()
+        });
+        let modern_handle = std::thread::spawn(move || {
+            barrier_b.wait();
+            let response =
+                dispatch_cancellable_with_context(&discover_b, &cancel_b, &modern3).unwrap();
+            assert!(response.get("result").is_some(), "{response}");
+            let rejected =
+                dispatch_cancellable_with_context(&modern_bare_b, &cancel_b, &modern3).unwrap();
+            assert_eq!(rejected["error"]["code"], -32602);
+            modern3.wire_era()
+        });
+        assert_eq!(classic_handle.join().unwrap(), WireEra::Classic);
+        assert_eq!(modern_handle.join().unwrap(), WireEra::Modern);
     }
 
     #[test]

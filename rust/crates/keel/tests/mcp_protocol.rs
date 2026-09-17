@@ -450,6 +450,165 @@ fn mcp_http_discovery_handles_parallel_clients() {
     let _ = std::fs::remove_dir_all(&claude_home);
 }
 
+fn send_http_json(
+    address: SocketAddr,
+    body: &Value,
+    extra_headers: &[(&str, &str)],
+) -> Result<(u16, Value), String> {
+    let body_bytes = serde_json::to_string(body).map_err(|error| format!("serialize: {error}"))?;
+    let mut header_block = String::new();
+    for (name, value) in extra_headers {
+        header_block.push_str(&format!("{name}: {value}\r\n"));
+    }
+    let request = format!(
+        "POST /mcp HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/json\r\n\
+         Accept: application/json, text/event-stream\r\n{header_block}\
+         Content-Length: {}\r\nConnection: close\r\n\r\n{body_bytes}",
+        body_bytes.len()
+    );
+    let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(2))
+        .map_err(|error| format!("connect: {error}"))?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .map_err(|error| format!("set read timeout: {error}"))?;
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|error| format!("write: {error}"))?;
+    let mut response = String::new();
+    stream
+        .read_to_string(&mut response)
+        .map_err(|error| format!("read: {error}"))?;
+    let status = response
+        .split_whitespace()
+        .nth(1)
+        .and_then(|value| value.parse::<u16>().ok())
+        .ok_or_else(|| format!("missing status: {response}"))?;
+    let body = response
+        .split_once("\r\n\r\n")
+        .map(|(_, body)| body.trim())
+        .filter(|body| !body.is_empty())
+        .map(|body| serde_json::from_str::<Value>(body))
+        .transpose()
+        .map_err(|error| format!("parse body: {error}"))?
+        .unwrap_or(Value::Null);
+    Ok((status, body))
+}
+
+#[test]
+fn mcp_http_mixed_classic_and_modern_clients_do_not_contaminate() {
+    // Process-global wire era previously let Classic initialize and Modern discover
+    // on one serve-http listener cross-contaminate. Mixed clients must stay isolated.
+    let claude_home = unique_temp_directory("http-mixed-era");
+    let (mut server, address) = spawn_http_server(&claude_home);
+    let barrier = Arc::new(Barrier::new(2));
+
+    let classic_barrier = Arc::clone(&barrier);
+    let classic = thread::spawn(move || {
+        classic_barrier.wait();
+        let body = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-03-26",
+                "capabilities": {},
+                "clientInfo": {"name": "classic-peer", "version": "1"}
+            }
+        });
+        send_http_json(address, &body, &[])
+    });
+
+    let modern_barrier = Arc::clone(&barrier);
+    let modern = thread::spawn(move || {
+        modern_barrier.wait();
+        let body = json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "server/discover",
+            "params": {"_meta": modern_meta()}
+        });
+        send_http_json(
+            address,
+            &body,
+            &[
+                ("MCP-Protocol-Version", "2026-07-28"),
+                ("Mcp-Method", "server/discover"),
+            ],
+        )
+    });
+
+    let (classic_status, classic_body) = classic.join().unwrap().expect("classic HTTP client");
+    let (modern_status, modern_body) = modern.join().unwrap().expect("modern HTTP client");
+    assert_eq!(classic_status, 200, "classic={classic_body}");
+    assert!(
+        classic_body.get("error").is_none(),
+        "classic={classic_body}"
+    );
+    assert_eq!(classic_body["result"]["protocolVersion"], "2025-03-26");
+    assert_eq!(modern_status, 200, "modern={modern_body}");
+    assert!(modern_body.get("result").is_some(), "modern={modern_body}");
+    assert_eq!(
+        modern_body["result"]["supportedVersions"],
+        json!(["2026-07-28"])
+    );
+
+    // After both handshakes, each era still works on the same listener.
+    let classic_again = send_http_json(
+        address,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "classic-again", "version": "1"}
+            }
+        }),
+        &[],
+    )
+    .expect("classic follow-up");
+    assert_eq!(
+        classic_again.0, 200,
+        "classic follow-up={:?}",
+        classic_again.1
+    );
+    assert!(classic_again.1.get("error").is_none());
+
+    let modern_again = send_http_json(
+        address,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "server/discover",
+            "params": {"_meta": modern_meta()}
+        }),
+        &[
+            ("MCP-Protocol-Version", "2026-07-28"),
+            ("Mcp-Method", "server/discover"),
+        ],
+    )
+    .expect("modern follow-up");
+    assert_eq!(modern_again.0, 200, "modern follow-up={:?}", modern_again.1);
+    assert!(modern_again.1.get("result").is_some());
+
+    // Modern still rejects bare params on this listener (no classic soft-default bleed).
+    let modern_bare = send_http_json(
+        address,
+        &json!({"jsonrpc":"2.0","id":5,"method":"server/discover","params":{}}),
+        &[
+            ("MCP-Protocol-Version", "2026-07-28"),
+            ("Mcp-Method", "server/discover"),
+        ],
+    )
+    .expect("modern bare discover");
+    assert_eq!(modern_bare.1["error"]["code"], -32602);
+
+    let _ = server.kill();
+    let _ = server.wait();
+    let _ = std::fs::remove_dir_all(&claude_home);
+}
+
 #[test]
 fn mcp_http_classic_2025_initialize_succeeds() {
     let claude_home = unique_temp_directory("http-classic-init");
