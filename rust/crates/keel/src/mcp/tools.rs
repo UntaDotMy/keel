@@ -43,7 +43,9 @@ use crate::proxy::token_meter::TokenMeter;
 use crate::runtime::{display_path, resolve_claude_home, safe_path_segment};
 use crate::utility::memory::refresh_system_map_with_status;
 use crate::utility::memory_families::family_counts;
-use crate::utility::recall::{collapse_dashes, search_recall_index};
+use crate::utility::recall::{
+    recall_workspace_context, search_recall_index_with_options, RecallQueryOptions,
+};
 use crate::utility::record_store::{current_timestamp_millis, format_timestamp_iso8601};
 use crate::utility::skill_match::{
     frontmatter_field, installed_skill_path, match_skill_for_prompt_with_details, skill_catalog,
@@ -843,14 +845,14 @@ fn tools_list_catalog() -> Value {
         "tools": [
             {
                 "name": "recall",
-                "description": "Call this BEFORE claiming what you remember or previously learned — search your durable memory instead of relying on conversation alone. Full-text search over Markdown under <claude-home>/{memory,memories,working-briefs}. Auto-syncs the index before querying.",
+                "description": "Call this BEFORE claiming what you remember or previously learned — search your durable memory instead of relying on conversation alone. Full-text search over Markdown and JSON under <claude-home>/{memory,memories,working-briefs}. Auto-syncs the index before querying and excludes inactive lifecycle records.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "query": { "type": "string", "description": "Search terms; punctuation is stripped and tokens are AND-ed with prefix match." },
                         "limit": { "type": "integer", "minimum": 1, "maximum": MAX_RECALL_LIMIT, "description": "Maximum hits (default 20)." },
-                        "workspace": { "type": "string", "description": "Workspace slug to boost in ranking (current-project hits outrank cross-project). Auto-derived from cwd if omitted; pass explicitly to force." },
-                        "local_only": { "type": "boolean", "description": "Restrict results to the current workspace's lane only. A new project returns empty instead of flooding with cross-project hits. Default false." }
+                        "workspace": { "type": "string", "description": "Workspace scope to boost (and, with local_only, filter) in ranking. Auto-derived from cwd when omitted; pass a canonical workspace key or explicit scope to force." },
+                        "local_only": { "type": "boolean", "description": "Apply workspace and current-branch eligibility in SQLite before result limits; stale/expired research, quarantined/superseded lessons, and superseded entities stay excluded. Default false." }
                     },
                     "required": ["query"]
                 }
@@ -2129,44 +2131,49 @@ fn tool_recall(arguments: &Value) -> Result<String, String> {
         }
     };
     let claude_home = tool_claude_home("recall")?;
-    // Workspace affinity: boost current-project hits above cross-project, and
-    // slugged from cwd like system_map. `workspace` forces a slug.
-    let workspace_slug = optional_string_arg(arguments, "workspace")
-        .map(crate::utility::system_map::sanitize_key)
-        .or_else(|| {
-            std::env::current_dir()
-                .ok()
-                .map(|cwd| crate::utility::system_map::sanitize_key(&cwd.to_string_lossy()))
-        });
-    let result = search_recall_index(&claude_home, &query, limit, workspace_slug.as_deref())
-        .map_err(|error| format!("recall: {error}"))?;
-    let (stage, fts_query, mut hits) = match result {
+    let local_only = optional_bool_arg(arguments, "local_only") == Some(true);
+    let workspace_context =
+        recall_workspace_context(optional_string_arg(arguments, "workspace"), local_only)
+            .map_err(|error| format!("recall: {error}"))?;
+    let replay_workspace = optional_string_arg(arguments, "workspace")
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or(workspace_context.scope.as_deref());
+    let result = search_recall_index_with_options(
+        &claude_home,
+        &query,
+        limit,
+        RecallQueryOptions {
+            workspace_affinity: workspace_context.affinity.as_deref(),
+            scope: workspace_context.scope.as_deref(),
+            branch: workspace_context.branch.as_deref(),
+        },
+    )
+    .map_err(|error| format!("recall: {error}"))?;
+    let (stage, fts_query, hits) = match result {
         Some(result) => (result.stage, result.fts_query, result.hits),
         None => ("exact", String::new(), Vec::new()),
     };
-    // `local_only`: restrict to the current workspace's lane only (a new
-    // project returns empty instead of flooding with cross-project hits).
-    if Some(true) == optional_bool_arg(arguments, "local_only") {
-        if let Some(slug) = &workspace_slug {
-            let slug_norm = collapse_dashes(&slug.to_ascii_lowercase());
-            hits.retain(|hit| {
-                collapse_dashes(&relative_to_home(
-                    &claude_home,
-                    Path::new(&hit.absolute_path),
-                ))
-                .to_ascii_lowercase()
-                .contains(&slug_norm)
-            });
-        }
-    }
     // Build a valid bounded envelope before the outer context projection, or a
     // large one-line JSON string loses provenance and its recovery reference.
-    let payload = bounded_recall_payload(&claude_home, &query, &fts_query, limit, stage, &hits);
+    let payload = bounded_recall_payload(
+        &claude_home,
+        &query,
+        &fts_query,
+        limit,
+        stage,
+        &hits,
+        crate::utility::recall::RecallReplay {
+            workspace: replay_workspace,
+            local_only,
+        },
+    );
     mcp_json_compact(&payload).map_err(|error| format!("recall: {error}"))
 }
 
 const MCP_RECALL_QUERY_CHARS: usize = 256;
 const MCP_RECALL_HOME_CHARS: usize = 512;
+const MCP_RECALL_WORKSPACE_CHARS: usize = 512;
 const MCP_RECALL_FTS_CHARS: usize = 512;
 const MCP_RECALL_EXCERPT_CHARS: usize = 600;
 const MCP_RECALL_MAX_BYTES: usize = crate::utility::recall::MAX_RECALL_RESULT_BYTES;
@@ -2183,10 +2190,14 @@ fn bounded_recall_payload(
     limit: usize,
     stage: &str,
     hits: &[crate::utility::recall::RecallHit],
+    replay: crate::utility::recall::RecallReplay<'_>,
 ) -> Value {
     let (projected_query, query_truncated) = bounded_mcp_text(query, MCP_RECALL_QUERY_CHARS);
     let projected_home = bounded_mcp_text(&display_path(claude_home), MCP_RECALL_HOME_CHARS).0;
     let projected_fts = bounded_mcp_text(fts_query, MCP_RECALL_FTS_CHARS).0;
+    let projected_workspace = replay
+        .workspace
+        .map(|value| bounded_mcp_text(value, MCP_RECALL_WORKSPACE_CHARS).0);
     let query_digest = crate::utility::hashing::sha256_hex(query.as_bytes());
     let projection = McpRecallProjection {
         query: &projected_query,
@@ -2197,6 +2208,8 @@ fn bounded_recall_payload(
         stage,
         limit,
         home_path: claude_home,
+        replay_workspace: projected_workspace.as_deref(),
+        local_only: replay.local_only,
     };
     let mut selected: Vec<(&crate::utility::recall::RecallHit, String)> = Vec::new();
     let mut seen = HashSet::new();
@@ -2248,6 +2261,8 @@ fn bounded_recall_payload(
             stage,
             limit,
             home_path: claude_home,
+            replay_workspace: projection.replay_workspace,
+            local_only: projection.local_only,
         };
         mcp_recall_envelope(&fallback_projection, &[], true)
     }
@@ -2278,11 +2293,17 @@ fn mcp_recall_envelope(
                 )
                 .as_bytes(),
             );
-            let retrieval_ref = format!(
+            let mut retrieval_ref = format!(
                 "keel memory recall --query {:?} --limit {}",
                 projection.query,
                 projection.limit.clamp(1, MAX_RECALL_LIMIT)
             );
+            if let Some(workspace) = projection.replay_workspace {
+                retrieval_ref.push_str(&format!(" --workspace {workspace:?}"));
+            }
+            if projection.local_only {
+                retrieval_ref.push_str(" --local-only");
+            }
             json!({
                 "path": bounded_mcp_text(&relative, 512).0,
                 "absolutePath": bounded_absolute,
@@ -2320,6 +2341,8 @@ struct McpRecallProjection<'a> {
     stage: &'a str,
     limit: usize,
     home_path: &'a Path,
+    replay_workspace: Option<&'a str>,
+    local_only: bool,
 }
 
 fn bounded_mcp_text(text: &str, max_chars: usize) -> (String, bool) {
@@ -8205,6 +8228,7 @@ mod tests {
             MAX_RECALL_LIMIT,
             "exact",
             &hits,
+            crate::utility::recall::RecallReplay::default(),
         );
         let rendered = serde_json::to_string(&payload).expect("serialize bounded recall");
         assert!(rendered.len() <= MCP_RECALL_MAX_BYTES);
@@ -8213,6 +8237,40 @@ mod tests {
         assert!(rendered.contains("retrievalRef"));
         assert!(rendered.contains("prov-sha256:"));
         assert!(serde_json::from_str::<Value>(&rendered).is_ok());
+    }
+
+    #[test]
+    fn scoped_recall_projection_keeps_scope_in_every_recovery_reference() {
+        // A recovery reference that drops --workspace/--local-only replays an
+        // unscoped search, which can surface another workspace's memory.
+        let hits = vec![crate::utility::recall::RecallHit {
+            absolute_path: "C:/memory/note-0.md".to_string(),
+            score: 0.5,
+            line: 1,
+            snippet: "[match] memory result".to_string(),
+        }];
+        let payload = bounded_recall_payload(
+            Path::new("C:/memory"),
+            "webhook signature",
+            "\"webhook\"*",
+            5,
+            "exact",
+            &hits,
+            crate::utility::recall::RecallReplay {
+                workspace: Some("project-alpha"),
+                local_only: true,
+            },
+        );
+        let rendered = serde_json::to_string(&payload).expect("serialize scoped recall");
+        let parsed: Value = serde_json::from_str(&rendered).expect("valid scoped recall json");
+        let reference = parsed["matches"][0]["retrievalRef"]
+            .as_str()
+            .expect("retrievalRef is a string");
+        assert!(
+            reference.contains("--workspace \"project-alpha\"")
+                && reference.contains("--local-only"),
+            "scoped recovery reference required: {reference}"
+        );
     }
 
     #[test]

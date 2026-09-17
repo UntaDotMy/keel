@@ -108,6 +108,37 @@ pub(super) fn prune_state_marker_stores(standard_error: &mut dyn Write) {
     }
 }
 
+/// The record families below are session/coordination traces rather than
+/// durable user decisions. Keep them bounded by their recordedAt/createdAt
+/// field while leaving research evidence, lessons, entities, and instincts
+/// available for deliberate lifecycle actions.
+const MEMORY_RECORD_DEFAULT_RETENTION_DAYS: u64 = 90;
+const MEMORY_RECORD_RETENTION_ENV: &str = "CLAUDE_SKILLS_MEMORY_RECORD_RETENTION_DAYS";
+const EPHEMERAL_MEMORY_FAMILIES: &[&str] = &["events", "agent-packets", "loop-guard", "graph"];
+
+pub(crate) fn prune_memory_record_stores(standard_error: &mut dyn Write) {
+    let retention_days = user_config_or_env_u64(
+        PLUGIN_MEMORY_RETENTION_DAYS,
+        MEMORY_RECORD_RETENTION_ENV,
+        MEMORY_RECORD_DEFAULT_RETENTION_DAYS,
+    );
+    if retention_days == 0 {
+        return;
+    }
+    let Ok(claude_home) = resolve_claude_home("") else {
+        return;
+    };
+    for family in EPHEMERAL_MEMORY_FAMILIES {
+        let store = crate::utility::record_store::RecordStore::new(
+            &claude_home,
+            &format!("memory/{family}"),
+        );
+        if let Err(error) = store.prune_older_than(retention_days) {
+            let _ = writeln!(standard_error, "keel memory {family} prune failed: {error}");
+        }
+    }
+}
+
 /// Remove regular files in `dir` whose mtime is older than `cutoff_ms`.
 pub(super) fn prune_dir_files_older_than(dir: &Path, cutoff_ms: u64) -> std::io::Result<()> {
     for entry in fs::read_dir(dir)? {

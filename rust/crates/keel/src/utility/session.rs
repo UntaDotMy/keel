@@ -32,7 +32,7 @@ pub fn run_session_command(
         let _ = writeln!(standard_error, "No compaction events found");
         return 1;
     };
-    let text = match fs::read_to_string(&path) {
+    let text = match crate::runtime::read_tail_text(&path, 4 * 1024 * 1024, standard_error) {
         Ok(text) => text,
         Err(_) => {
             let _ = writeln!(standard_error, "No compaction events found");

@@ -4,7 +4,6 @@
 //! Main Functions: run_gain_command, load_gain_summary, run_gain_reset
 //! Side Effects: Reads compaction event log, writes analytics to stdout
 
-use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 
@@ -41,6 +40,7 @@ pub fn run_gain_command(
         } else {
             Some(adapter_filter)
         },
+        standard_error,
     );
     let top_count: usize = flag_set.string_value("top").parse().unwrap_or(10).min(100);
     if flag_set.bool_value("json") {
@@ -256,7 +256,7 @@ fn run_gain_reset(standard_output: &mut dyn Write, standard_error: &mut dyn Writ
         );
         return 1;
     };
-    match fs::remove_file(&path) {
+    match crate::proxy::event_log::reset_event_log(&path) {
         Ok(()) => {
             let _ = writeln!(
                 standard_output,
@@ -300,7 +300,7 @@ fn run_gain_discover(
     }
     let since_timestamp = gain_since_timestamp_v2(&flag_set);
     let top_count: usize = flag_set.string_value("top").parse().unwrap_or(10).min(100);
-    let missed = load_missed_opportunities(Some(since_timestamp));
+    let missed = load_missed_opportunities(Some(since_timestamp), standard_error);
 
     if flag_set.bool_value("json") {
         let opportunities: Vec<Value> = missed
@@ -383,13 +383,17 @@ fn render_gain_json(
 /// Read passthrough (non-compacted) events from the same event log `gain` uses
 /// and group them by command. `uncompacted_tokens` is the `tokens_before` of
 /// each passthrough run — the volume that entered context without compaction.
-fn load_missed_opportunities(since_timestamp: Option<u64>) -> MissedOpportunities {
+fn load_missed_opportunities(
+    since_timestamp: Option<u64>,
+    standard_error: &mut dyn Write,
+) -> MissedOpportunities {
     let Some(path) = gain_events_path() else {
         return MissedOpportunities::default();
     };
-    let text = match fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(_) => return MissedOpportunities::default(),
+    let Ok(text) =
+        crate::runtime::read_tail_text(&path, GAIN_EVENTS_READ_LIMIT_BYTES, standard_error)
+    else {
+        return MissedOpportunities::default();
     };
     parse_missed_opportunities(&text, since_timestamp)
 }
@@ -468,19 +472,28 @@ struct MissedOpportunities {
     commands: Vec<MissedCommand>,
 }
 
+// Bounded-read cap for the compaction-events JSONL: summaries must not load an
+// unbounded day file into memory. 4 MiB covers a long session's tail.
+const GAIN_EVENTS_READ_LIMIT_BYTES: u64 = 4 * 1024 * 1024;
+
 struct MissedCommand {
     command: String,
     uncompacted_tokens: u64,
     count: u64,
 }
 
-fn load_gain_summary(since_timestamp: Option<u64>, adapter_filter: Option<&str>) -> GainSummary {
+fn load_gain_summary(
+    since_timestamp: Option<u64>,
+    adapter_filter: Option<&str>,
+    standard_error: &mut dyn Write,
+) -> GainSummary {
     let Some(path) = gain_events_path() else {
         return GainSummary::default();
     };
-    let text = match fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(_) => return GainSummary::default(),
+    let Ok(text) =
+        crate::runtime::read_tail_text(&path, GAIN_EVENTS_READ_LIMIT_BYTES, standard_error)
+    else {
+        return GainSummary::default();
     };
     parse_gain_summary(&text, since_timestamp, adapter_filter)
 }

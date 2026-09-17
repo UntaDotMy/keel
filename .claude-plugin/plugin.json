@@ -129,7 +129,7 @@
     "memory_retention_days": {
       "type": "number",
       "title": "Memory retention days",
-      "description": "Number of days to retain raw output and tool timing data before pruning.",
+      "description": "Number of days to retain raw output, tool timing data, and ephemeral memory records before pruning.",
       "default": 14,
       "min": 1,
       "max": 90

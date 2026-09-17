@@ -61,8 +61,9 @@ treated as authenticity proofs. Retention and stale staging cleanup remain
 bounded and recoverable.
 
 Memory recall is pull-based: results contain a bounded excerpt, stable memory
-and provenance ids, a dedupe key, and a retrieval reference. Full durable memory
-stays in the recall index and memory lane.
+and provenance ids, a dedupe key, and a retrieval reference. The reference
+replays the caller's scope, so `--workspace` and `--local-only` survive recovery.
+Full durable memory stays in the recall index and memory lane.
 
 UI verification writes screenshots to RawStore plus compact
 `ui-verification/<task>/manifest.json` and `verdicts.json` artifacts. An unclear

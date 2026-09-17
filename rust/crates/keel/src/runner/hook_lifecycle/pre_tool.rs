@@ -547,6 +547,24 @@ pub(crate) fn pre_tool_gate_decision_with_markdown_context(
     if let Some(reason) = iron_law_gate_decision(session_id) {
         return Some(reason);
     }
+    if let Ok(plan_id) =
+        std::env::var("KEEL_PLAN_ID").or_else(|_| std::env::var("CLAUDE_SKILLS_PLAN"))
+    {
+        let plan = plan_id.trim();
+        if !plan.is_empty() && is_edit_class_tool(tool_name) && !markdown_only_edit {
+            let blocked = crate::utility::plan::plan_has_blocked_tasks(Path::new(cwd), "", plan)
+                .unwrap_or(false);
+            if blocked {
+                return Some(PLAN_TASK_BLOCKED_DENIAL);
+            }
+            let ready =
+                crate::utility::plan::evaluate_definition_of_ready(Path::new(cwd), "", plan)
+                    .is_ok_and(|eval| eval.satisfied);
+            if !ready {
+                return Some(PLAN_READY_GATE_DENIAL);
+            }
+        }
+    }
     if anvil_gate_enabled() && is_edit_class_tool(tool_name) && !markdown_only_edit {
         let satisfied = resolve_claude_home("")
             .ok()
@@ -838,6 +856,15 @@ Anvil gate: call `anvil` (compile, then run --dry-run) before editing. \
 This is the only keel delivery loop. MCP: keel__anvil action=compile args=[--goal,...,--bar,...,--files,...] then action=run args=[--dry-run]. \
 CLI: keel anvil compile --goal \"...\" --bar \"echo ok\" --files \"src/file.rs\" then keel anvil run --dry-run. \
 Set KEEL_ANVIL_GATE=off to disable.";
+pub(super) const PLAN_TASK_BLOCKED_DENIAL: &str = "\
+Plan gate: the selected plan has blocked task(s) with unresolved prerequisites. \
+Resolve or explicitly skip each blocked task before editing source code. \
+Run `keel plan status --plan <id>` to inspect blockers.";
+
+pub(super) const PLAN_READY_GATE_DENIAL: &str = "\
+Plan gate: the active plan has unresolved prerequisites, ambiguity, or incomplete design. \
+All 11 Definition of Ready (DoR) items must pass before editing source code. \
+Run `keel plan ready --plan <id>` to evaluate readiness, or resolve the blocking items.";
 
 #[cfg(test)]
 mod namespace_tests {

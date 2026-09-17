@@ -18,6 +18,7 @@ serde_json = { workspace = true }
 serde = { workspace = true }
 tiktoken-rs = { workspace = true }
 chrono = "0.4"
+fs2 = "0.4.3"
 rand = "0.8"
 regex = { workspace = true }
 thiserror = "2"

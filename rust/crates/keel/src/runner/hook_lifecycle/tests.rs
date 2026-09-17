@@ -1497,6 +1497,21 @@ fn markdown_only_edits_skip_anvil_but_keep_unknown_and_iron_law_gated() {
         .is_some_and(|reason| reason.contains("Iron Law")),
         "the markdown exemption must not bypass the Iron Law gate"
     );
+    let mounted_input = serde_json::json!({
+        "tool_name": "Write",
+        "tool_input": {
+            "path": "xd://mcp__keel_system_map",
+            "content": "{}"
+        }
+    });
+    let effective = hook_tool_name(&mounted_input);
+    assert_eq!(effective, "mcp__keel_system_map");
+    assert!(!pre_tool::tool_is_iron_law_gated(effective, None));
+    assert!(pre_tool::tool_satisfies_iron_law(
+        pre_tool::IronLawGateMode::Strict,
+        effective,
+        None
+    ));
 
     match previous_home {
         Some(value) => std::env::set_var("CLAUDE_TARGET_OVERRIDE", value),
@@ -1510,6 +1525,84 @@ fn markdown_only_edits_skip_anvil_but_keep_unknown_and_iron_law_gated() {
         Some(value) => std::env::set_var("KEEL_ANVIL_GATE", value),
         None => std::env::remove_var("KEEL_ANVIL_GATE"),
     }
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn plan_readiness_gate_denies_edit_when_plan_is_unready() {
+    let _guard = crate::test_support::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let home = crate::test_support::unique_temp_dir("keel-plan-readiness-gate-test");
+    // why: reading the previous value is best-effort restore; absence is valid state
+    let previous_home = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
+    std::env::set_var("CLAUDE_TARGET_OVERRIDE", home.as_path());
+    pre_tool::mark_iron_law_satisfied("session-ready");
+    // why: same best-effort pattern; unset means the var was not set before
+    let previous = std::env::var("KEEL_PLAN_ID").ok();
+    std::env::set_var("KEEL_PLAN_ID", "unready-plan-id");
+    let decision = pre_tool::pre_tool_gate_decision_with_markdown_context(
+        "session-ready",
+        "Edit",
+        None,
+        "C:/repo",
+        false,
+    );
+    match previous {
+        Some(value) => std::env::set_var("KEEL_PLAN_ID", value),
+        None => std::env::remove_var("KEEL_PLAN_ID"),
+    }
+    match previous_home {
+        Some(value) => std::env::set_var("CLAUDE_TARGET_OVERRIDE", value),
+        None => std::env::remove_var("CLAUDE_TARGET_OVERRIDE"),
+    }
+    assert!(decision.is_some_and(|reason| reason.contains("Definition of Ready")));
+}
+
+#[test]
+fn plan_gate_denies_edit_when_selected_task_is_blocked() {
+    let _guard = crate::test_support::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let home = crate::test_support::unique_temp_dir("keel-plan-blocked-task-gate-test");
+    let plans = home
+        .join("memories")
+        .join("workspaces")
+        .join(crate::utility::system_map::workspace_key("C:/repo"))
+        .join("plans")
+        .join("blocked-plan");
+    std::fs::create_dir_all(&plans).unwrap();
+    std::fs::write(
+        plans.join("tasks.json"),
+        r#"{"tasks":[{"taskId":"TASK-001","status":"blocked"}]}"#,
+    )
+    .unwrap();
+    // why: reading the previous value is best-effort restore; absence is valid state
+    let previous_home = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
+    std::env::set_var("CLAUDE_TARGET_OVERRIDE", home.as_path());
+    pre_tool::mark_iron_law_satisfied("session-blocked");
+    // why: same best-effort restore; absence means the var was unset before
+    let previous = std::env::var("KEEL_PLAN_ID").ok();
+    std::env::set_var("KEEL_PLAN_ID", "blocked-plan");
+    let decision = pre_tool::pre_tool_gate_decision_with_markdown_context(
+        "session-blocked",
+        "Edit",
+        None,
+        "C:/repo",
+        false,
+    );
+    match previous {
+        Some(value) => std::env::set_var("KEEL_PLAN_ID", value),
+        None => std::env::remove_var("KEEL_PLAN_ID"),
+    }
+    match previous_home {
+        Some(value) => std::env::set_var("CLAUDE_TARGET_OVERRIDE", value),
+        None => std::env::remove_var("CLAUDE_TARGET_OVERRIDE"),
+    }
+    assert!(
+        decision.is_some_and(|reason| reason.contains("blocked task")),
+        "blocked prerequisite must deny the edit before DoR evaluation"
+    );
     let _ = std::fs::remove_dir_all(&home);
 }
 
@@ -5130,6 +5223,53 @@ fn user_config_memory_retention_days_feeds_all_three_prune_readers() {
             );
         },
     );
+}
+
+#[test]
+fn session_end_memory_retention_prunes_ephemeral_records() {
+    let claude_home = crate::test_support::unique_temp_dir("memory-record-retention");
+    let home_text = claude_home.to_string_lossy().into_owned();
+    let store = crate::utility::record_store::RecordStore::new(&claude_home, "memory/events");
+    store
+        .write_record(
+            "old",
+            &vec![("recordedAt".into(), "1970-01-01T00:00:00Z".into())],
+        )
+        .expect("write old event");
+    store
+        .write_record("legacy", &vec![("note".into(), "retain".into())])
+        .expect("write legacy event");
+
+    with_env_vars(
+        &[
+            ("KEEL_HOME", None),
+            ("CLAUDE_TARGET_OVERRIDE", Some(home_text.as_str())),
+            ("CLAUDE_PLUGIN_OPTION_MEMORY_RETENTION_DAYS", None),
+            ("CLAUDE_SKILLS_MEMORY_RECORD_RETENTION_DAYS", Some("1")),
+        ],
+        || {
+            let mut stderr = Vec::new();
+            prune_memory_record_stores(&mut stderr);
+            assert!(
+                stderr.is_empty(),
+                "memory retention should not emit errors: {}",
+                String::from_utf8_lossy(&stderr)
+            );
+        },
+    );
+
+    assert!(
+        store.read_record("old").expect("read old event").is_none(),
+        "SessionEnd retention must remove stale timestamped events"
+    );
+    assert!(
+        store
+            .read_record("legacy")
+            .expect("read legacy event")
+            .is_some(),
+        "legacy events without timestamps must remain auditable"
+    );
+    let _ = std::fs::remove_dir_all(&claude_home);
 }
 
 #[test]

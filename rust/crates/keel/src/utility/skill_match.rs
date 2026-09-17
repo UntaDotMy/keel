@@ -32,7 +32,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::proxy::token_meter::TokenMeter;
 use crate::runtime::{safe_path_segment, skills_directory, state_directory};
 
-const SKILL_CATALOG_CACHE_VERSION: u32 = 2;
+const SKILL_CATALOG_CACHE_VERSION: u32 = 3;
 const SKILL_CATALOG_CACHE_FILE: &str = "skill-catalog-v2.json";
 const SKILL_CATALOG_DEFAULT_INTEGRITY_INTERVAL_SECS: u64 = 300;
 
@@ -360,6 +360,9 @@ fn select_cost_aware_skill(
             .then_with(|| skills[left.index].name.cmp(&skills[right.index].name))
     });
     let best = scored.first()?;
+    if !catalog.is_empty() {
+        validate_skill_dependencies(&skills[best.index].name, catalog).ok()?;
+    }
     let min_score = MIN_SCORE_FACTOR * corpus_size.ln();
     if best.relevance < min_score || !best.distinctive {
         return None;
@@ -398,6 +401,9 @@ fn decision_for_named_skill(
         .iter()
         .enumerate()
         .find(|(_, skill)| skill.name == name)?;
+    if !catalog.is_empty() {
+        validate_skill_dependencies(name, catalog).ok()?;
+    }
     let metadata = selection_metadata(index, skill, catalog);
     let activation_budget = skill_activation_budget_tokens();
     let candidates: Vec<(usize, &SkillTerms)> = skills
@@ -1318,6 +1324,41 @@ impl SkillCatalogEntry {
     }
 }
 
+/// Validate metadata only; dependencies never preload another skill's body.
+pub(crate) fn validate_skill_dependencies(
+    name: &str,
+    catalog: &[SkillCatalogEntry],
+) -> Result<(), String> {
+    let mut pending = vec![(name, false)];
+    let mut active = HashSet::new();
+    let mut complete = HashSet::new();
+    while let Some((current, exiting)) = pending.pop() {
+        if exiting {
+            active.remove(current);
+            complete.insert(current);
+            continue;
+        }
+        if complete.contains(current) {
+            continue;
+        }
+        if safe_path_segment(current).is_none() || current.starts_with(['_', '.']) {
+            return Err(format!("skill dependency has unsafe name `{current}`"));
+        }
+        let entry = catalog
+            .iter()
+            .find(|entry| entry.name == current)
+            .ok_or_else(|| format!("skill dependency `{current}` is missing or unreadable"))?;
+        if !active.insert(current) {
+            return Err(format!("circular skill dependency detected at `{current}`"));
+        }
+        pending.push((current, true));
+        for dependency in entry.dependencies.iter().rev() {
+            pending.push((dependency.as_str(), false));
+        }
+    }
+    Ok(())
+}
+
 /// Enumerate every installed skill under `<claude_home>/skills`, returning the
 /// name + `description` + `when_to_use` frontmatter for each. Skips `_shared`,
 /// hidden directories, and any directory without a parseable SKILL.md — the
@@ -2015,15 +2056,27 @@ pub(crate) fn frontmatter_field(frontmatter: &str, key: &str) -> Option<String> 
 /// YAML block list (`- reviewer\n- git-expert`). Names are trimmed; quotes and
 /// empty entries are dropped. Returns `Vec<String>` (possibly empty).
 fn related_skills_list(frontmatter: &str) -> Vec<String> {
+    frontmatter_list(frontmatter, "related_skills")
+}
+
+pub(crate) fn frontmatter_list(frontmatter: &str, key: &str) -> Vec<String> {
     // Block-list form: the key line has an empty value, followed by `- name` lines.
     let mut names = Vec::new();
     let mut in_block = false;
     for line in frontmatter.lines() {
         let trimmed = line.trim_end();
-        if !trimmed.starts_with(char::is_whitespace) {
+        if trimmed.trim().is_empty() || trimmed.trim_start().starts_with('#') {
+            continue;
+        }
+        if in_block && trimmed.trim_start().starts_with("- ") {
+            let item = trimmed.trim_start()[2..].trim();
+            if !item.is_empty() {
+                names.push(strip_quotes(item).to_string());
+            }
+        } else if !trimmed.starts_with(char::is_whitespace) {
             in_block = false;
             if let Some(colon) = trimmed.find(':') {
-                if trimmed[..colon].trim() == "related_skills" {
+                if trimmed[..colon].trim() == key {
                     let rest = trimmed[colon + 1..].trim();
                     if rest.is_empty() {
                         in_block = true;
@@ -2032,11 +2085,6 @@ fn related_skills_list(frontmatter: &str) -> Vec<String> {
                     // Inline value on the key line: flow list or comma string.
                     names.extend(split_related_value(rest));
                 }
-            }
-        } else if in_block {
-            let item = trimmed.trim().trim_start_matches('-').trim();
-            if !item.is_empty() {
-                names.push(strip_quotes(item).to_string());
             }
         }
     }
@@ -2068,12 +2116,13 @@ fn capability_list(frontmatter: &str, skill_name: &str) -> Vec<String> {
         .collect()
 }
 
-fn dependency_list(frontmatter: &str) -> Vec<String> {
-    ["dependencies", "depends_on", "depends-on"]
-        .iter()
-        .find_map(|key| frontmatter_field(frontmatter, key))
-        .map(|value| split_related_value(&value))
-        .unwrap_or_default()
+pub(crate) fn dependency_list(frontmatter: &str) -> Vec<String> {
+    for key in ["dependencies", "depends_on", "depends-on"] {
+        if frontmatter_field(frontmatter, key).is_some() {
+            return frontmatter_list(frontmatter, key);
+        }
+    }
+    Vec::new()
 }
 
 fn frontmatter_number(frontmatter: &str, keys: &[&str]) -> Option<f64> {
@@ -2228,6 +2277,55 @@ mod tests {
             ),
         )
         .expect("write skill");
+    }
+
+    #[test]
+    fn dependency_metadata_blocks_missing_and_cyclic_activation() {
+        let root = temp_skill_root("dependencies");
+        write_skill(&root, "reviewer", "Review code");
+        let path = root.join("reviewer/SKILL.md");
+        fs::write(&path, "---\nname: reviewer\ndescription: Review code\ndependencies:\n  - helper\n---\nReview carefully.\n").unwrap();
+        let missing = load_skill_corpus(&root, None);
+        assert_eq!(missing.catalog[0].dependencies, vec!["helper"]);
+        assert!(validate_skill_dependencies("reviewer", &missing.catalog)
+            .unwrap_err()
+            .contains("helper"));
+        assert!(
+            resolve_skill_selection("review this diff", &missing.terms, &missing.catalog).is_none()
+        );
+
+        write_skill(&root, "helper", "Support review");
+        let valid = load_skill_corpus(&root, None);
+        assert!(validate_skill_dependencies("reviewer", &valid.catalog).is_ok());
+        assert_eq!(
+            resolve_skill_selection("review this diff", &valid.terms, &valid.catalog)
+                .unwrap()
+                .name,
+            "reviewer"
+        );
+
+        fs::write(
+            root.join("helper/SKILL.md"),
+            "---\nname: helper\ndescription: Support review\ndepends_on: [reviewer]\n---\nHelp.\n",
+        )
+        .unwrap();
+        let cyclic = load_skill_corpus(&root, None);
+        assert!(validate_skill_dependencies("reviewer", &cyclic.catalog)
+            .unwrap_err()
+            .contains("circular"));
+        assert!(
+            resolve_skill_selection("review this diff", &cyclic.terms, &cyclic.catalog).is_none()
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn dependency_lists_support_indented_and_indentless_yaml_sequences() {
+        assert_eq!(dependency_list("dependencies:\n  - reviewer\n\n  # optional support\n  - 'git-expert'\nversion: 1\n"), vec!["reviewer", "git-expert"]);
+        assert_eq!(
+            dependency_list("depends-on:\n- reviewer\n- git-expert\ndescription: use for review\n"),
+            vec!["reviewer", "git-expert"]
+        );
     }
 
     #[test]

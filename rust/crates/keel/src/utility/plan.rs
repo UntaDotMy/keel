@@ -421,7 +421,7 @@ fn run_research(flags: FlagSet, streams: &mut CommandStreams<'_>) -> u8 {
         "derived",
         vec!["SRC-REQUEST-001".to_string()],
     ));
-    let research = versioned_value(
+    let mut research = versioned_value(
         &plan_id,
         Some("research"),
         json!({
@@ -460,6 +460,7 @@ fn run_research(flags: FlagSet, streams: &mut CommandStreams<'_>) -> u8 {
     } else {
         "invalid".to_string()
     };
+    research["status"] = json!(recorded_status);
     let proposed_stage = if accepted { "researched" } else { "specified" };
     let existing_complete = read_text(&paths.research, RESEARCH_FILE)
         .ok()
@@ -1078,15 +1079,20 @@ fn resolve_research_bundle(
     if let Some(submitted) = submitted {
         return Ok(submitted_research_bundle(submitted));
     }
-    let cached =
+    let mut cached =
         crate::utility::memory_families::lookup_fresh_research_cache(&context.home, request)
             .map_err(|error| format!("plan research cache lookup: {error}"))?;
-    if let Some(hit) = cached
-        .fresh
-        .into_iter()
-        .min_by_key(research_cache_precedence)
-    {
-        return Ok(cached_research_bundle(hit));
+    if !cached.fresh.is_empty() {
+        cached.fresh.sort_by_key(research_cache_precedence);
+        let mut hits = cached.fresh.into_iter().enumerate();
+        let (index, first) = hits.next().expect("nonempty research cache");
+        let mut bundle = cached_research_bundle(index, first);
+        for (index, hit) in hits {
+            let competing = cached_research_bundle(index, hit);
+            bundle.sources.extend(competing.sources);
+            bundle.claims.extend(competing.claims);
+        }
+        return Ok(bundle);
     }
     if cached.stale_matches > 0 {
         return Err(format!(
@@ -1135,7 +1141,7 @@ fn submitted_research_bundle(submitted: SubmittedResearch) -> ResearchBundle {
     let claim = traceable_claim_record(
         "CLM-001",
         submitted.claim,
-        "verified",
+        source_claim_classification(&source),
         vec![source_id],
         submitted.used_by,
     );
@@ -1150,11 +1156,18 @@ fn submitted_research_bundle(submitted: SubmittedResearch) -> ResearchBundle {
         truncated: false,
     }
 }
+fn source_claim_classification(source: &Value) -> &'static str {
+    match string_field(source, "sourceType") {
+        Some("local-code" | "user-request") => "verified",
+        _ => "unverified",
+    }
+}
 
 fn cached_research_bundle(
+    index: usize,
     hit: crate::utility::memory_families::ResearchCacheHit,
 ) -> ResearchBundle {
-    let source_id = "SRC-CACHE-001".to_string();
+    let source_id = format!("SRC-CACHE-{:03}", index + 1);
     let publication_date = hit
         .publication_date
         .map(Value::String)
@@ -1171,9 +1184,9 @@ fn cached_research_bundle(
         "cacheId": hit.id,
     });
     let claim = traceable_claim_record(
-        "CLM-001",
+        &format!("CLM-CACHE-{:03}", index + 1),
         string_field(&source, "support").unwrap_or_default(),
-        "verified",
+        source_claim_classification(&source),
         vec![source_id],
         hit.used_by,
     );
@@ -2696,6 +2709,29 @@ pub fn evaluate_definition_of_ready(
         items,
     })
 }
+/// Whether any task in the named plan's aggregate is blocked. Missing or
+/// unreadable artifacts return Err so the pre-edit gate falls back to the
+/// plan-level DoR denial instead of misreading absence as unblocked.
+pub fn plan_has_blocked_tasks(
+    workspace_root: &Path,
+    claude_home: &str,
+    plan_id: &str,
+) -> Result<bool, String> {
+    let paths = review_plan_paths(workspace_root, claude_home, plan_id)?;
+    let mut issues = Vec::new();
+    let tasks = load_json_artifact(&paths.tasks, TASKS_FILE, plan_id, &mut issues);
+    let Some(tasks) = tasks else {
+        return Err(issues.join("; "));
+    };
+    Ok(tasks
+        .get("tasks")
+        .and_then(Value::as_array)
+        .is_some_and(|entries| {
+            entries
+                .iter()
+                .any(|entry| string_field(entry, "status") == Some("blocked"))
+        }))
+}
 
 pub fn evaluate_plan_definition_of_done(
     workspace_root: &Path,
@@ -3433,15 +3469,15 @@ mod tests {
             "--claim".to_string(),
             "The boundary is enforced at one owner.".to_string(),
             "--source-url".to_string(),
-            "https://example.invalid/spec".to_string(),
+            "local-code://src/lib.rs".to_string(),
             "--source-type".to_string(),
-            "official-doc".to_string(),
+            "local-code".to_string(),
             "--retrieved-at".to_string(),
             (chrono::Utc::now() - chrono::Duration::days(1)).to_rfc3339(),
             "--support".to_string(),
             "Cited for the preservation regression.".to_string(),
             "--freshness".to_string(),
-            "fresh".to_string(),
+            "local-only".to_string(),
             "--used-by".to_string(),
             "REQ-001,AC-001".to_string(),
         ]);

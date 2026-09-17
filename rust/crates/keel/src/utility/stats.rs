@@ -104,7 +104,13 @@ pub fn run_stats_command(
         }
     };
 
-    let snapshot = collect_snapshot(&claude_home, &workspace_root, days, top_count);
+    let snapshot = collect_snapshot(
+        &claude_home,
+        &workspace_root,
+        days,
+        top_count,
+        standard_error,
+    );
 
     if flag_set.bool_value("json") {
         let payload = snapshot.to_json(days);
@@ -1031,9 +1037,16 @@ struct StatsSnapshot {
 /// parser. Home-driven (not env-driven) so `stats --claude-home` reports the
 /// home it resolved and so tests stay hermetic. Missing/unreadable log yields
 /// the parser's empty summary, matching `gain` on a fresh home.
-fn gain_summary_from_home(claude_home: &Path, days: u64) -> crate::utility::gain::GainSummary {
+fn gain_summary_from_home(
+    claude_home: &Path,
+    days: u64,
+    standard_error: &mut dyn Write,
+) -> crate::utility::gain::GainSummary {
     let path = claude_home.join(COMMAND_COMPACTION_EVENTS_FILE_NAME);
-    let text = fs::read_to_string(path).unwrap_or_default();
+    // why: summaries must not load an unbounded day file; matches gain's 4 MiB tail cap
+    let Ok(text) = crate::runtime::read_tail_text(&path, 4 * 1024 * 1024, standard_error) else {
+        return Default::default();
+    };
     parse_gain_summary(&text, Some(days_cutoff(days)), None)
 }
 
@@ -1063,8 +1076,9 @@ fn collect_snapshot(
     workspace_root: &str,
     days: u64,
     top_count: usize,
+    standard_error: &mut dyn Write,
 ) -> StatsSnapshot {
-    let gain = gain_summary_from_home(claude_home, days);
+    let gain = gain_summary_from_home(claude_home, days, standard_error);
     let top_commands = gain
         .top_commands
         .iter()
@@ -1077,6 +1091,7 @@ fn collect_snapshot(
             .iter()
             .map(PathBuf::as_path),
         None,
+        standard_error,
     );
     let top_tools = aggregate_rows(rows, top_count)
         .into_iter()
@@ -1650,7 +1665,7 @@ mod tests {
     #[test]
     fn snapshot_renders_headline_and_axes() {
         with_isolated_home("render", |home| {
-            let snapshot = collect_snapshot(home, "", 7, 5);
+            let snapshot = collect_snapshot(home, "", 7, 5, &mut Vec::new());
             let mut out: Vec<u8> = Vec::new();
             snapshot.render_text(&mut out, 7);
             let rendered = String::from_utf8_lossy(&out);
@@ -1677,7 +1692,7 @@ mod tests {
             fs::create_dir_all(&lane).expect("seed lane");
             fs::write(lane.join("anvil.lock.json"), "{}").expect("seed lock");
 
-            let snapshot = collect_snapshot(home, workspace_root, 7, 5);
+            let snapshot = collect_snapshot(home, workspace_root, 7, 5, &mut Vec::new());
             let mut out: Vec<u8> = Vec::new();
             snapshot.render_text(&mut out, 7);
             let rendered = String::from_utf8_lossy(&out);
@@ -1692,7 +1707,7 @@ mod tests {
     #[test]
     fn json_payload_omits_anvil_axis_when_empty_and_carries_it_when_seeded() {
         with_isolated_home("json", |home| {
-            let snapshot = collect_snapshot(home, "", 7, 5);
+            let snapshot = collect_snapshot(home, "", 7, 5, &mut Vec::new());
             let Value::Object(map) = snapshot.to_json(7) else {
                 panic!("expected object payload");
             };
@@ -1733,7 +1748,7 @@ mod tests {
             fs::create_dir_all(&lane).expect("seed lane");
             fs::write(lane.join("anvil.lock.json"), "{}").expect("seed lock");
 
-            let snapshot = collect_snapshot(home, "C:/anvil-stats-ws", 7, 5);
+            let snapshot = collect_snapshot(home, "C:/anvil-stats-ws", 7, 5, &mut Vec::new());
             let Value::Object(map) = snapshot.to_json(7) else {
                 panic!("expected object payload");
             };
