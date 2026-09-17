@@ -311,6 +311,37 @@ pub(super) fn run_hook_user_prompt_submit(
         },
         _ => append_compression_hint_when_forced(base_context),
     };
+    let cwd = stdin_payload
+        .as_ref()
+        .and_then(|payload| payload.get("cwd").or_else(|| payload.get("workspaceRoot")))
+        .and_then(JsonDocument::as_str)
+        .unwrap_or_default();
+    let workspace_root = if cwd.is_empty() {
+        std::env::current_dir()
+            .map(|p| crate::runtime::display_path(&p))
+            .unwrap_or_default()
+    } else {
+        cwd.to_string()
+    };
+
+    let admitted_context = if !session_id.is_empty() && !workspace_root.is_empty() {
+        let input = crate::proxy::context::ProjectionInput::new(
+            crate::proxy::context::ContextSource::Instruction,
+            &final_context,
+            None::<String>,
+            &workspace_root,
+            session_id,
+        );
+        match crate::proxy::context::project_scoped(
+            crate::proxy::context::ContextPolicy::default(),
+            input,
+        ) {
+            Ok(projection) => projection.summary,
+            Err(_) => final_context,
+        }
+    } else {
+        final_context
+    };
 
     let event = match event_by_name("UserPromptSubmit") {
         Some(row) => row,
@@ -323,7 +354,7 @@ pub(super) fn run_hook_user_prompt_submit(
         }
     };
 
-    let payload = render_lifecycle_payload(event, &final_context);
+    let payload = render_lifecycle_payload(event, &admitted_context);
 
     match serde_json::to_string_pretty(&payload) {
         Ok(rendered) => {

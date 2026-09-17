@@ -1463,9 +1463,35 @@ pub(super) fn emit_gate_decision(
     standard_output: &mut dyn Write,
     standard_error: &mut dyn Write,
 ) -> u8 {
+    let source = match decision {
+        GateDecision::Block => crate::proxy::context::ContextSource::Warning,
+        _ => crate::proxy::context::ContextSource::Instruction,
+    };
+    let admitted = if let Ok(cwd) = std::env::current_dir() {
+        let input = crate::proxy::context::ProjectionInput::new(
+            source,
+            &message,
+            None::<String>,
+            crate::runtime::display_path(&cwd),
+            "default",
+        );
+        match crate::proxy::context::project_scoped(
+            crate::proxy::context::ContextPolicy::default(),
+            input,
+        ) {
+            Ok(projection) => projection.summary,
+            Err(_) => message,
+        }
+    } else {
+        message
+    };
     match decision {
-        GateDecision::Nudge => emit_post_tool_batch_nudge(message, standard_output, standard_error),
-        GateDecision::Block => emit_post_tool_batch_block(message, standard_output, standard_error),
+        GateDecision::Nudge => {
+            emit_post_tool_batch_nudge(admitted, standard_output, standard_error)
+        }
+        GateDecision::Block => {
+            emit_post_tool_batch_block(admitted, standard_output, standard_error)
+        }
         GateDecision::Advisory => emit_post_tool_batch_advisory(standard_output, standard_error),
     }
 }

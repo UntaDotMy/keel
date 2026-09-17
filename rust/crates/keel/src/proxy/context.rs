@@ -637,6 +637,60 @@ pub fn project_scoped(
     entry.gateway.policy = policy;
     entry.gateway.project(input)
 }
+/// Project multiple context candidates for a single turn under a shared budget,
+/// prioritized by tier (Tier 1 first), admitted through the session's ContextFirewall.
+pub fn schedule_turn_scoped(
+    turn_budget: usize,
+    workspace_id: &str,
+    session_id: &str,
+    candidates: Vec<ProjectionInput>,
+) -> Result<TurnScheduleResult, ContextFirewallError> {
+    let workspace_id = workspace_id.trim();
+    let session_id = session_id.trim();
+    validate_identity_component(workspace_id, "workspace")?;
+    validate_identity_component(session_id, "session")?;
+
+    let key = format!("{}\0{}", workspace_id, session_id);
+    let mut gateways = SESSION_GATEWAYS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let now = Instant::now();
+    let ttl = context_gateway_ttl();
+    gateways
+        .entries
+        .retain(|_, entry| now.saturating_duration_since(entry.last_seen) < ttl);
+    let live_keys = gateways.entries.keys().cloned().collect::<HashSet<_>>();
+    gateways
+        .order
+        .retain(|existing| live_keys.contains(existing));
+    if !gateways.entries.contains_key(&key) {
+        while gateways.entries.len() >= MAX_SESSION_GATEWAYS {
+            let evicted = gateways
+                .order
+                .pop_front()
+                .or_else(|| gateways.entries.keys().next().cloned());
+            let Some(evicted) = evicted else { break };
+            gateways.entries.remove(&evicted);
+        }
+        gateways.order.push_back(key.clone());
+        gateways.entries.insert(
+            key.clone(),
+            SessionGatewayEntry {
+                gateway: ContextFirewall::new(ContextPolicy::default()),
+                last_seen: now,
+            },
+        );
+    } else {
+        gateways.order.retain(|existing| existing != &key);
+        gateways.order.push_back(key.clone());
+    }
+    let entry = gateways
+        .entries
+        .get_mut(&key)
+        .expect("session gateway inserted or already present");
+    entry.last_seen = now;
+    entry.gateway.schedule_turn(candidates, turn_budget)
+}
 
 /// Test-only: drop one scoped session gateway so a test can re-project the
 /// same payload without tripping duplicate suppression. Production code never
