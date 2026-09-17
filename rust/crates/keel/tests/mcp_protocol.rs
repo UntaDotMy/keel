@@ -451,21 +451,26 @@ fn mcp_http_discovery_handles_parallel_clients() {
 }
 
 #[test]
-fn mcp_http_legacy_2025_handshake_is_rejected() {
-    let claude_home = unique_temp_directory("http-legacy-reject");
+fn mcp_http_classic_2025_initialize_succeeds() {
+    let claude_home = unique_temp_directory("http-classic-init");
     let (mut server, address) = spawn_http_server(&claude_home);
 
     let body = serde_json::to_string(&json!({
         "jsonrpc": "2.0",
         "id": 1,
         "method": "initialize",
-        "params": {}
+        "params": {
+            "protocolVersion": "2025-03-26",
+            "capabilities": {},
+            "clientInfo": {"name": "http-classic", "version": "1"}
+        }
     }))
     .unwrap();
 
+    // Classic initialize does not require modern routing headers.
     let request = format!(
         "POST /mcp HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/json\r\n\
-         Accept: application/json, text/event-stream\r\nMCP-Protocol-Version: 2025-03-26\r\nMcp-Method: initialize\r\n\
+         Accept: application/json, text/event-stream\r\n\
          Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     );
@@ -475,10 +480,12 @@ fn mcp_http_legacy_2025_handshake_is_rejected() {
     let mut response = String::new();
     stream.read_to_string(&mut response).unwrap();
 
-    assert!(response.contains("400 Bad Request"));
+    assert!(response.starts_with("HTTP/1.1 200"), "response={response}");
     let body: Value = serde_json::from_str(response.split_once("\r\n\r\n").unwrap().1).unwrap();
-    assert_eq!(body["error"]["code"], -32022);
-    assert_eq!(body["error"]["data"]["supported"], json!(["2026-07-28"]));
+    assert!(body.get("error").is_none(), "body={body}");
+    assert_eq!(body["result"]["protocolVersion"], "2025-03-26");
+    assert!(body["result"]["capabilities"]["tools"].is_object());
+    assert_eq!(body["result"]["serverInfo"]["name"], "keel");
 
     let _ = server.kill();
     let _ = server.wait();
@@ -486,18 +493,83 @@ fn mcp_http_legacy_2025_handshake_is_rejected() {
 }
 
 #[test]
-fn mcp_stdio_legacy_cannot_establish_state() {
-    let home = unique_temp_directory("legacy-stdio");
+fn mcp_stdio_classic_initialize_handshake_succeeds() {
+    let home = unique_temp_directory("classic-stdio");
     let mut server = McpServerProcess::spawn(&home);
     server.send(&json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"legacy","version":"1"}}}));
-    let rejection = server.recv();
-    assert_eq!(rejection["error"]["code"], -32022);
-    assert_eq!(rejection["error"]["data"]["requested"], "2024-11-05");
+    let init = server.recv();
+    assert!(init.get("error").is_none(), "classic initialize: {init}");
+    assert_eq!(init["result"]["protocolVersion"], "2024-11-05");
+    assert!(init["result"]["capabilities"]["tools"].is_object());
+    assert_eq!(init["result"]["serverInfo"]["name"], "keel");
     server.send(&json!({"jsonrpc":"2.0","method":"notifications/initialized"}));
-    server.send(&json!({"jsonrpc":"2.0","id":2,"method":"ping"}));
-    assert_eq!(server.recv()["error"]["code"], -32602);
-    server.send_modern(json!({"jsonrpc":"2.0","id":3,"method":"ping"}));
+    // Classic path: tools/list and ping without `_meta` after initialize.
+    server.send(&json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}));
+    let listed = server.recv();
+    assert!(listed.get("result").is_some(), "classic tools/list: {listed}");
+    assert!(listed["result"]["tools"].is_array());
+    server.send(&json!({"jsonrpc":"2.0","id":3,"method":"ping"}));
     assert_eq!(server.recv()["result"]["resultType"], "complete");
+    server.close();
+    let _ = std::fs::remove_dir_all(home);
+}
+
+#[test]
+fn mcp_stdio_discover_then_initialize_fallback() {
+    let home = unique_temp_directory("discover-fallback");
+    let mut server = McpServerProcess::spawn(&home);
+    // Antigravity-like: try modern discover without `_meta`, then fall back to initialize.
+    server.send(&json!({"jsonrpc":"2.0","id":1,"method":"server/discover","params":{}}));
+    let discover = server.recv();
+    assert_eq!(discover["error"]["code"], -32602);
+    server.send(&json!({"jsonrpc":"2.0","id":2,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"antigravity","version":"1"}}}));
+    let init = server.recv();
+    assert!(init.get("result").is_some(), "fallback initialize: {init}");
+    assert_eq!(init["result"]["protocolVersion"], "2025-03-26");
+    server.send(&json!({"jsonrpc":"2.0","method":"notifications/initialized"}));
+    server.send(&json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"recall_status","arguments":{}}}));
+    let call = server.recv();
+    assert!(call.get("result").is_some(), "tools/call after fallback: {call}");
+    server.close();
+    let _ = std::fs::remove_dir_all(home);
+}
+
+#[test]
+fn mcp_stdio_modern_minimal_meta_tools_after_discover() {
+    let home = unique_temp_directory("modern-minimal-meta");
+    let mut server = McpServerProcess::spawn(&home);
+    let minimal = json!({
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientCapabilities": {}
+    });
+    server.send(&json!({"jsonrpc":"2.0","id":1,"method":"server/discover","params":{"_meta":minimal}}));
+    let discovery = server.recv();
+    assert_eq!(discovery["result"]["supportedVersions"], json!(["2026-07-28"]));
+    server.send(&json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{"_meta":minimal}}));
+    let listed = server.recv();
+    assert!(listed.get("result").is_some(), "minimal-meta tools/list: {listed}");
+    server.send(&json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"recall_status","arguments":{},"_meta":minimal}}));
+    let call = server.recv();
+    assert!(call.get("result").is_some(), "minimal-meta tools/call: {call}");
+    server.close();
+    let _ = std::fs::remove_dir_all(home);
+}
+
+#[test]
+fn mcp_stdio_unsupported_initialize_lists_both_eras() {
+    let home = unique_temp_directory("unsupported-init");
+    let mut server = McpServerProcess::spawn(&home);
+    server.send(&json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"1999-01-01"}}));
+    let rejected = server.recv();
+    assert_eq!(rejected["error"]["code"], -32022);
+    assert_eq!(rejected["error"]["data"]["requested"], "1999-01-01");
+    let supported = rejected["error"]["data"]["supported"].as_array().expect("supported list");
+    for version in ["2024-11-05", "2025-03-26", "2025-11-25", "2026-07-28"] {
+        assert!(
+            supported.iter().any(|entry| entry.as_str() == Some(version)),
+            "missing {version} in {supported:?}"
+        );
+    }
     server.close();
     let _ = std::fs::remove_dir_all(home);
 }

@@ -50,6 +50,19 @@ The goal is to keep the supported entry points explicit for both human operators
 | Command Code | Mod-provided instructions | Mod lifecycle events | Native JSON entry | The installed mod requires the bundled `_shared/ts/bridge-core.ts`; doctor verifies it. |
 | Claude Desktop / Cowork | MCP tool descriptions only | Not available | Native Desktop config | Cowork exposes no lifecycle hook surface, so it cannot enforce the pre-edit gate. |
 
+## MCP wire eras
+
+Keel MCP is dual-era (see [context-gateway.md](context-gateway.md)):
+
+| Host class | Era | Notes |
+| --- | --- | --- |
+| Claude Code | Classic `initialize` (and modern `_meta` when the harness sends it) | `~/.claude.json` sets `KEEL_MCP_IDLE_TIMEOUT_SECS=0` |
+| Cursor | Classic `initialize` | Mainstream handshake; tools without exotic `_meta` |
+| Google Antigravity | Classic `initialize` (may probe `server/discover` first) | Plugin + global `mcp_config.json` set `KEEL_MCP_IDLE_TIMEOUT_SECS=0`; docs use `command`/`args` |
+| Modern 2026-07-28 clients | `server/discover` + per-request `_meta` | Minimal `_meta` (protocolVersion + clientCapabilities object) is enough after discover |
+
+Unsupported protocol versions return `-32022` with both eras listed. Prefer GitHub Release bootstrap assets when `raw.githubusercontent.com` returns 403.
+
 ## Agent execution guidance
 
 When an AI agent is operating from an arbitrary workspace or a harness home installation:

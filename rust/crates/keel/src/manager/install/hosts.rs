@@ -1030,11 +1030,16 @@ fn wire_antigravity_plugin(
         "description": "Keel managed integration for Antigravity"
     }))
     .unwrap_or_default();
+    // why: Antigravity holds stdin open for the session like Claude; default
+    // idle self-reap would drop a live attached server mid-session. Disable
+    // idle-reap for this registration (same contract as Claude mcp_register).
+    // Docs use command/args only — omit type:stdio unless the host schema needs it.
     let mcp = serde_json::to_string_pretty(&serde_json::json!({
         "mcpServers": {
             "keel": {
                 "command": display_path(&binary),
-                "args": ["mcp", "serve"]
+                "args": ["mcp", "serve"],
+                "env": { "KEEL_MCP_IDLE_TIMEOUT_SECS": "0" }
             }
         }
     }))
@@ -1114,7 +1119,8 @@ pub(crate) fn maybe_wire_antigravity(
     let binary = installed_executable_path(claude_home);
     let mcp_entry = serde_json::json!({
         "command": display_path(&binary),
-        "args": ["mcp", "serve"]
+        "args": ["mcp", "serve"],
+        "env": { "KEEL_MCP_IDLE_TIMEOUT_SECS": "0" }
     });
     for (label, root, plugin) in targets {
         let mut details = wire_antigravity_plugin(repository_root, claude_home, &plugin);

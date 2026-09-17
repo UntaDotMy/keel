@@ -263,10 +263,58 @@ const MAX_CANCELLATION_ID_BYTES: usize = 512;
 /// chats) is separate: each session is its own `keel mcp serve` process.
 const DEFAULT_MAX_INFLIGHT: usize = 64;
 
-/// The only supported wire protocol; every request declares it independently.
+/// Modern wire revision (Stack B): per-request `_meta` + `server/discover`.
 pub(super) const MCP_PROTOCOL_VERSION: &str = "2026-07-28";
 pub(super) const MCP_PROTOCOL_META: &str = "io.modelcontextprotocol/protocolVersion";
 pub(super) const MCP_CAPABILITIES_META: &str = "io.modelcontextprotocol/clientCapabilities";
+
+/// Classic initialize revisions (Stack A) accepted without `_meta`.
+/// Cursor / Antigravity-class hosts speak these; keep them additive with modern.
+pub(super) const CLASSIC_PROTOCOL_VERSIONS: &[&str] =
+    &["2024-11-05", "2025-03-26", "2025-11-25"];
+
+/// Every version Keel advertises in `-32022` `data.supported` (both eras).
+pub(super) fn all_supported_protocol_versions() -> Vec<&'static str> {
+    let mut versions = CLASSIC_PROTOCOL_VERSIONS.to_vec();
+    versions.push(MCP_PROTOCOL_VERSION);
+    versions
+}
+
+fn is_classic_protocol_version(version: &str) -> bool {
+    CLASSIC_PROTOCOL_VERSIONS.contains(&version)
+}
+
+fn is_negotiable_initialize_version(version: &str) -> bool {
+    is_classic_protocol_version(version) || version == MCP_PROTOCOL_VERSION
+}
+
+/// Process-wide wire era for one `mcp serve` / `serve-http` process.
+/// Stdio is one process per host session; HTTP shares one listener process.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WireEra {
+    Unset = 0,
+    Classic = 1,
+    Modern = 2,
+}
+
+static WIRE_ERA: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+fn wire_era() -> WireEra {
+    match WIRE_ERA.load(Ordering::Acquire) {
+        1 => WireEra::Classic,
+        2 => WireEra::Modern,
+        _ => WireEra::Unset,
+    }
+}
+
+fn set_wire_era(era: WireEra) {
+    WIRE_ERA.store(era as u8, Ordering::Release);
+}
+
+#[cfg(test)]
+pub(super) fn reset_wire_era_for_test() {
+    set_wire_era(WireEra::Unset);
+}
 
 /// Server identity returned in per-response metadata. The version mirrors
 /// the workspace package version so plugin manifests and the server agree on
@@ -1756,23 +1804,60 @@ pub(super) fn dispatch_cancellable_with_context(
             "Request id must be a string or integer",
         ));
     }
-    if method == "initialize" || method == "notifications/initialized" {
-        return Some(unsupported_version_response(
-            request_id,
-            params
-                .get("protocolVersion")
-                .and_then(Value::as_str)
-                .unwrap_or("legacy"),
-        ));
+    // Classic notification: always silent (with or without an id).
+    if method == "notifications/initialized" {
+        return None;
     }
-    if let Err(response) = validate_request_metadata(&params, &request_id) {
-        return Some(response);
+    // Stack A: classic initialize — negotiate without requiring `_meta`.
+    if method == "initialize" {
+        return Some(handle_initialize_request(&params, request_id));
     }
+
+    let requires_modern_meta = method == "server/discover"
+        || params.get("_meta").is_some()
+        || wire_era() == WireEra::Modern;
+    if requires_modern_meta {
+        if let Err(response) = validate_request_metadata(&params, &request_id) {
+            return Some(response);
+        }
+    }
+    // Soft-default missing `_meta` on classic / pre-handshake paths.
     Some(
         match handle_method_cancellable(&method, &params, cancellation, &request_context) {
-            Ok(result) => success_response(request_id, result),
+            Ok(result) => {
+                if method == "server/discover" {
+                    set_wire_era(WireEra::Modern);
+                }
+                success_response(request_id, result)
+            }
             Err(MethodError { code, message }) => error_response(request_id, code, &message),
         },
+    )
+}
+
+fn handle_initialize_request(params: &Value, request_id: Value) -> Value {
+    let requested = params
+        .get("protocolVersion")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if requested.is_empty() {
+        return error_response(
+            request_id,
+            JSON_RPC_INVALID_PARAMS,
+            "initialize params.protocolVersion must be a non-empty string",
+        );
+    }
+    if !is_negotiable_initialize_version(requested) {
+        return unsupported_version_response(request_id, requested);
+    }
+    set_wire_era(WireEra::Classic);
+    success_response(
+        request_id,
+        json!({
+            "protocolVersion": requested,
+            "capabilities": {"tools": {}, "resources": {}},
+            "serverInfo": {"name": MCP_SERVER_NAME, "version": MCP_SERVER_VERSION},
+        }),
     )
 }
 
@@ -1869,18 +1954,25 @@ fn handle_method_cancellable(
 }
 
 pub(super) fn validate_request_metadata(params: &Value, id: &Value) -> Result<(), Value> {
+    // Modern `_meta` gate order (Architect tip):
+    // 1) missing _meta → -32602
+    // 2) bad/empty protocolVersion → -32602
+    // 3) unsupported → -32022 with data.supported+requested
+    // 4) clientCapabilities not object → -32602
+    // 5) clientInfo if present must have string name+version
     let invalid = |message: &str| error_response(id.clone(), JSON_RPC_INVALID_PARAMS, message);
     let meta = params
         .get("_meta")
         .and_then(Value::as_object)
         .ok_or_else(|| invalid("params._meta is required"))?;
-    let version = meta
-        .get(MCP_PROTOCOL_META)
-        .and_then(Value::as_str)
-        .filter(|version| !version.is_empty())
-        .ok_or_else(|| {
-            invalid("_meta.io.modelcontextprotocol/protocolVersion must be a non-empty string")
-        })?;
+    let version = match meta.get(MCP_PROTOCOL_META).and_then(Value::as_str) {
+        Some(version) if !version.is_empty() => version,
+        Some(_) | None => {
+            return Err(invalid(
+                "_meta.io.modelcontextprotocol/protocolVersion must be a non-empty string",
+            ));
+        }
+    };
     if version != MCP_PROTOCOL_VERSION {
         return Err(unsupported_version_response(id.clone(), version));
     }
@@ -1905,13 +1997,14 @@ pub(super) fn validate_request_metadata(params: &Value, id: &Value) -> Result<()
 }
 
 pub(super) fn unsupported_version_response(id: Value, requested: &str) -> Value {
+    let supported = all_supported_protocol_versions();
+    let supported_list = supported.join(", ");
     let mut response = error_response(
         id,
         -32022,
-        "Unsupported protocol version; supported: 2026-07-28",
+        &format!("Unsupported protocol version; supported: {supported_list}"),
     );
-    response["error"]["data"] =
-        json!({"supported": [MCP_PROTOCOL_VERSION], "requested": requested});
+    response["error"]["data"] = json!({"supported": supported, "requested": requested});
     response
 }
 
@@ -2213,32 +2306,107 @@ mod tests {
     }
 
     #[test]
-    fn modern_discovery_is_query_free_and_legacy_is_rejected() {
+    fn modern_discovery_is_query_free_and_classic_initialize_succeeds() {
+        // G1–G6 dual-era gates (Architect tip).
+        reset_wire_era_for_test();
         let context = McpRequestContext::authoritative(None);
         let cancel = Arc::new(AtomicBool::new(false));
-        let modern = json!({"jsonrpc":"2.0","id":1,"method":"server/discover","params":{"_meta":{
+
+        // G1 / G3: modern discover + minimal _meta succeeds (query-free).
+        let modern = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"server/discover","params":{"_meta":{
             "io.modelcontextprotocol/protocolVersion": MCP_PROTOCOL_VERSION,
             "io.modelcontextprotocol/clientCapabilities": {}
         }}});
         let response = dispatch_cancellable_with_context(&modern, &cancel, &context).unwrap();
         assert_eq!(
             response["result"]["supportedVersions"],
-            json!([MCP_PROTOCOL_VERSION])
+            serde_json::json!([MCP_PROTOCOL_VERSION])
         );
         assert!(response["result"]["capabilities"]["tools"].is_object());
         assert!(response["result"].get("tools").is_none());
-        let legacy = json!({"jsonrpc":"2.0","id":2,"method":"initialize","params":{"protocolVersion":"2024-11-05"}});
-        let response = dispatch_cancellable_with_context(&legacy, &cancel, &context).unwrap();
-        assert_eq!(response["error"]["code"], -32022);
+
+        // G5: post-discover tools/list with the SAME minimal _meta succeeds.
+        let list_after_discover = serde_json::json!({
+            "jsonrpc":"2.0","id":11,"method":"tools/list",
+            "params":{"_meta":{
+                "io.modelcontextprotocol/protocolVersion": MCP_PROTOCOL_VERSION,
+                "io.modelcontextprotocol/clientCapabilities": {}
+            }}
+        });
+        let listed = dispatch_cancellable_with_context(&list_after_discover, &cancel, &context)
+            .unwrap();
+        assert!(listed.get("result").is_some(), "post-discover tools/list: {listed}");
+        assert!(listed["result"]["tools"].is_array());
+
+        // G4: bare discover params:{} fails closed with -32602 (missing _meta), not hang.
+        reset_wire_era_for_test();
+        let bare = serde_json::json!({"jsonrpc":"2.0","id":12,"method":"server/discover","params":{}});
+        let bare_response = dispatch_cancellable_with_context(&bare, &cancel, &context).unwrap();
+        assert_eq!(bare_response["error"]["code"], -32602);
+
+        // G1 / G2: classic initialize for supported revisions succeeds (no _meta).
+        reset_wire_era_for_test();
+        for (id, version) in [
+            (2, "2024-11-05"),
+            (3, "2025-03-26"),
+            (4, "2025-11-25"),
+        ] {
+            let legacy = serde_json::json!({
+                "jsonrpc":"2.0","id":id,"method":"initialize",
+                "params":{"protocolVersion":version,"capabilities":{},"clientInfo":{"name":"classic","version":"1"}}
+            });
+            let response = dispatch_cancellable_with_context(&legacy, &cancel, &context).unwrap();
+            assert!(response.get("error").is_none(), "classic initialize {version}: {response}");
+            assert_eq!(response["result"]["protocolVersion"], version);
+            assert!(response["result"]["capabilities"]["tools"].is_object());
+            assert_eq!(response["result"]["serverInfo"]["name"], MCP_SERVER_NAME);
+        }
+
+        // G5: tools/list + tools/call without _meta after classic initialize.
+        let list = serde_json::json!({"jsonrpc":"2.0","id":5,"method":"tools/list","params":{}});
+        let listed = dispatch_cancellable_with_context(&list, &cancel, &context).unwrap();
+        assert!(listed.get("result").is_some(), "classic tools/list: {listed}");
+        let call = serde_json::json!({
+            "jsonrpc":"2.0","id":6,"method":"tools/call",
+            "params":{"name":"recall_status","arguments":{}}
+        });
+        let called = dispatch_cancellable_with_context(&call, &cancel, &context).unwrap();
+        assert!(called.get("result").is_some(), "classic tools/call: {called}");
+
+        // G6: unknown version fail-closed with -32022 listing BOTH eras.
+        reset_wire_era_for_test();
+        let unknown = serde_json::json!({
+            "jsonrpc":"2.0","id":7,"method":"initialize",
+            "params":{"protocolVersion":"1999-01-01"}
+        });
+        let rejected = dispatch_cancellable_with_context(&unknown, &cancel, &context).unwrap();
+        assert_eq!(rejected["error"]["code"], -32022);
         assert_eq!(
-            response["error"]["data"]["supported"],
-            json!([MCP_PROTOCOL_VERSION])
+            rejected["error"]["data"]["supported"],
+            serde_json::json!(all_supported_protocol_versions())
         );
-        assert!(response.get("result").is_none());
+        assert_eq!(rejected["error"]["data"]["requested"], "1999-01-01");
+
+        // G2: discover → initialize fallback (Antigravity-like) still completes.
+        reset_wire_era_for_test();
+        let discover_attempt = serde_json::json!({"jsonrpc":"2.0","id":8,"method":"server/discover","params":{}});
+        let _ = dispatch_cancellable_with_context(&discover_attempt, &cancel, &context);
+        let fallback = serde_json::json!({
+            "jsonrpc":"2.0","id":9,"method":"initialize",
+            "params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"antigravity","version":"1"}}
+        });
+        let fallback_ok = dispatch_cancellable_with_context(&fallback, &cancel, &context).unwrap();
+        assert!(
+            fallback_ok.get("result").is_some(),
+            "discover→initialize fallback: {fallback_ok}"
+        );
+        assert_eq!(fallback_ok["result"]["protocolVersion"], "2025-03-26");
     }
 
     #[test]
     fn metadata_is_required_on_every_request_and_versions_never_downgrade() {
+        reset_wire_era_for_test();
+        set_wire_era(WireEra::Modern);
         let context = McpRequestContext::authoritative(None);
         let cancel = Arc::new(AtomicBool::new(false));
         for meta in [
@@ -2257,6 +2425,10 @@ mod tests {
         let response = dispatch_cancellable_with_context(&request, &cancel, &context).unwrap();
         assert_eq!(response["error"]["code"], -32022);
         assert_eq!(response["error"]["data"]["requested"], "2099-01-01");
+        assert_eq!(
+            response["error"]["data"]["supported"],
+            serde_json::json!(all_supported_protocol_versions())
+        );
     }
 
     #[test]
