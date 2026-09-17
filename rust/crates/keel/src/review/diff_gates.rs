@@ -690,7 +690,12 @@ pub(crate) fn task_evidence_gate(
                 claude_home,
                 plan_id.trim(),
             )
-            .unwrap_or((GateStatus::Pass, String::new()));
+            .unwrap_or_else(|error| {
+                (
+                    GateStatus::Fail,
+                    format!("acceptance evidence evaluation failed: {error}"),
+                )
+            });
             let details = if ac_summary.is_empty() {
                 format!(
                     "plan {} has valid task tickets, RTM links, and evidence for {} existing source file(s)",
@@ -987,6 +992,14 @@ pub(crate) fn completeness_scan_covers_changed(workspace_cwd: &str, touched: &[S
     else {
         return false;
     };
+    let Ok((repository_head, diff_fingerprint)) =
+        keel_flow::repository_state(Path::new(workspace_cwd))
+    else {
+        return false;
+    };
+    if record.repository_head != repository_head || record.diff_fingerprint != diff_fingerprint {
+        return false;
+    }
     artifact_targets_all_touched_files(&record.changed, touched)
 }
 

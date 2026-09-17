@@ -112,6 +112,40 @@ pub struct RawNamespace {
     pub session_id: String,
 }
 
+impl RawNamespace {
+    /// MCP identifiers are opaque and override each fallback independently.
+    /// Filesystem fallbacks preserve lexical identities used by existing artifacts.
+    pub(crate) fn for_workspace(workspace: &std::path::Path) -> Self {
+        Self {
+            workspace_id: raw_identity_env("KEEL_MCP_WORKSPACE_ID").unwrap_or_else(|| {
+                crate::runtime::clean_path(workspace)
+                    .to_string_lossy()
+                    .into_owned()
+            }),
+            session_id: [
+                "KEEL_MCP_SESSION_ID",
+                "CLAUDE_CODE_SESSION_ID",
+                "CODEX_THREAD_ID",
+            ]
+            .into_iter()
+            .find_map(raw_identity_env)
+            .unwrap_or_else(|| "default".to_string()),
+        }
+    }
+
+    pub(crate) fn has_mcp_context() -> bool {
+        raw_identity_env("KEEL_MCP_SESSION_ID").is_some()
+            || raw_identity_env("KEEL_MCP_WORKSPACE_ID").is_some()
+    }
+}
+
+fn raw_identity_env(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct IntegrityManifest {
     schema_version: u32,

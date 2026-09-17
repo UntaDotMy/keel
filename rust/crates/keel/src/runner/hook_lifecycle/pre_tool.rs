@@ -21,6 +21,8 @@ pub(super) const IRON_LAW_GATE_DENIAL_STRICT: &str =
         1. MCP `context_brief` or `system_map` (or `keel memory system-map` / `keel doctor`)\n\
         2. MCP `recall` or `skill_route` / `skill_get` (or `keel memory recall`)\n\
         3. MCP `code_search` (or `keel code-search search ...`)\n\
+        Mounted tools: Write path=xd://mcp__keel_system_map content={} is the same research call. \
+        Hosts must forward the actual path and successful tool observation; an ordinary Write does not qualify.\n\
         Allowed while blocked: Read/Grep/Glob, and shell only if the command is a \
         keel research command. Plain Read alone does NOT clear STRICT. \
         Set KEEL_IRON_LAW_GATE=balanced or =off to relax.";
@@ -344,21 +346,6 @@ pub(crate) fn maybe_mark_iron_law_from_tool_event(input: &JsonDocument) {
         return;
     }
     mark_iron_law_satisfied(session_id);
-}
-
-/// Mark from bridge observe (tool name + optional stdin command JSON / raw).
-pub(crate) fn maybe_mark_iron_law_from_parts(
-    session_id: &str,
-    tool_name: &str,
-    command: Option<&str>,
-) {
-    let mode = iron_law_gate_mode();
-    if mode == IronLawGateMode::Off {
-        return;
-    }
-    if tool_satisfies_iron_law(mode, tool_name, command) {
-        mark_iron_law_satisfied(session_id);
-    }
 }
 
 /// Scan today's tool-timings for keel (or balanced host) research tools.

@@ -338,45 +338,15 @@ fn raw_recovery_store() -> crate::proxy::raw_store::RawStore {
     if let Some(namespace) = explicit_namespace {
         return crate::proxy::raw_store::RawStore::with_namespace(store.root().clone(), namespace);
     }
-    let mcp_session = std::env::var("KEEL_MCP_SESSION_ID")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty());
-    let mcp_workspace = std::env::var("KEEL_MCP_WORKSPACE_ID")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty());
-    if let (Some(session_id), Some(workspace_id)) = (mcp_session, mcp_workspace) {
-        return crate::proxy::raw_store::RawStore::with_namespace(
-            store.root().clone(),
-            crate::proxy::raw_store::RawNamespace {
-                workspace_id,
-                session_id,
-            },
-        );
-    }
-    if !crate::proxy::run::running_under_claude_code() {
+    if !crate::proxy::raw_store::RawNamespace::has_mcp_context()
+        && !crate::proxy::run::running_under_claude_code()
+    {
         return store;
     }
-    let workspace_id = match std::env::current_dir() {
-        Ok(path) if !path.as_os_str().is_empty() => path.to_string_lossy().to_string(),
-        _ => return store,
-    };
-    let session_id = ["CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID"]
-        .iter()
-        .find_map(|name| {
-            std::env::var(name)
-                .ok()
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty())
-        })
-        .unwrap_or_else(|| "default".to_string());
+    let workspace = std::env::current_dir().unwrap_or_default();
     crate::proxy::raw_store::RawStore::with_namespace(
         store.root().clone(),
-        crate::proxy::raw_store::RawNamespace {
-            workspace_id,
-            session_id,
-        },
+        crate::proxy::raw_store::RawNamespace::for_workspace(&workspace),
     )
 }
 
@@ -391,19 +361,44 @@ mod tests {
     use crate::test_support::ENV_LOCK;
     use std::path::PathBuf;
 
+    struct RecoveryEnvironment(Vec<(&'static str, Option<std::ffi::OsString>)>);
+
+    impl RecoveryEnvironment {
+        fn clear() -> Self {
+            let previous = crate::proxy::run::CLAUDE_CODE_SIGNAL_VARS
+                .iter()
+                .copied()
+                .chain([
+                    "KEEL_MCP_SESSION_ID",
+                    "KEEL_MCP_WORKSPACE_ID",
+                    "CLAUDE_TARGET_OVERRIDE",
+                ])
+                .map(|name| (name, std::env::var_os(name)))
+                .collect::<Vec<_>>();
+            for (name, _) in &previous {
+                std::env::remove_var(name);
+            }
+            Self(previous)
+        }
+    }
+
+    impl Drop for RecoveryEnvironment {
+        fn drop(&mut self) {
+            for (name, value) in &self.0 {
+                match value {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
+    }
+
     #[test]
     fn raw_cli_rejects_tampered_artifacts_before_emitting_bytes() {
         let _guard = ENV_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let previous_home = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
-        let signal_snapshot = crate::proxy::run::CLAUDE_CODE_SIGNAL_VARS
-            .iter()
-            .map(|name| (*name, std::env::var(name).ok()))
-            .collect::<Vec<_>>();
-        for name in crate::proxy::run::CLAUDE_CODE_SIGNAL_VARS {
-            std::env::remove_var(name);
-        }
+        let _environment = RecoveryEnvironment::clear();
 
         let root = crate::test_support::unique_temp_dir("keel-runner-raw-integrity");
         let _home_precedence = crate::test_support::HomePrecedenceGuard::clear_keel_home();
@@ -414,7 +409,7 @@ mod tests {
         let workspace_id = std::env::current_dir()
             .expect("current workspace")
             .to_string_lossy()
-            .to_string();
+            .into_owned();
         let mut meta = RunMeta {
             raw_id: raw_id.to_string(),
             command: "echo verified".to_string(),
@@ -468,6 +463,30 @@ mod tests {
         );
         assert!(String::from_utf8_lossy(&stdout).contains("verified"));
 
+        std::env::remove_var("CLAUDE_SKILLS_HOOK");
+        std::env::remove_var("CLAUDE_CODE_SESSION_ID");
+        std::env::set_var("KEEL_MCP_SESSION_ID", "runner-session-a");
+        stdout.clear();
+        stderr.clear();
+        assert_eq!(
+            run_raw_command(&[raw_id.to_string()], &mut stdout, &mut stderr),
+            0,
+            "partial MCP identity must use the capture workspace fallback: {}",
+            String::from_utf8_lossy(&stderr)
+        );
+        assert!(String::from_utf8_lossy(&stdout).contains("verified"));
+        std::env::set_var("KEEL_MCP_SESSION_ID", "foreign-mcp-session");
+        stdout.clear();
+        stderr.clear();
+        assert_eq!(
+            run_raw_command(&[raw_id.to_string()], &mut stdout, &mut stderr),
+            1,
+            "a partial MCP identity must never fall back to unscoped recovery"
+        );
+        assert!(stdout.is_empty());
+        assert!(String::from_utf8_lossy(&stderr).contains("namespace"));
+        std::env::set_var("KEEL_MCP_SESSION_ID", "runner-session-a");
+
         std::fs::write(meta.raw_path.join("stdout.log"), b"tampered\n")
             .expect("tamper stdout fixture");
         stdout.clear();
@@ -520,15 +539,9 @@ mod tests {
             String::from_utf8_lossy(&stderr)
         );
 
-        match previous_home {
-            Some(value) => std::env::set_var("CLAUDE_TARGET_OVERRIDE", value),
-            None => std::env::remove_var("CLAUDE_TARGET_OVERRIDE"),
-        }
-        for (name, value) in signal_snapshot {
-            match value {
-                Some(value) => std::env::set_var(name, value),
-                None => std::env::remove_var(name),
-            }
-        }
+        assert!(
+            stdout.is_empty(),
+            "foreign recovery must not emit raw bytes"
+        );
     }
 }

@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { copyFile, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
@@ -154,13 +154,50 @@ test("Command Code fixtures match the ModApi lifecycle surface", () => {
   expect(commandCode).toContain('cmd.on("compaction_done"');
 });
 
-test("Pi and OMP inject Keel context through the current before_agent_start seam", () => {
-  const pi = source("pi/keel-pi.ts");
-  expect(pi).toContain('pi.on("before_agent_start"');
-  expect(pi).toContain("systemPrompt:");
-  expect(pi).toContain('runBridge("pre-tool-use", gateArgs, undefined, 5000)');
-  expect(pi).not.toContain('pi.on("input"');
-  expect(pi).not.toContain('pi.on("message_start"');
+test("Pi preserves mounted research identity through nested calls", async () => {
+  const home = await mkdtemp(join(tmpdir(), "keel-pi-mounted-"));
+  const binaryName = process.platform === "win32" ? "keel.exe" : "keel";
+  try {
+    await copyFile(join(repoRoot, "target", "debug", binaryName), join(home, binaryName));
+    const child = Bun.spawn([process.execPath, "-e", `
+      import assert from "node:assert/strict";
+      import { setup } from "./pi/keel-pi.ts";
+      const handlers = new Map();
+      setup({ on: (name, handler) => handlers.set(name, handler) });
+      const ctx = { cwd: process.cwd(), sessionId: "mounted-owner" };
+      const gate = (id, toolName, input, context = ctx) =>
+        handlers.get("tool_call")({ toolCallId: id, toolName, input }, context);
+      const finish = (id, isError) => handlers.get("tool_execution_end")({
+        toolCallId: id, toolName: "write", isError,
+      }, ctx);
+      const edit = { path: "probe.md", content: "never written" };
+      const mounted = { path: "xd://mcp__keel_skill_get", content: '{"name":"critic","level":0}' };
+      assert.equal(gate("before", "write", edit)?.block, true);
+      assert.equal(gate("failed", "write", mounted), undefined);
+      gate("failed", "mcp__keel_skill_get", { name: "critic", level: 0 });
+      finish("failed", true);
+      assert.equal(gate("after-failure", "write", edit)?.block, true);
+      assert.equal(gate("success", "write", mounted), undefined);
+      gate("success", "mcp__keel_skill_get", { name: "critic", level: 0 });
+      finish("success", false);
+      assert.equal(gate("after-success", "write", edit), undefined);
+      assert.equal(gate("foreign", "write", edit, { ...ctx, sessionId: "other-owner" })?.block, true);
+    `], {
+      cwd: repoRoot,
+      env: {
+        ...process.env,
+        KEEL_HOME: home,
+        CLAUDE_TARGET_OVERRIDE: home,
+        KEEL_IRON_LAW_GATE: "strict",
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const stderr = await new Response(child.stderr).text();
+    expect(await child.exited, stderr).toBe(0);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
 });
 
 test("Antigravity adapter translates the documented camelCase hook contract", () => {

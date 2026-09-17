@@ -287,40 +287,16 @@ pub fn run_proxy(
                 exit_code: result.code,
             };
 
-            let session_id = [
-                "KEEL_MCP_SESSION_ID",
-                "CLAUDE_CODE_SESSION_ID",
-                "CODEX_THREAD_ID",
-            ]
-            .iter()
-            .find_map(|name| {
-                std::env::var(name)
-                    .ok()
-                    .map(|value| value.trim().to_string())
-                    .filter(|value| !value.is_empty())
-            })
-            .unwrap_or_else(|| "default".to_string());
-            let workspace_id = std::env::var("KEEL_MCP_WORKSPACE_ID")
-                .ok()
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty())
-                .unwrap_or_else(|| meta.workspace.to_string_lossy().to_string());
+            let namespace = RawNamespace::for_workspace(&meta.workspace);
+            let workspace_id = namespace.workspace_id.clone();
+            let session_id = namespace.session_id.clone();
             let store = if flag_set.string_value("recovery-dir").trim().is_empty() {
                 let base = RawStore::new();
-                RawStore::with_namespace(
-                    base.root().clone(),
-                    RawNamespace {
-                        workspace_id: workspace_id.clone(),
-                        session_id: session_id.clone(),
-                    },
-                )
+                RawStore::with_namespace(base.root().clone(), namespace)
             } else {
                 RawStore::with_namespace(
                     std::path::PathBuf::from(flag_set.string_value("recovery-dir")),
-                    RawNamespace {
-                        workspace_id: workspace_id.clone(),
-                        session_id: session_id.clone(),
-                    },
+                    namespace,
                 )
             };
             let raw_saved = if flag_set.bool_value("no-raw") {
@@ -473,7 +449,7 @@ pub fn run_proxy(
                 .filter(|value| !value.is_empty())
                 .unwrap_or_else(|| meta.raw_id.clone());
             let execution = ExecutionIdentity::new(
-                workspace_id_for_context(&meta),
+                workspace_id,
                 session_id,
                 request_id,
                 meta.agent.clone(),
@@ -609,20 +585,7 @@ fn project_command_context(
     meta: &RunMeta,
     raw_available: bool,
 ) -> Result<ContextProjection, crate::proxy::context::ContextFirewallError> {
-    let session_id = [
-        "KEEL_MCP_SESSION_ID",
-        "CLAUDE_CODE_SESSION_ID",
-        "CODEX_THREAD_ID",
-    ]
-    .iter()
-    .find_map(|name| {
-        std::env::var(name)
-            .ok()
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-    })
-    .unwrap_or_else(|| "default".to_string());
-    let workspace_id = workspace_id_for_context(meta);
+    let namespace = RawNamespace::for_workspace(&meta.workspace);
     let raw_artifact_id = raw_available.then(|| meta.raw_id.clone());
     project_scoped(
         ContextPolicy::from_env(),
@@ -630,20 +593,12 @@ fn project_command_context(
             ContextSource::CommandOutput,
             rendered,
             raw_artifact_id,
-            workspace_id,
-            session_id,
+            namespace.workspace_id,
+            namespace.session_id,
         )
         .with_request_id(meta.raw_id.clone())
         .with_cache_class(CacheClass::Dynamic),
     )
-}
-
-fn workspace_id_for_context(meta: &RunMeta) -> String {
-    std::env::var("KEEL_MCP_WORKSPACE_ID")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| meta.workspace.to_string_lossy().to_string())
 }
 
 fn redact_recovery_pointer(rendered: &str, meta: &RunMeta) -> String {

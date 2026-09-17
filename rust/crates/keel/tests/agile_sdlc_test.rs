@@ -1,4 +1,5 @@
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Output};
@@ -28,6 +29,8 @@ fn isolated_tree(label: &str) -> TempTree {
     let home = base.join("keel-home");
     fs::create_dir_all(&root).expect("create workspace");
     fs::create_dir_all(&home).expect("create home");
+    fs::create_dir_all(root.join("src")).expect("create src");
+    fs::write(root.join("src/lib.rs"), "pub fn sample() -> u8 { 1 }\n").expect("write lib.rs");
     fs::write(
         root.join("README.md"),
         "# Fixture\n\nThe sample JSON command exits zero, emits schemaVersion 1, and preserves existing commands.\n",
@@ -58,7 +61,7 @@ fn json_output(output: &Output) -> Value {
 
 fn complete_architecture(plan_id: &str) -> String {
     format!(
-        "---\nschema_version: 1\nartifact: architecture\nplan_id: {plan_id}\n---\n\nStatus: complete\n\n# Architecture Note\n\n## 1. Current architecture relevant to scope\n\n[verified: CLM-001] The current owner path was read.\n\n## 2. Proposed architecture\n\n[derived: CLM-002] Implement the specified outcome through the existing owner.\n\nInput bound: One bounded plan artifact.\n\nPolicy owner: The existing planner remains the lifecycle owner.\n\n## 3. Components/files/interfaces changed\n\n- Component: existing planner owner | Requirements: REQ-001 | Acceptance: AC-001\n\n## 4. Data/control flow\n\nThe existing command receives input, the owner applies it, and verification observes the result.\n\n## 5. Alternatives considered\n\nAlternative: Add a second planning owner.\n\nTradeoff: A second owner would duplicate lifecycle policy.\n\n## 6. Why the chosen option fits requirements\n\nChosen option: Extend the existing owner.\n\nInfrastructure reuse: Reuse the existing planner artifacts and status output.\n\nConstraint fit: The change stays within REQ-001 and AC-001.\n\n## 7. Risks and mitigations\n\nRisk: The implementation could drift outside the request.\n\nMitigation: Validate the requirement and acceptance mappings before tasks.\n\n## 8. Backward compatibility\n\nCompatibility: Existing behavior and artifact fields remain available.\n\nHost impact: none; existing host contracts remain unchanged.\n\n## 9. Error handling and fallback semantics\n\nFailure status: Invalid planning evidence exits non-zero.\n\nFallback: none; repair the canonical artifact.\n\nVisibility: operator and reviewer output lists the failure.\n\n## 10. Security/privacy implications\n\nSecurity/privacy: Do not record credentials or unrelated user data.\n\n## 11. Performance/token impact\n\nToken impact: Planning input remains bounded.\n\nMeasurement plan: Run the planner and fixed-context budget tests.\n\n## 12. Test strategy\n\nVerification: Run the generated acceptance command and planner integration tests.\n\nAcceptance references: AC-001\n\n## 13. Rollback strategy\n\nRollback: Revert the implementation commit and retain plan evidence.\n\n## 14. Requirement and research references\n\nRequirement references: REQ-001\n\nAcceptance references: AC-001\n\nClaim references: CLM-001, CLM-002\n"
+        "---\nschema_version: 1\nartifact: architecture\nplan_id: {plan_id}\n---\n\nStatus: complete\n\n# Architecture Note\n\n## 1. Current architecture relevant to scope\n\n[verified: CLM-001] The current owner path was read.\n\n## 2. Proposed architecture\n\n[derived: CLM-002] Implement the specified outcome through the existing owner.\n\nInput bound: One bounded plan artifact.\n\nPolicy owner: The existing planner remains the lifecycle owner.\n\n## 3. Components/files/interfaces changed\n\n- Component: src/lib.rs command owner | Requirements: REQ-001 | Acceptance: AC-001\n\n## 4. Data/control flow\n\nThe existing command receives input, the owner applies it, and verification observes the result.\n\n## 5. Alternatives considered\n\nAlternative: Add a second owner.\n\nTradeoff: A second owner duplicates existing policy.\n\n## 6. Why the chosen option fits requirements\n\nChosen option: Extend the established owner.\n\nInfrastructure reuse: Reuse the planner and review gate infrastructure.\n\nConstraint fit: The design maps only REQ-001 and AC-001.\n\n## 7. Risks and mitigations\n\nRisk: A stale design could reach review.\n\nMitigation: Pre-PR review validates the named plan architecture.\n\n## 8. Backward compatibility\n\nCompatibility: Existing fields and behavior remain available.\n\nHost impact: none; host contracts remain unchanged.\n\n## 9. Error handling and fallback semantics\n\nFailure status: Invalid architecture blocks pre-PR review.\n\nFallback: none; repair the canonical architecture note.\n\nVisibility: reviewer output lists the design defect.\n\n## 10. Security/privacy implications\n\nSecurity/privacy: The gate reads one local artifact and no credentials.\n\n## 11. Performance/token impact\n\nToken impact: Architecture input stays bounded.\n\nMeasurement plan: Run the fixed-context budget test.\n\n## 12. Test strategy\n\nVerification: Run review unit tests and planner integration tests.\n\nAcceptance references: AC-001\n\n## 13. Rollback strategy\n\nRollback: Revert the implementation commit.\n\n## 14. Requirement and research references\n\nRequirement references: REQ-001\n\nAcceptance references: AC-001\n\nClaim references: CLM-001, CLM-002\n"
     )
 }
 
@@ -113,43 +116,72 @@ fn check_ready(tree: &TempTree, plan_id: &str) -> std::process::Output {
     plan_command(tree, &["ready", "--plan", plan_id])
 }
 
-fn mark_tasks_complete(plan_path: &std::path::Path) {
-    let tasks_path = plan_path.join("tasks.json");
-    let mut tasks_val: Value =
-        serde_json::from_str(&fs::read_to_string(&tasks_path).unwrap()).unwrap();
-    if let Some(tasks_arr) = tasks_val.get_mut("tasks").and_then(Value::as_array_mut) {
-        for t in tasks_arr {
-            t.as_object_mut()
-                .unwrap()
-                .insert("status".to_string(), Value::String("complete".to_string()));
-            if let Some(ticket_file) = t.get("ticketFile").and_then(Value::as_str) {
-                let ticket_path = plan_path.join(ticket_file);
-                if let Ok(ticket_str) = fs::read_to_string(&ticket_path) {
-                    let mut ticket_val: Value = serde_json::from_str(&ticket_str).unwrap();
-                    ticket_val
-                        .as_object_mut()
-                        .unwrap()
-                        .insert("status".to_string(), Value::String("complete".to_string()));
-                    if let Some(layers) =
-                        ticket_val.get_mut("layers").and_then(Value::as_object_mut)
-                    {
-                        for (_layer, subtasks) in layers {
-                            if let Some(sub_arr) = subtasks.as_array_mut() {
-                                for st in sub_arr {
-                                    st.as_object_mut().unwrap().insert(
-                                        "status".to_string(),
-                                        Value::String("complete".to_string()),
-                                    );
-                                }
-                            }
-                        }
-                    }
-                    fs::write(&ticket_path, serde_json::to_string(&ticket_val).unwrap()).unwrap();
+fn populate_valid_evidence(tree: &TempTree, plan_path: &std::path::Path, plan_id: &str) {
+    let sha256_hex = |bytes: &[u8]| -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(bytes);
+        format!("{:x}", hasher.finalize())
+    };
+    let source = fs::read(tree.root.join("src/lib.rs")).expect("read fixture source");
+    let output = b"sample JSON command: pass\n";
+    fs::write(tree.root.join("command-output.txt"), output).expect("write output");
+    fs::create_dir_all(plan_path.join("evidence")).expect("create evidence directory");
+    let ticket_path = plan_path.join("task-001.json");
+    let mut ticket: Value =
+        serde_json::from_str(&fs::read_to_string(&ticket_path).unwrap()).unwrap();
+    let recorded_at = chrono::Utc::now().to_rfc3339();
+    for subtasks in ticket["layers"]
+        .as_object_mut()
+        .expect("layers")
+        .values_mut()
+    {
+        for subtask in subtasks.as_array_mut().expect("subtasks") {
+            let evidence_type = subtask["expected_evidence_type"].as_str().expect("type");
+            let id = subtask["id"].as_str().expect("id").to_string();
+            let path = format!("evidence/{id}.json");
+            let mut evidence = serde_json::json!({
+                "schema_version": 1, "artifact": "task_evidence",
+                "plan_id": plan_id, "task_id": "TASK-001", "subtask_id": id,
+                "evidence_type": evidence_type, "recorded_at": recorded_at,
+                "result": "pass",
+                "source_path": "src/lib.rs",
+                "source_hash": format!("sha256:{}", sha256_hex(&source)),
+                "output_path": "command-output.txt",
+                "output_hash": format!("sha256:{}", sha256_hex(output))
+            });
+            match evidence_type {
+                "command" => {
+                    evidence["command"] = serde_json::json!("sample JSON command");
+                    evidence["exit_code"] = serde_json::json!(0);
                 }
+                "named_test" => {
+                    evidence["test_name"] = serde_json::json!("sample returns one");
+                }
+                "lint_diagnostic" => {
+                    evidence["tool"] = serde_json::json!("fixture linter");
+                    evidence["exit_code"] = serde_json::json!(0);
+                }
+                "source_hash" => {}
+                unexpected => panic!("unexpected generated evidence type: {unexpected}"),
             }
+            let body = serde_json::to_vec(&evidence).expect("serialize evidence");
+            fs::write(plan_path.join(&path), &body).expect("write evidence");
+            subtask["status"] = serde_json::json!("done");
+            subtask["verification_timestamp"] = serde_json::json!(recorded_at);
+            subtask["evidence_ref"] = serde_json::json!({
+                "path": path,
+                "content_hash": format!("sha256:{}", sha256_hex(&body))
+            });
         }
     }
-    fs::write(&tasks_path, serde_json::to_string(&tasks_val).unwrap()).unwrap();
+    ticket["status"] = serde_json::json!("done");
+    fs::write(&ticket_path, serde_json::to_string_pretty(&ticket).unwrap()).unwrap();
+    let tasks_out = plan_command(tree, &["tasks", "--plan", plan_id]);
+    assert!(
+        tasks_out.status.success(),
+        "tasks refresh failed: {}",
+        String::from_utf8_lossy(&tasks_out.stderr)
+    );
 }
 
 #[test]
@@ -212,37 +244,7 @@ fn plan_done_lifecycle_enforcement_and_evidence_gate() {
     assert_eq!(done_val_fail["satisfied"], false);
     assert_eq!(done_val_fail["items"][0]["status"], "fail");
 
-    // Record evidence fixture
-    let evidence_rel = "evidence_test.json";
-    let evidence_content = serde_json::json!({
-        "output_hash": "fnv-12345678abcdef",
-        "result": "pass"
-    });
-    fs::write(
-        plan_path.join(evidence_rel),
-        serde_json::to_string(&evidence_content).unwrap(),
-    )
-    .expect("write evidence fixture");
-
-    // Update RTM with evidence reference
-    let rtm_path = plan_path.join("rtm.json");
-    let mut rtm_val: Value = serde_json::from_str(&fs::read_to_string(&rtm_path).unwrap()).unwrap();
-    if let Some(traces) = rtm_val.get_mut("traces").and_then(Value::as_array_mut) {
-        for trace in traces {
-            trace.as_object_mut().unwrap().insert(
-                "evidenceRef".to_string(),
-                serde_json::json!({
-                    "path": evidence_rel,
-                    "kind": "fixture",
-                    "hash": "fnv-12345678abcdef"
-                }),
-            );
-        }
-    }
-    fs::write(&rtm_path, serde_json::to_string(&rtm_val).unwrap()).unwrap();
-
-    mark_tasks_complete(&plan_path);
-
+    populate_valid_evidence(&tree, &plan_path, &plan_id);
     // Now plan done must succeed with all 13 items passed
     let done_out_pass = plan_command(&tree, &["done", "--plan", &plan_id]);
     assert!(
@@ -309,35 +311,7 @@ fn completion_gate_check_with_plan_flag() {
     assert_eq!(gate_val_fail["closureReady"], false);
 
     // Provide evidence and complete tasks
-    let evidence_rel = "evidence_test.json";
-    let evidence_content = serde_json::json!({
-        "output_hash": "fnv-gate-pass-123",
-        "result": "pass"
-    });
-    fs::write(
-        plan_path.join(evidence_rel),
-        serde_json::to_string(&evidence_content).unwrap(),
-    )
-    .expect("write evidence fixture");
-
-    let rtm_path = plan_path.join("rtm.json");
-    let mut rtm_val: Value = serde_json::from_str(&fs::read_to_string(&rtm_path).unwrap()).unwrap();
-    if let Some(traces) = rtm_val.get_mut("traces").and_then(Value::as_array_mut) {
-        for trace in traces {
-            trace.as_object_mut().unwrap().insert(
-                "evidenceRef".to_string(),
-                serde_json::json!({
-                    "path": evidence_rel,
-                    "kind": "fixture",
-                    "hash": "fnv-gate-pass-123"
-                }),
-            );
-        }
-    }
-    fs::write(&rtm_path, serde_json::to_string(&rtm_val).unwrap()).unwrap();
-
-    mark_tasks_complete(&plan_path);
-
+    populate_valid_evidence(&tree, &plan_path, &plan_id);
     // Now completion gate check with --plan must pass!
     let mut gate_cmd_pass = keel_command();
     gate_cmd_pass.current_dir(&tree.root);
@@ -350,7 +324,7 @@ fn completion_gate_check_with_plan_flag() {
         "--plan",
         &plan_id,
         "--proof",
-        "Verified all contracts with passing evidence",
+        "requirement-c9e28ef361148869=AC-001",
         "--claude-home",
         home_str,
         "--json",

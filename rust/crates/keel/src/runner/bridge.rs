@@ -192,33 +192,7 @@ fn run_bridge_observe(
         }
     };
 
-    // Iron Law evidence is written only from successful post-tool observations.
-    if phase == "post" && !failed {
-        let command = extract_command_from_observe_payload(&tool_input_json);
-        let session_id = if session.is_empty() {
-            "default"
-        } else {
-            session.as_str()
-        };
-        let input: serde_json::Value =
-            serde_json::from_str(&tool_input_json).unwrap_or(serde_json::Value::Null);
-        let nested = input.get("tool_input").or_else(|| input.get("toolInput"));
-        let path = input
-            .get("path")
-            .or_else(|| input.get("file_path"))
-            .or_else(|| input.get("filePath"))
-            .or_else(|| nested.and_then(|value| value.get("path")))
-            .or_else(|| nested.and_then(|value| value.get("file_path")))
-            .or_else(|| nested.and_then(|value| value.get("filePath")))
-            .and_then(|value| value.as_str())
-            .unwrap_or("");
-        let effective_tool = hook_lifecycle::effective_tool_name(tool_name, path);
-        hook_lifecycle::maybe_mark_iron_law_from_parts(
-            session_id,
-            effective_tool,
-            command.as_deref(),
-        );
-    }
+    mark_research_from_observation(&session, tool_name, &tool_input_json, phase, failed);
 
     // Record only completed outcomes: pre-tool actions may be denied or fail,
     // and the Codex adapter supplies input plus response on post.
@@ -243,6 +217,30 @@ fn run_bridge_observe(
             1
         }
     }
+}
+
+fn mark_research_from_observation(
+    session: &str,
+    tool_name: &str,
+    payload: &str,
+    phase: &str,
+    failed: bool,
+) {
+    // A pre-tool or failed event does not prove research completed.
+    if phase != "post" || failed || session.trim().is_empty() {
+        return;
+    }
+    let mut input = serde_json::from_str::<serde_json::Value>(payload)
+        .ok()
+        .filter(serde_json::Value::is_object)
+        .unwrap_or_else(|| serde_json::json!({}));
+    // Flags are authoritative; captured input cannot substitute another session/tool.
+    input["session_id"] = serde_json::json!(session);
+    input["tool_name"] = serde_json::json!(tool_name);
+    if let Some(command) = extract_command_from_observe_payload(payload) {
+        input["command"] = serde_json::json!(command);
+    }
+    hook_lifecycle::maybe_mark_iron_law_from_tool_event(&input);
 }
 
 /// Best-effort extract of a shell `command` field from bridge observe stdin.
@@ -852,6 +850,100 @@ mod tests {
         match previous_anvil {
             Some(value) => std::env::set_var("KEEL_ANVIL_GATE", value),
             None => std::env::remove_var("KEEL_ANVIL_GATE"),
+        }
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn mounted_research_observation_unlocks_only_its_successful_session() {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let home = std::env::temp_dir().join(format!(
+            "keel-mounted-research-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&home).expect("isolated home");
+        let _home_precedence = crate::test_support::HomePrecedenceGuard::clear_keel_home();
+        let previous_home = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
+        let previous_mode = std::env::var("KEEL_IRON_LAW_GATE").ok();
+        std::env::set_var("CLAUDE_TARGET_OVERRIDE", &home);
+        std::env::set_var("KEEL_IRON_LAW_GATE", "strict");
+
+        let gate = |session: &str, path: &str| {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            assert_eq!(
+                run_bridge_command(
+                    &[
+                        "pre-tool-use".into(),
+                        "--session".into(),
+                        session.into(),
+                        "--tool".into(),
+                        "Write".into(),
+                        "--path".into(),
+                        path.into(),
+                    ],
+                    &mut stdout,
+                    &mut stderr
+                ),
+                0
+            );
+            String::from_utf8(stdout).expect("gate output")
+        };
+        let device = "xd://mcp__keel_system_map";
+        let session = "mounted-research";
+        assert!(gate(session, "README.md").starts_with("KEEL_GATE_DENY"));
+        assert!(gate(session, device).starts_with("KEEL_GATE_ALLOW"));
+        for path in [
+            "",
+            "src/lib.rs",
+            "xd://mcp__foreign__system_map",
+            "xd://mcp__keel_evil__system_map",
+        ] {
+            assert!(gate(session, path).starts_with("KEEL_GATE_DENY"));
+            mark_research_from_observation(
+                session,
+                "Write",
+                &serde_json::json!({"path": path}).to_string(),
+                "post",
+                false,
+            );
+            assert!(gate(session, "README.md").starts_with("KEEL_GATE_DENY"));
+        }
+        let payload = serde_json::json!({"input": {"path": device}}).to_string();
+        mark_research_from_observation(session, "Write", &payload, "pre", false);
+        mark_research_from_observation(session, "Write", &payload, "post", true);
+        assert!(gate(session, "README.md").starts_with("KEEL_GATE_DENY"));
+        mark_research_from_observation(session, "Write", &payload, "post", false);
+        assert!(gate(session, "README.md").starts_with("KEEL_GATE_ALLOW"));
+        assert!(gate("another-session", "README.md").starts_with("KEEL_GATE_DENY"));
+        for key in ["args", "tool_input", "toolInput"] {
+            let mut payload = serde_json::json!({});
+            payload[key] = serde_json::json!({"file_path": device});
+            mark_research_from_observation(key, "Write", &payload.to_string(), "post", false);
+            assert!(gate(key, "README.md").starts_with("KEEL_GATE_ALLOW"));
+        }
+        mark_research_from_observation(
+            "root-path",
+            "Write",
+            &serde_json::json!({"path": device}).to_string(),
+            "post",
+            false,
+        );
+        assert!(gate("root-path", "README.md").starts_with("KEEL_GATE_ALLOW"));
+
+        match previous_home {
+            Some(value) => std::env::set_var("CLAUDE_TARGET_OVERRIDE", value),
+            None => std::env::remove_var("CLAUDE_TARGET_OVERRIDE"),
+        }
+        match previous_mode {
+            Some(value) => std::env::set_var("KEEL_IRON_LAW_GATE", value),
+            None => std::env::remove_var("KEEL_IRON_LAW_GATE"),
         }
         let _ = std::fs::remove_dir_all(&home);
     }

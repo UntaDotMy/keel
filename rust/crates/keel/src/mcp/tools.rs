@@ -284,8 +284,8 @@ pub(crate) fn handle_tools_list_for_profile_params_with_context(
         .as_ref()
         .map(|claims| claims.compact)
         .unwrap_or(spec_default);
-    // No-params handshakes use minimum valid schemas; explicit levels retain
-    // canonical schemas and let the packer downgrade each candidate as needed.
+    // No-params catalogs omit optional prose, never invocation constraints.
+    // The existing packer paginates callable schemas when one page cannot fit.
     let catalog = if compact_default {
         let mut catalog = canonical_tools_list_for_profile(profile);
         if let Some(tools) = catalog.get_mut("tools").and_then(Value::as_array_mut) {
@@ -386,7 +386,11 @@ fn pack_catalog_page(
                     compact_default,
                 )
             });
-            let candidate = tools_list_page(&candidate_tools, next_cursor.as_deref());
+            let candidate = tools_list_page_with_ttl(
+                &candidate_tools,
+                next_cursor.as_deref(),
+                remaining_catalog_ttl_ms(expiry),
+            );
             if measure_tools_list_response(&candidate) <= budget {
                 accepted = Some(representation);
                 break;
@@ -420,7 +424,11 @@ fn pack_catalog_page(
             compact_default,
         )
     });
-    let page = tools_list_page(&page_tools, next_cursor.as_deref());
+    let page = tools_list_page_with_ttl(
+        &page_tools,
+        next_cursor.as_deref(),
+        remaining_catalog_ttl_ms(expiry),
+    );
     let measured = measure_tools_list_response(&page);
     if measured > budget {
         return Err(format!(
@@ -445,31 +453,38 @@ fn tools_list_cache_ttl_ms() -> u64 {
     mcp_cursor_ttl_seconds().saturating_mul(1_000)
 }
 
-/// `tools/list` is identical for every caller; keel exposes no per-caller tool
-/// filtering, so the page holds no caller-specific data and is safe to share.
-const TOOLS_LIST_CACHE_SCOPE: &str = "public";
+// Cursors bind application identity, so even identical tool entries cannot
+// make a page reusable across authorization contexts.
+const TOOLS_LIST_CACHE_SCOPE: &str = "private";
 
 /// The one owner of the `tools/list` result shape. Every return path builds its
 /// page here, so the required protocol fields are inside the measurement the
 /// packer takes and can never be appended after budgeting.
 fn tools_list_page(tools: &[Value], next_cursor: Option<&str>) -> Value {
+    tools_list_page_with_ttl(tools, next_cursor, tools_list_cache_ttl_ms())
+}
+
+fn remaining_catalog_ttl_ms(expiry: u64) -> u64 {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or(u64::MAX);
+    expiry
+        .saturating_mul(1000)
+        .saturating_sub(now_ms)
+        .min(tools_list_cache_ttl_ms())
+}
+
+fn tools_list_page_with_ttl(tools: &[Value], next_cursor: Option<&str>, ttl_ms: u64) -> Value {
     let mut page = json!({
         "resultType": super::MCP_RESULT_TYPE_COMPLETE,
         "tools": tools,
-        "ttlMs": tools_list_cache_ttl_ms(),
+        "ttlMs": ttl_ms,
         "cacheScope": TOOLS_LIST_CACHE_SCOPE,
     });
     if let Some(cursor) = next_cursor {
         page["nextCursor"] = Value::String(cursor.to_string());
     }
-    // why: 2026-07-28 list/read responses are cacheable. Emit the shelf-life
-    // the cursor TTL already enforces so modern hosts can reuse pages.
-    page["_meta"] = json!({
-        "cache": {
-            "ttlMs": (mcp_cursor_ttl_seconds().saturating_mul(1000)),
-            "cacheScope": "session",
-        }
-    });
     page
 }
 
@@ -522,57 +537,66 @@ fn tool_representation(tool: &Value, level: u64) -> Value {
             let description = object
                 .get("description")
                 .and_then(Value::as_str)
-                .map(|value| truncate_chars(value, 72).0)
+                .map(|value| truncate_chars(value, 48).0)
                 .filter(|value| !value.is_empty())
                 .unwrap_or_else(|| "Tool schema is available through discovery.".to_string());
             json!({
                 "name": name,
-                "description": format!("{description} Full schema available through tools/list level 2."),
-                "inputSchema": { "type": "object" }
+                "description": description,
+                "inputSchema": minimum_input_schema(object.get("inputSchema").unwrap_or(&Value::Null))
             })
         }
     }
 }
 
+fn minimum_input_schema(schema: &Value) -> Value {
+    compact_input_schema(schema)
+}
+
 fn compact_input_schema(schema: &Value) -> Value {
+    // Remove annotations only. Required constraints can live in compositions,
+    // references and dependent schemas, not just top-level `required`.
     let Some(object) = schema.as_object() else {
-        return json!({ "type": "object" });
+        return schema.clone();
     };
-    let mut compact = serde_json::Map::new();
+    let mut compact = object.clone();
+    for key in ["description", "title", "examples", "$comment"] {
+        compact.remove(key);
+    }
     for key in [
-        "type",
-        "enum",
-        "const",
-        "required",
         "properties",
+        "patternProperties",
+        "$defs",
+        "definitions",
+        "dependentSchemas",
+    ] {
+        if let Some(entries) = compact.get_mut(key).and_then(Value::as_object_mut) {
+            for value in entries.values_mut() {
+                *value = compact_input_schema(value);
+            }
+        }
+    }
+    for key in [
         "items",
         "additionalProperties",
-        "minimum",
-        "maximum",
-        "minItems",
-        "maxItems",
-        "pattern",
+        "unevaluatedProperties",
+        "contains",
+        "not",
+        "if",
+        "then",
+        "else",
+        "propertyNames",
     ] {
-        let Some(value) = object.get(key) else {
-            continue;
-        };
-        let value = if key == "properties" {
-            let mut properties = serde_json::Map::new();
-            if let Some(entries) = value.as_object() {
-                for (name, property) in entries {
-                    properties.insert(name.clone(), compact_input_schema(property));
-                }
-            }
-            Value::Object(properties)
-        } else if key == "items" {
-            compact_input_schema(value)
-        } else {
-            value.clone()
-        };
-        compact.insert(key.to_string(), value);
+        if let Some(value) = compact.get_mut(key) {
+            *value = compact_input_schema(value);
+        }
     }
-    if !compact.contains_key("type") {
-        compact.insert("type".to_string(), Value::String("object".to_string()));
+    for key in ["allOf", "anyOf", "oneOf", "prefixItems"] {
+        if let Some(values) = compact.get_mut(key).and_then(Value::as_array_mut) {
+            for value in values {
+                *value = compact_input_schema(value);
+            }
+        }
     }
     Value::Object(compact)
 }
@@ -867,7 +891,7 @@ fn tools_list_catalog() -> Value {
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "command_id": { "type": "string", "description": "The commandId returned by run_command with wait:false." },
+                        "command_id": { "type": "string", "description": "Set command_id to the commandId returned by run_command with wait:false." },
                         "json": { "type": "boolean", "description": "Return a JSON object instead of the text report when the command has finished. Default false." }
                     },
                     "required": ["command_id"]
@@ -879,7 +903,7 @@ fn tools_list_catalog() -> Value {
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "command_id": { "type": "string", "description": "The commandId returned by run_command with wait:false." }
+                        "command_id": { "type": "string", "description": "Set command_id to the commandId returned by run_command with wait:false." },
                     },
                     "required": ["command_id"]
                 }
@@ -1021,7 +1045,7 @@ fn tools_list_catalog() -> Value {
                     "type": "object",
                     "properties": {
                         "action": { "type": "string", "enum": ["closeout", "gates", "pre-commit", "pre-pr", "diff", "init", "hosted", "policy", "comments"], "description": "Review operation. closeout is asynchronous; use wait:false and poll command_output." },
-                        "wait": { "type": "boolean", "default": false, "description": "For closeout, must be false because the review is long-running; poll the returned commandId with command_output." },
+                        "wait": { "type": "boolean", "default": false, "description": "For closeout, must be false; poll with command_output using command_id set to the returned commandId." },
                         "format": { "type": "string", "enum": ["json", "markdown", "compact"], "description": "Output format: json, markdown, or compact." },
                         "repo_test_policy": { "type": "string", "enum": ["run", "skip"], "description": "MCP gates must use skip to stay inside the host deadline; full tests belong to CLI pre-pr." },
                         "repo_root": { "type": "string", "description": "Repository root path. Defaults to cwd." },
@@ -1716,63 +1740,47 @@ pub(crate) fn discover_capabilities(
     });
     ranked.truncate(limit.clamp(1, 20));
     let requested_count = ranked.len();
-    while ranked.len() > 1 {
-        let candidate = json!({
-            "query": query,
-            "level": level,
-            "count": ranked.len(),
-            "capabilities": ranked.iter().map(|(_, _, entry)| entry.clone()).collect::<Vec<_>>(),
-            "activation": "keel/activate",
-        });
-        let serialized = serde_json::to_string(&candidate)
-            .map_err(|error| format!("mcp discover: serialize for budget: {error}"))?;
-        if crate::proxy::token_meter::TokenMeter::count_text(&serialized)
-            <= crate::proxy::context::DEFAULT_MAX_DISCOVERY_RESULT_TOKENS
-        {
-            break;
-        }
-        ranked.pop();
-    }
-    let kept_count = ranked.len();
+
+    // Build the final result once so the budget loop measures the exact
+    // returned Value including metadata, count, and cache fields.
     let mut payload = json!({
+        "resultType": super::MCP_RESULT_TYPE_COMPLETE,
         "query": query,
         "level": level,
-        "count": kept_count,
-        "capabilities": ranked.into_iter().map(|(_, _, entry)| entry).collect::<Vec<_>>(),
+        "count": ranked.len(),
+        "capabilities": ranked.iter().map(|(_, _, entry)| entry.clone()).collect::<Vec<_>>(),
+        "omitted": 0usize,
         "activation": "keel/activate",
-        "omitted": requested_count.saturating_sub(kept_count),
-        "_meta": {
-            "cache": {
-                "ttlMs": (mcp_cursor_ttl_seconds().saturating_mul(1000)),
-                "cacheScope": "session",
-            }
-        },
+        "_meta": {"io.modelcontextprotocol/serverInfo": {"name": crate::mcp::MCP_SERVER_NAME, "version": crate::mcp::MCP_SERVER_VERSION}},
+        "ttlMs": (mcp_cursor_ttl_seconds().saturating_mul(1000)),
+        "cacheScope": "private",
     });
-    // why: keep the cache hint outside the token-budgeted discovery contract
-    // measurement so hints cannot push a fitting page over budget.
-    payload.as_object_mut().map(|object| object.remove("_meta"));
-    let serialized = serde_json::to_string(&payload)
-        .map_err(|error| format!("mcp discover: serialize for budget: {error}"))?;
-    let tokens = crate::proxy::token_meter::TokenMeter::count_text(&serialized);
-    if tokens > crate::proxy::context::DEFAULT_MAX_DISCOVERY_RESULT_TOKENS {
-        return Err(format!(
-            "mcp discover result exceeds the {}-token budget ({tokens}); request level 0/1 or a narrower query",
-            crate::proxy::context::DEFAULT_MAX_DISCOVERY_RESULT_TOKENS
-        ));
+    let budget = crate::proxy::context::DEFAULT_MAX_DISCOVERY_RESULT_TOKENS;
+    while measured_discovery_payload(&payload) > budget {
+        match ranked.pop() {
+            Some((_, _, _)) => {
+                payload["count"] = json!(ranked.len());
+                payload["capabilities"] = json!(ranked
+                    .iter()
+                    .map(|(_, _, entry)| entry.clone())
+                    .collect::<Vec<_>>());
+                payload["omitted"] = json!(requested_count.saturating_sub(ranked.len()));
+            }
+            None => {
+                return Err(format!(
+                    "mcp discover: fixed protocol envelope cannot fit the {budget}-token discovery budget"
+                ));
+            }
+        }
     }
-    payload
-        .as_object_mut()
-        .expect("discover payload is an object")
-        .insert(
-            "_meta".to_string(),
-            json!({
-                "cache": {
-                    "ttlMs": (mcp_cursor_ttl_seconds().saturating_mul(1000)),
-                    "cacheScope": "session",
-                }
-            }),
-        );
     Ok(payload)
+}
+
+/// One authoritative measurement for the emitted discovery response.
+fn measured_discovery_payload(payload: &Value) -> usize {
+    serde_json::to_string(payload)
+        .map(|serialized| crate::proxy::token_meter::TokenMeter::count_text(&serialized))
+        .unwrap_or(usize::MAX)
 }
 
 pub(crate) fn activate_capability_with_context(
@@ -2975,7 +2983,7 @@ fn tool_run_command(arguments: &Value) -> Result<String, String> {
             "commandId": command_id,
             "running": true,
             "label": label,
-            "hint": "poll with command_output, stop with command_kill",
+            "hint": "poll with command_output({\"command_id\": <commandId>}), stop with command_kill({\"command_id\": <commandId>})",
         });
         return mcp_json_compact(&payload).map_err(|error| format!("run_command: {error}"));
     }
@@ -3404,7 +3412,7 @@ fn spawn_background_keel_argv(argv: Vec<String>, label: &str) -> Result<String, 
         "commandId": command_id,
         "running": true,
         "label": label,
-        "hint": "poll with command_output, stop with command_kill",
+        "hint": "poll with command_output({\"command_id\": <commandId>}), stop with command_kill({\"command_id\": <commandId>})",
     });
     mcp_json_compact(&payload).map_err(|error| format!("{label}: {error}"))
 }
@@ -4148,12 +4156,8 @@ fn skill_list_payload(
         "skills": rows,
         "budgetTokens": budget,
         "omitted": total.saturating_sub(offset.saturating_add(rows.len())),
-        "_meta": {
-            "cache": {
-                "ttlMs": (mcp_cursor_ttl_seconds().saturating_mul(1000)),
-                "cacheScope": "session",
-            }
-        },
+        "ttlMs": (mcp_cursor_ttl_seconds().saturating_mul(1000)),
+        "cacheScope": "private",
     });
     if let Some(cursor) = next_cursor {
         payload["nextCursor"] = Value::String(cursor.to_string());
@@ -4162,8 +4166,7 @@ fn skill_list_payload(
 }
 
 fn skill_list_contract(payload: &Value) -> Value {
-    // why: the session cache hint rides outside the token-budgeted skill
-    // contract so hints cannot push a fitting page over budget.
+    // Skill pages budget their emitted cache fields alongside the catalog.
     let mut contract = payload.clone();
     if let Some(object) = contract.as_object_mut() {
         object.remove("_meta");
@@ -5584,7 +5587,7 @@ fn tool_review(arguments: &Value) -> Result<String, String> {
     if action == "closeout" {
         if optional_bool_arg(arguments, "wait").unwrap_or(false) {
             return Err(
-                "review closeout: pass wait:false; the closeout is long-running, so poll the returned commandId with command_output (or stop it with command_kill)"
+                "review closeout: pass wait:false; the closeout is long-running, so poll the returned commandId with command_output({\"command_id\": <commandId>}) (or stop it with command_kill({\"command_id\": <commandId>}))"
                     .to_string(),
             );
         }
@@ -6216,6 +6219,25 @@ mod tests {
     use serde_json::json;
     use std::fs;
 
+    struct PageBudgetGuard(Option<std::ffi::OsString>);
+
+    impl PageBudgetGuard {
+        fn set(value: &str) -> Self {
+            let guard = Self(std::env::var_os("KEEL_MCP_PAGE_TOKENS"));
+            std::env::set_var("KEEL_MCP_PAGE_TOKENS", value);
+            guard
+        }
+    }
+
+    impl Drop for PageBudgetGuard {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => std::env::set_var("KEEL_MCP_PAGE_TOKENS", value),
+                None => std::env::remove_var("KEEL_MCP_PAGE_TOKENS"),
+            }
+        }
+    }
+
     #[test]
     fn tools_list_order_is_deterministic_across_profiles_and_levels() {
         // why: plan §21/§54: stable catalog ordering keeps prompt/cache
@@ -6460,17 +6482,10 @@ mod tests {
     }
 
     #[test]
-    fn skill_list_page_carries_session_cache_hint() {
+    fn skill_list_contract_excludes_the_cache_hint_from_its_budget() {
         let payload = skill_list_payload(1, 0, &[json!({"name": "probe"})], 400, None);
-        assert_eq!(
-            payload["_meta"]["cache"]["cacheScope"],
-            json!("session"),
-            "skill pages must declare session cache scope"
-        );
-        assert!(
-            payload["_meta"]["cache"]["ttlMs"].as_u64().unwrap_or(0) > 0,
-            "skill pages must declare a positive ttlMs"
-        );
+        assert_eq!(payload["cacheScope"], json!("private"));
+        assert!(payload["ttlMs"].as_u64().unwrap_or(0) > 0);
         assert!(
             TokenMeter::count_text(
                 &serde_json::to_string(&skill_list_contract(&payload)).unwrap_or_default()
@@ -6480,25 +6495,7 @@ mod tests {
     }
 
     #[test]
-    fn tools_list_page_carries_session_cache_hint() {
-        // why: 2026-07-28 list responses are cacheable; the hint must ride
-        // outside the token-budgeted contract measurement.
-        let page = tools_list_page(&[json!({"name": "probe"})], Some("cursor-value"));
-        assert_eq!(
-            page["_meta"]["cache"]["cacheScope"],
-            json!("session"),
-            "list pages must declare session cache scope"
-        );
-        assert!(
-            page["_meta"]["cache"]["ttlMs"].as_u64().unwrap_or(0) > 0,
-            "list pages must declare a positive ttlMs"
-        );
-    }
-
-    #[test]
     fn context_brief_carries_bounded_repository_truth() {
-        // why: plan §46: the gateway exposes a compact project-state summary
-        // on demand, never a full repository map.
         let payload = tool_context_brief(&json!({})).expect("context_brief must succeed");
         let parsed: Value = serde_json::from_str(&payload).expect("valid JSON payload");
         let truth = parsed
@@ -6541,61 +6538,41 @@ mod tests {
     }
 
     #[test]
-    fn discover_result_carries_session_cache_hint() {
+    fn discovery_pages_declare_private_cache_hints() {
         let payload = discover_capabilities("memory recall status", 2, 0)
             .expect("discover must succeed for cache-hint check");
+        let scope = payload["cacheScope"].as_str().expect("cacheScope");
         assert_eq!(
-            payload["_meta"]["cache"]["cacheScope"],
-            json!("session"),
-            "discover must declare session cache scope"
+            scope, "private",
+            "discovery results must not be publicly shareable: {payload}"
         );
-        assert!(
-            payload["_meta"]["cache"]["ttlMs"].as_u64().unwrap_or(0) > 0,
-            "discover must declare a positive ttlMs"
-        );
-        let mut budgeted = payload.clone();
-        budgeted.as_object_mut().expect("object").remove("_meta");
-        assert!(
-            measure_tools_list_response(&budgeted)
-                <= crate::proxy::context::DEFAULT_MAX_TOOL_CATALOG_TOKENS,
-            "discover contract measurement must exclude the cache hint"
-        );
+        assert!(payload["ttlMs"].as_u64().unwrap_or(0) > 0);
     }
 
     #[test]
-    fn spec_default_empty_params_returns_bounded_eager_page_under_profile_budget() {
-        // why: Antigravity sends params: {}; the first page must stay bounded
-        // even when the complete eager catalog no longer fits one response.
-        let response =
-            handle_tools_list_for_profile_params(crate::mcp::McpCatalogProfile::Tiered, &json!({}))
-                .expect("spec-default tools/list must succeed");
-        let tools = response["tools"].as_array().expect("tools");
-        assert!(!tools.is_empty());
-        assert!(tools.len() <= EAGER_MCP_TOOL_NAMES.len());
-        assert_eq!(
-            response.get("nextCursor").is_some(),
-            tools.len() < EAGER_MCP_TOOL_NAMES.len()
-        );
-        let serialized = serde_json::to_string(&response).expect("serialize");
-        let tokens = crate::proxy::token_meter::TokenMeter::count_text(&serialized);
-        assert!(
-            tokens <= crate::proxy::context::DEFAULT_MAX_TOOL_CATALOG_TOKENS,
-            "empty-params catalog {tokens} exceeds {}",
-            crate::proxy::context::DEFAULT_MAX_TOOL_CATALOG_TOKENS
-        );
+    fn catalog_pages_declare_private_cache_hints() {
+        let page = tools_list_page(&[json!({"name": "probe"})], Some("cursor-value"));
+        let scope = page["cacheScope"].as_str().expect("cacheScope");
+        assert_eq!(scope, "private", "list pages must declare private scope");
+        assert!(page["ttlMs"].as_u64().unwrap_or(0) > 0);
+    }
+
+    #[test]
+    fn paged_catalog_keeps_callable_schemas() {
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let page = handle_tools_list_for_profile_params(
+            crate::mcp::McpCatalogProfile::Tiered,
+            &json!({ "level": 1 }),
+        )
+        .expect("level 1 page must succeed");
+        let tools = page["tools"].as_array().expect("tools array");
         for tool in tools {
-            assert!(
-                tool.get("category").is_none(),
-                "spec-default tools/list must not inject non-spec category"
-            );
-            assert!(
-                tool.get("schemaVersion").is_none(),
-                "spec-default tools/list must not inject non-spec schemaVersion"
-            );
             assert_eq!(
                 tool["inputSchema"]["type"],
                 json!("object"),
-                "inputSchema.type must stay object for {:?}",
+                "every emitted page must keep a valid object-root inputSchema: {:?}",
                 tool.get("name")
             );
         }
@@ -6618,6 +6595,101 @@ mod tests {
             explicit_tokens <= crate::proxy::context::DEFAULT_MAX_TOOL_CATALOG_TOKENS,
             "level 2 catalog {explicit_tokens} exceeds {}",
             crate::proxy::context::DEFAULT_MAX_TOOL_CATALOG_TOKENS
+        );
+    }
+
+    #[test]
+    fn exact_1352_token_catalog_traverses_at_1200() {
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let context = crate::mcp::McpRequestContext::authoritative(Some("exact-catalog"));
+        let mut tools: Vec<Value> = (0..20).map(|i| json!({
+            "name": format!("fixture_{i}"),
+            "inputSchema": {"type": "object", "properties": {"value": {"type": "string"}}, "required": ["value"]}
+        })).collect();
+        // Calibrate against the same tokenizer and envelope used by the packer,
+        // not an assumed characters-per-token ratio or the live tool catalog.
+        for padding in 0..1352 {
+            tools[0]["description"] = json!(" x".repeat(padding));
+            if measure_tools_list_response(&tools_list_page(&tools, None)) == 1352 {
+                break;
+            }
+        }
+        assert_eq!(
+            measure_tools_list_response(&tools_list_page(&tools, None)),
+            1352
+        );
+        let mut cursor = None;
+        let mut received = Vec::new();
+        let mut pages = 0;
+        loop {
+            let page = pack_catalog_page(
+                super::super::McpCatalogProfile::Tiered,
+                2,
+                1200,
+                cursor.as_deref(),
+                &context,
+                false,
+                false,
+                tools.clone(),
+            )
+            .expect("bounded page");
+            assert!(measure_tools_list_response(&page) <= 1200);
+            for tool in page["tools"].as_array().expect("tools") {
+                assert_eq!(tool["inputSchema"]["required"], json!(["value"]));
+                received.push(tool["name"].as_str().unwrap().to_owned());
+            }
+            pages += 1;
+            cursor = page["nextCursor"].as_str().map(str::to_owned);
+            if cursor.is_none() {
+                break;
+            }
+            assert!(pages <= tools.len(), "cursor must make progress");
+        }
+        assert!(pages > 1);
+        assert_eq!(
+            received,
+            tools
+                .iter()
+                .map(|tool| tool["name"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn replayed_catalog_cursor_cannot_refresh_cache_past_its_deadline() {
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let context = crate::mcp::McpRequestContext::authoritative(Some("ttl-boundary"));
+        let tools = synthetic_paging_tools("ttl");
+        let profile = crate::mcp::McpCatalogProfile::Tiered;
+        let fingerprint = catalog_snapshot_fingerprint(profile, &tools, 2, 1200);
+        let expiry = now_unix_seconds() + 2;
+        let cursor =
+            encode_catalog_cursor(1, profile, 2, 1200, &fingerprint, &context, expiry, false);
+        for _ in 0..2 {
+            let page = pack_catalog_page(
+                profile,
+                2,
+                1200,
+                Some(&cursor),
+                &context,
+                false,
+                false,
+                tools.clone(),
+            )
+            .expect("unexpired continuation");
+            assert!(page["ttlMs"].as_u64().unwrap() <= 2000);
+            assert_eq!(page["cacheScope"], "private");
+            if let Some(next) = page["nextCursor"].as_str() {
+                assert_eq!(peek_catalog_cursor(next).unwrap().expires_at, expiry);
+            }
+        }
+        assert_eq!(
+            remaining_catalog_ttl_ms(now_unix_seconds().saturating_sub(1)),
+            0
         );
     }
 
@@ -6678,8 +6750,7 @@ mod tests {
         let _env_guard = crate::test_support::ENV_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let previous = std::env::var("KEEL_MCP_PAGE_TOKENS").ok();
-        std::env::set_var("KEEL_MCP_PAGE_TOKENS", "500");
+        let _budget = PageBudgetGuard::set("500");
 
         let mut page =
             handle_tools_list_for_profile_params(crate::mcp::McpCatalogProfile::Tiered, &json!({}))
@@ -6711,11 +6782,6 @@ mod tests {
             .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(unique.len(), names.len(), "compact pages duplicated a tool");
         assert_eq!(unique.len(), EAGER_MCP_TOOL_NAMES.len());
-
-        match previous {
-            Some(value) => std::env::set_var("KEEL_MCP_PAGE_TOKENS", value),
-            None => std::env::remove_var("KEEL_MCP_PAGE_TOKENS"),
-        }
     }
 
     /// §29 adversarial: a catalog far larger than one page must stay fully
@@ -6763,7 +6829,7 @@ mod tests {
         // same code a client's page request drives.
         let mut names: Vec<String> = Vec::new();
         let mut cursor: Option<String> = None;
-        for _ in 0..128 {
+        for _ in 0..tools.len() {
             let page = pack_catalog_page(
                 crate::mcp::McpCatalogProfile::Tiered,
                 0,
@@ -6965,10 +7031,14 @@ mod tests {
         )
         .expect("replay stays valid");
         assert_eq!(
-            serde_json::to_string(&replay_a).expect("serialize"),
-            serde_json::to_string(&replay_b).expect("serialize"),
-            "the same cursor over the same snapshot must be deterministic"
+            replay_a["tools"], replay_b["tools"],
+            "the same snapshot must preserve tool order and schemas"
         );
+        assert_eq!(
+            replay_a["nextCursor"], replay_b["nextCursor"],
+            "replay must preserve the continuation"
+        );
+        assert!(replay_b["ttlMs"].as_u64().unwrap() <= replay_a["ttlMs"].as_u64().unwrap());
         assert_eq!(
             replay_a["tools"][0]["name"], replay_b["tools"][0]["name"],
             "a replayed cursor must not reshuffle the page"
@@ -7421,11 +7491,15 @@ mod tests {
             let ttl = page["ttlMs"]
                 .as_u64()
                 .expect("ttlMs is required and must be a non-negative integer");
-            assert_eq!(
-                ttl,
-                mcp_cursor_ttl_seconds() * 1_000,
-                "a page is fresh exactly as long as the walk it belongs to is valid"
-            );
+            assert!(ttl <= tools_list_cache_ttl_ms());
+            if let Some(next) = page["nextCursor"].as_str() {
+                let expiry = peek_catalog_cursor(next).expect("cursor claims").expires_at;
+                assert!(
+                    ttl <= expiry
+                        .saturating_sub(now_unix_seconds())
+                        .saturating_mul(1000)
+                );
+            }
             let scope = page["cacheScope"].as_str().expect("cacheScope is required");
             assert!(
                 scope == "public" || scope == "private",
@@ -7459,10 +7533,9 @@ mod tests {
         }
     }
 
-    /// The cached paths: a catalog that fits stays a single page, and the default
-    /// handshake still carries the required fields on the no-params route.
+    /// Identity-bound catalog responses must not be reusable by public caches.
     #[test]
-    fn default_handshake_carries_the_required_protocol_fields() {
+    fn default_catalog_is_private_and_bounded() {
         for profile in [
             crate::mcp::McpCatalogProfile::Tiered,
             crate::mcp::McpCatalogProfile::Full,
@@ -7470,34 +7543,85 @@ mod tests {
             let context = crate::mcp::McpRequestContext::authoritative(None);
             let page =
                 handle_tools_list_for_profile_params_with_context(profile, &Value::Null, &context)
-                    .expect("the default handshake must produce a page");
+                    .expect("default catalog must produce a page");
             assert_eq!(page["resultType"], "complete", "{profile:?}");
-            assert!(page["ttlMs"].as_u64().is_some(), "{profile:?}");
-            assert_eq!(page["cacheScope"], "public", "{profile:?}");
+            let ttl = page["ttlMs"].as_u64().expect("cache lifetime");
+            assert!(ttl <= tools_list_cache_ttl_ms(), "{profile:?}");
+            assert_eq!(page["cacheScope"], "private", "{profile:?}");
+            assert!(measure_tools_list_response(&page) <= mcp_tools_list_budget(profile));
         }
     }
 
     #[test]
-    fn level_zero_always_retains_a_valid_mcp_input_schema() {
+    fn callable_catalog_levels_preserve_inputs_across_bounded_pages() {
         let _env_guard = crate::test_support::ENV_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let previous = std::env::var("KEEL_MCP_PAGE_TOKENS").ok();
-        std::env::set_var("KEEL_MCP_PAGE_TOKENS", "1200");
-        let page = handle_tools_list_for_profile_params(
-            crate::mcp::McpCatalogProfile::Full,
-            &json!({ "level": 0 }),
-        )
-        .expect("level zero page");
-        assert!(measure_tools_list_response(&page) <= 1200);
-        for tool in page["tools"].as_array().expect("tools array") {
-            assert!(tool["name"].is_string());
-            assert!(tool["description"].is_string());
-            assert_eq!(tool["inputSchema"]["type"], json!("object"));
+        let _budget = PageBudgetGuard::set("1200");
+
+        fn assert_inputs(source: &Value, emitted: &Value) {
+            for key in ["type", "required", "enum", "const", "minimum", "maximum"] {
+                if let Some(expected) = source.get(key) {
+                    assert_eq!(emitted.get(key), Some(expected), "lost {key}: {emitted}");
+                }
+            }
+            if let Some(properties) = source.get("properties").and_then(Value::as_object) {
+                for (name, property) in properties {
+                    let actual = emitted.get("properties").and_then(|props| props.get(name));
+                    if let Some(actual) = actual {
+                        assert_inputs(property, actual);
+                    } else {
+                        assert!(
+                            !source
+                                .get("required")
+                                .and_then(Value::as_array)
+                                .is_some_and(|fields| fields
+                                    .iter()
+                                    .any(|field| field.as_str() == Some(name))),
+                            "missing required parameter {name}: {emitted}"
+                        );
+                    }
+                }
+            }
+            if let Some(items) = source.get("items") {
+                assert_inputs(items, &emitted["items"]);
+            }
         }
-        match previous {
-            Some(value) => std::env::set_var("KEEL_MCP_PAGE_TOKENS", value),
-            None => std::env::remove_var("KEEL_MCP_PAGE_TOKENS"),
+
+        for profile in [
+            crate::mcp::McpCatalogProfile::Tiered,
+            crate::mcp::McpCatalogProfile::Full,
+        ] {
+            let canonical = canonical_tools_list_for_profile(profile);
+            let tools = canonical["tools"].as_array().expect("canonical tools");
+            for initial in [
+                json!({}),
+                json!({"level": 0}),
+                json!({"level": 1}),
+                json!({"level": 2}),
+            ] {
+                let mut params = initial;
+                let mut seen = std::collections::BTreeSet::new();
+                for _ in 0..tools.len() {
+                    let page = handle_tools_list_for_profile_params(profile, &params)
+                        .expect("callable catalog page fits budget");
+                    assert!(measure_tools_list_response(&page) <= 1200);
+                    for tool in page["tools"].as_array().expect("tools") {
+                        let name = tool["name"].as_str().expect("tool name");
+                        assert!(seen.insert(name.to_string()), "duplicate tool {name}");
+                        let source = tools
+                            .iter()
+                            .find(|source| source["name"] == name)
+                            .expect("known tool");
+                        assert_inputs(&source["inputSchema"], &tool["inputSchema"]);
+                    }
+                    match page["nextCursor"].as_str() {
+                        Some(cursor) => params = json!({"cursor": cursor}),
+                        None => break,
+                    }
+                }
+                assert_eq!(seen.len(), tools.len(), "catalog traversal omitted tools");
+            }
         }
     }
 
@@ -7936,16 +8060,39 @@ mod tests {
 
     #[test]
     fn observe_and_rewrite_tools_smoke() {
-        let obs = handle_tools_call(&json!({
-            "name": "observe",
-            "arguments": { "json": true }
-        }))
+        // Private home, workspace, and executor keep observe hermetic and bounded.
+        let _env = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let executor = ToolExecutor::new(1, 8);
+        let home = crate::test_support::unique_temp_dir("keel-mcp-observe-smoke");
+        let workspace = home.as_path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("temp workspace");
+        let previous = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
+        std::env::set_var("CLAUDE_TARGET_OVERRIDE", home.as_path());
+
+        let obs = handle_tools_call_with_executor(
+            &json!({
+                "name": "observe",
+                "arguments": { "json": true, "workspace_root": workspace.to_string_lossy().into_owned() }
+            }),
+            &executor,
+        )
         .expect("observe envelope");
         assert_eq!(obs["isError"], json!(false), "observe body: {}", obs);
-        let rew = handle_tools_call(&json!({
-            "name": "rewrite",
-            "arguments": { "command": "cargo test" }
-        }))
+        let observe_text = obs["content"][0]["text"].as_str().unwrap_or("");
+        assert!(
+            observe_text.contains("workspaceRoot"),
+            "observe must report its resolved inputs: {observe_text}"
+        );
+
+        let rew = handle_tools_call_with_executor(
+            &json!({
+                "name": "rewrite",
+                "arguments": { "command": "cargo test" }
+            }),
+            &executor,
+        )
         .expect("rewrite envelope");
         assert_eq!(rew["isError"], json!(false), "rewrite body: {}", rew);
         let text = rew["content"][0]["text"].as_str().unwrap_or("");
@@ -7953,6 +8100,11 @@ mod tests {
             text.contains("run") || text.contains("cargo"),
             "rewrite should mention run/cargo: {text}"
         );
+
+        match previous {
+            Some(value) => std::env::set_var("CLAUDE_TARGET_OVERRIDE", value),
+            None => std::env::remove_var("CLAUDE_TARGET_OVERRIDE"),
+        }
     }
 
     #[test]
@@ -8065,20 +8217,56 @@ mod tests {
 
     #[test]
     fn skill_eval_design_intelligence_dispatch_list_succeed() {
-        let se = handle_tools_call(&json!({
-            "name": "skill_eval",
-            "arguments": { "repo_root": ".", "json": true }
-        }))
+        // Private corpus and home keep skill evaluation hermetic and bounded.
+        let _env = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let executor = ToolExecutor::new(1, 8);
+        let home = crate::test_support::unique_temp_dir("keel-mcp-skill-eval-smoke");
+        let corpus = home.as_path().join("skills");
+        for (name, words) in [
+            ("stripe-integration", "stripe, webhook, checkout, billing"),
+            (
+                "postgres-migration-safety",
+                "postgres, migration, column, lock",
+            ),
+        ] {
+            let skill_dir = corpus.join(name);
+            std::fs::create_dir_all(&skill_dir).expect("skill dir");
+            std::fs::write(
+                skill_dir.join("SKILL.md"),
+                format!("---\nname: {name}\ndescription: {name} guidance\nwhen_to_use: use for {name} work\n---\n# {name}\n\nUse when the prompt mentions {name}: {words}.\n"),
+            )
+            .expect("skill fixture");
+        }
+        let previous = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
+        std::env::set_var("CLAUDE_TARGET_OVERRIDE", home.as_path());
+
+        let se = handle_tools_call_with_executor(
+            &json!({
+                "name": "skill_eval",
+                "arguments": { "repo_root": corpus.to_string_lossy().into_owned(), "json": true }
+            }),
+            &executor,
+        )
         .expect("skill_eval envelope");
         assert_eq!(se["isError"], json!(false), "skill_eval failed: {}", se);
+        let se_text = se["content"][0]["text"].as_str().unwrap_or("");
+        assert!(
+            se_text.contains("stripe-integration") && se_text.contains("failed\": 0"),
+            "fixture corpus must evaluate with zero failures: {se_text}"
+        );
 
-        let di = handle_tools_call(&json!({
-            "name": "design_intelligence",
-            "arguments": {
-                "request": "saas analytics dashboard",
-                "json": true
-            }
-        }))
+        let di = handle_tools_call_with_executor(
+            &json!({
+                "name": "design_intelligence",
+                "arguments": {
+                    "request": "saas analytics dashboard",
+                    "json": true
+                }
+            }),
+            &executor,
+        )
         .expect("design_intelligence envelope");
         assert_eq!(
             di["isError"],
@@ -8087,12 +8275,20 @@ mod tests {
             di
         );
 
-        let anvil = handle_tools_call(&json!({
-            "name": "anvil",
-            "arguments": { "action": "prefix-check" }
-        }))
+        let anvil = handle_tools_call_with_executor(
+            &json!({
+                "name": "anvil",
+                "arguments": { "action": "prefix-check" }
+            }),
+            &executor,
+        )
         .expect("anvil envelope");
         assert_eq!(anvil["isError"], json!(false), "anvil failed: {}", anvil);
+
+        match previous {
+            Some(value) => std::env::set_var("CLAUDE_TARGET_OVERRIDE", value),
+            None => std::env::remove_var("CLAUDE_TARGET_OVERRIDE"),
+        }
     }
 
     #[test]

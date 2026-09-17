@@ -74,6 +74,12 @@ impl Drop for HomePrecedenceGuard {
 pub(crate) struct TestTempDir {
     path: PathBuf,
 }
+impl TestTempDir {
+    /// Read-only view for fixtures that must place files under the temp root.
+    pub(crate) fn as_path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
 
 #[cfg(test)]
 mod home_precedence_tests {

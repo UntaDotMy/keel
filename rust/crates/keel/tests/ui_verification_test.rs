@@ -37,6 +37,14 @@ fn create_test_tree(label: &str) -> TestTree {
 fn keel_cmd(tree: &TestTree) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_keel"));
     cmd.current_dir(&tree.root);
+    for name in [
+        "KEEL_MCP_SESSION_ID",
+        "KEEL_MCP_WORKSPACE_ID",
+        "CLAUDE_CODE_SESSION_ID",
+        "CODEX_THREAD_ID",
+    ] {
+        cmd.env_remove(name);
+    }
     cmd.env("KEEL_HOME", &tree.home);
     cmd.env("CLAUDE_TARGET_OVERRIDE", &tree.home);
     cmd.env("CLAUDE_SKILLS_HOOK", "test");
@@ -72,6 +80,8 @@ fn ui_verify_pass_and_rawstore_retrieval() {
     .expect("write fixture");
 
     let assert_res = keel_cmd(&tree)
+        .env("KEEL_MCP_SESSION_ID", "ui-mcp-session")
+        .env("KEEL_MCP_WORKSPACE_ID", "opaque-ui-workspace")
         .args([
             "verify",
             "ui",
@@ -94,13 +104,20 @@ fn ui_verify_pass_and_rawstore_retrieval() {
     assert_eq!(record["verdict"], "pass");
     let raw_id = record["screenshot_id"].as_str().expect("raw_id present");
 
-    let raw_assert = keel_cmd(&tree).args(["raw", raw_id]).assert().success();
+    let raw_assert = keel_cmd(&tree)
+        .env("KEEL_MCP_SESSION_ID", "ui-mcp-session")
+        .env("KEEL_MCP_WORKSPACE_ID", "opaque-ui-workspace")
+        .args(["raw", raw_id])
+        .assert()
+        .success();
 
     let raw_stdout = String::from_utf8(raw_assert.get_output().stdout.clone()).unwrap();
     assert!(raw_stdout.contains("screenshot:"));
     assert!(raw_stdout.contains("screenshot.png"));
 
     let raw_path_assert = keel_cmd(&tree)
+        .env("KEEL_MCP_SESSION_ID", "ui-mcp-session")
+        .env("KEEL_MCP_WORKSPACE_ID", "opaque-ui-workspace")
         .args(["raw", "--path", raw_id])
         .assert()
         .success();

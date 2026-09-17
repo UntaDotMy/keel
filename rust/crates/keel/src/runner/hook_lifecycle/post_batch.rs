@@ -207,6 +207,8 @@ pub struct CompletenessScan {
     pub queries: Vec<String>,
     pub changed: Vec<String>,
     pub sibling_count: usize,
+    pub repository_head: String,
+    pub diff_fingerprint: String,
 }
 
 /// Marker filename key for a workspace display path.
@@ -223,6 +225,9 @@ pub fn record_completeness_gate_clear_for(
     let Ok(claude_home) = resolve_claude_home("") else {
         return;
     };
+    let Ok((repository_head, diff_fingerprint)) = keel_flow::repository_state(workspace) else {
+        return;
+    };
     let key = completeness_marker_key(&display_path(workspace));
     let dir = claude_home.join("state").join("completeness-gate");
     if fs::create_dir_all(&dir).is_err() {
@@ -233,12 +238,13 @@ pub fn record_completeness_gate_clear_for(
         "queries": queries,
         "changed": changed,
         "sibling_count": sibling_count,
+        "repository_head": repository_head,
+        "diff_fingerprint": diff_fingerprint,
     });
     let _ = fs::write(dir.join(format!("{key}.scanned")), payload.to_string());
 }
 
-/// Read the scan record, accepting the legacy bare-millisecond marker (which
-/// carries no content and therefore never satisfies a coverage check).
+/// Read only scan records bound to an identifiable repository state.
 pub fn completeness_marker_record(
     claude_home: &Path,
     workspace_cwd: &str,
@@ -251,16 +257,12 @@ pub fn completeness_marker_record(
             completeness_marker_key(workspace_cwd)
         ));
     let text = fs::read_to_string(&path).ok()?;
-    let trimmed = text.trim();
-    if let Ok(at_ms) = trimmed.parse::<u64>() {
-        return Some(CompletenessScan {
-            at_ms,
-            queries: Vec::new(),
-            changed: Vec::new(),
-            sibling_count: 0,
-        });
+    let parsed: serde_json::Value = serde_json::from_str(text.trim()).ok()?;
+    let repository_head = parsed.get("repository_head")?.as_str()?.trim();
+    let diff_fingerprint = parsed.get("diff_fingerprint")?.as_str()?.trim();
+    if repository_head.is_empty() || diff_fingerprint.is_empty() {
+        return None;
     }
-    let parsed: serde_json::Value = serde_json::from_str(trimmed).ok()?;
     Some(CompletenessScan {
         at_ms: parsed
             .get("at_ms")
@@ -272,6 +274,8 @@ pub fn completeness_marker_record(
             .get("sibling_count")
             .and_then(serde_json::Value::as_u64)
             .unwrap_or(0) as usize,
+        repository_head: repository_head.to_string(),
+        diff_fingerprint: diff_fingerprint.to_string(),
     })
 }
 

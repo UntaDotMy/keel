@@ -384,21 +384,9 @@ pub fn run_verify_ui_command(
     let raw_store_root = resolve_claude_home(claude_home_flag)
         .map(|home| home.join("raw-output"))
         .unwrap_or_else(|_| repository_root.join(".keel/raw-output"));
-    let session_id = ["CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID"]
-        .iter()
-        .find_map(|name| {
-            std::env::var(name)
-                .ok()
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty())
-        })
-        .unwrap_or_else(|| "default".to_string());
     let store = RawStore::with_namespace(
         raw_store_root,
-        RawNamespace {
-            workspace_id: repository_root.to_string_lossy().to_string(),
-            session_id,
-        },
+        RawNamespace::for_workspace(&repository_root),
     );
 
     let raw_id = RawStore::generate_id();
@@ -530,15 +518,7 @@ fn project_ui_evidence(
     evidence: &UiEvidenceRecord,
     repository_root: &Path,
 ) -> Result<crate::proxy::context::ContextProjection, String> {
-    let session_id = ["CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID"]
-        .iter()
-        .find_map(|name| {
-            std::env::var(name)
-                .ok()
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty())
-        })
-        .unwrap_or_else(|| "default".to_string());
+    let namespace = RawNamespace::for_workspace(repository_root);
     let summary = format!(
         "UI Verification Result:\nstate: {}\nadapter: {}\nverdict: {}\nreview_status: {}\nscreenshot_id: {}\nreasons: {}",
         evidence.state,
@@ -556,8 +536,8 @@ fn project_ui_evidence(
             crate::proxy::context::ContextSource::UiVerification,
             summary,
             Some(evidence.screenshot_id.clone()),
-            repository_root.to_string_lossy().to_string(),
-            session_id,
+            namespace.workspace_id,
+            namespace.session_id,
         )
         .with_cache_class(crate::proxy::context::CacheClass::Session),
     )

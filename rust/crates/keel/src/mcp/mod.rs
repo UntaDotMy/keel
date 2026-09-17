@@ -263,19 +263,12 @@ const MAX_CANCELLATION_ID_BYTES: usize = 512;
 /// chats) is separate: each session is its own `keel mcp serve` process.
 const DEFAULT_MAX_INFLIGHT: usize = 64;
 
-/// Default wire-protocol version advertised during `initialize` when the client
-/// does not request one. Per the MCP lifecycle spec the server SHOULD respond
-/// with the client's requested `protocolVersion` when it can support it, and
-/// only fall back to its own latest supported version otherwise. We echo the
-/// client's value in [`handle_initialize`] and use this constant as the
-/// fallback, so the server stays compatible as the spec revises without needing
-/// a constant bump each time. Current spec revision: 2025-11-25
-/// (see code.claude.com/docs/en/mcp and modelcontextprotocol.io/specification).
+/// The only supported wire protocol; every request declares it independently.
 pub(super) const MCP_PROTOCOL_VERSION: &str = "2026-07-28";
-pub(super) const MCP_LEGACY_PROTOCOL_VERSION: &str = "2024-11-05";
-pub(super) const MCP_PREVIOUS_PROTOCOL_VERSION: &str = "2025-03-26";
+pub(super) const MCP_PROTOCOL_META: &str = "io.modelcontextprotocol/protocolVersion";
+pub(super) const MCP_CAPABILITIES_META: &str = "io.modelcontextprotocol/clientCapabilities";
 
-/// Server identity returned in the `initialize` response. The version mirrors
+/// Server identity returned in per-response metadata. The version mirrors
 /// the workspace package version so plugin manifests and the server agree on
 /// what the host is talking to.
 pub(super) const MCP_SERVER_NAME: &str = "keel";
@@ -1608,6 +1601,7 @@ pub(crate) fn dispatch_body(body: &Value) -> DispatchBodyResult {
     }
 }
 
+#[cfg(test)]
 pub(crate) enum DispatchBodyResult {
     /// JSON-RPC response object or batch array.
     Json(Value),
@@ -1675,32 +1669,14 @@ fn write_framed_response(
             "[keel mcp] response frame {} bytes exceeds {MAX_STDIO_FRAME_BYTES}; returning error frame",
             serialized.len()
         );
-        // Prefer a tools/call-shaped error so hosts complete the pending call
-        // instead of waiting out a full tool timeout on a dropped frame.
-        if response.get("result").is_some() {
-            fallback(success_response(
-                id,
-                json!({
-                    "content": [{
-                        "type": "text",
-                        "text": format!(
-                            "MCP response truncated: frame was {} bytes (limit {MAX_STDIO_FRAME_BYTES}). Prefer skill_route / narrower tools, or CLI for full output.",
-                            serialized.len()
-                        )
-                    }],
-                    "isError": true,
-                }),
-            ))
-        } else {
-            fallback(error_response(
-                id,
-                JSON_RPC_INTERNAL_ERROR,
-                &format!(
-                    "response frame too large ({} bytes; limit {MAX_STDIO_FRAME_BYTES})",
-                    serialized.len()
-                ),
-            ))
-        }
+        fallback(error_response(
+            id,
+            JSON_RPC_INTERNAL_ERROR,
+            &format!(
+                "response frame too large ({} bytes; limit {MAX_STDIO_FRAME_BYTES})",
+                serialized.len()
+            ),
+        ))
     } else {
         serialized
     };
@@ -1768,14 +1744,30 @@ pub(super) fn dispatch_cancellable_with_context(
     let is_notification = id.is_none();
 
     if is_notification {
-        // Currently the only meaningful incoming notification is
-        // `notifications/initialized`. Other notifications are ignored
-        // silently per the spec — they must never produce a response.
-        let _ = handle_method_cancellable(&method, &params, cancellation, &request_context);
+        // Retired and unknown notifications never establish protocol state.
         return None;
     }
 
     let request_id = id.unwrap_or(Value::Null);
+    if !request_id.is_string() && request_id.as_i64().is_none() && request_id.as_u64().is_none() {
+        return Some(error_response(
+            Value::Null,
+            JSON_RPC_INVALID_REQUEST,
+            "Request id must be a string or integer",
+        ));
+    }
+    if method == "initialize" || method == "notifications/initialized" {
+        return Some(unsupported_version_response(
+            request_id,
+            params
+                .get("protocolVersion")
+                .and_then(Value::as_str)
+                .unwrap_or("legacy"),
+        ));
+    }
+    if let Err(response) = validate_request_metadata(&params, &request_id) {
+        return Some(response);
+    }
     Some(
         match handle_method_cancellable(&method, &params, cancellation, &request_context) {
             Ok(result) => success_response(request_id, result),
@@ -1794,8 +1786,7 @@ fn handle_method_cancellable(
     context: &McpRequestContext,
 ) -> Result<Value, MethodError> {
     match method {
-        "initialize" => handle_initialize(params),
-        "notifications/initialized" => Ok(Value::Null),
+        "server/discover" => Ok(handle_server_discover()),
         "ping" => Ok(json!({})),
         "tools/list" => tools::handle_tools_list_for_profile_params_with_context(
             McpCatalogProfile::from_env(),
@@ -1811,7 +1802,7 @@ fn handle_method_cancellable(
             Some(Arc::clone(cancellation)),
             context.clone(),
         ),
-        "keel/discover" | "server/discover" => {
+        "keel/discover" => {
             let query = params
                 .get("query")
                 .and_then(Value::as_str)
@@ -1877,67 +1868,67 @@ fn handle_method_cancellable(
     }
 }
 
-fn handle_initialize(params: &Value) -> Result<Value, MethodError> {
-    let object = params.as_object().ok_or_else(|| MethodError {
-        code: JSON_RPC_INVALID_PARAMS,
-        message: "initialize params must be an object".to_string(),
-    })?;
-    let requested = object
-        .get("protocolVersion")
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| MethodError {
-            code: JSON_RPC_INVALID_PARAMS,
-            message: "initialize params.protocolVersion must be a non-empty string".to_string(),
-        })?;
-    if !object.get("capabilities").is_some_and(Value::is_object) {
-        return Err(MethodError {
-            code: JSON_RPC_INVALID_PARAMS,
-            message: "initialize params.capabilities must be an object".to_string(),
-        });
-    }
-    let client_info = object
-        .get("clientInfo")
+pub(super) fn validate_request_metadata(params: &Value, id: &Value) -> Result<(), Value> {
+    let invalid = |message: &str| error_response(id.clone(), JSON_RPC_INVALID_PARAMS, message);
+    let meta = params
+        .get("_meta")
         .and_then(Value::as_object)
-        .ok_or_else(|| MethodError {
-            code: JSON_RPC_INVALID_PARAMS,
-            message: "initialize params.clientInfo must be an object".to_string(),
+        .ok_or_else(|| invalid("params._meta is required"))?;
+    let version = meta
+        .get(MCP_PROTOCOL_META)
+        .and_then(Value::as_str)
+        .filter(|version| !version.is_empty())
+        .ok_or_else(|| {
+            invalid("_meta.io.modelcontextprotocol/protocolVersion must be a non-empty string")
         })?;
-    for field in ["name", "version"] {
-        if !client_info
-            .get(field)
-            .and_then(Value::as_str)
-            .is_some_and(|value| !value.trim().is_empty())
+    if version != MCP_PROTOCOL_VERSION {
+        return Err(unsupported_version_response(id.clone(), version));
+    }
+    if !meta
+        .get(MCP_CAPABILITIES_META)
+        .is_some_and(Value::is_object)
+    {
+        return Err(invalid(
+            "_meta.io.modelcontextprotocol/clientCapabilities must be an object",
+        ));
+    }
+    if let Some(info) = meta.get("io.modelcontextprotocol/clientInfo") {
+        if !info.is_object()
+            || ["name", "version"]
+                .iter()
+                .any(|field| !info.get(field).is_some_and(Value::is_string))
         {
-            return Err(MethodError {
-                code: JSON_RPC_INVALID_PARAMS,
-                message: format!("initialize params.clientInfo.{field} must be a non-empty string"),
-            });
+            return Err(invalid("clientInfo must contain string name and version"));
         }
     }
-    let negotiated = if matches!(
-        requested,
-        MCP_LEGACY_PROTOCOL_VERSION | MCP_PREVIOUS_PROTOCOL_VERSION | MCP_PROTOCOL_VERSION
-    ) {
-        requested
-    } else {
-        MCP_PROTOCOL_VERSION
-    };
-    Ok(json!({
-        "protocolVersion": negotiated,
-        "serverInfo": {
-            "name": MCP_SERVER_NAME,
-            "version": MCP_SERVER_VERSION,
-        },
-        "capabilities": {
-            "tools": {},
-            "resources": {},
-        },
-    }))
+    Ok(())
+}
+
+pub(super) fn unsupported_version_response(id: Value, requested: &str) -> Value {
+    let mut response = error_response(
+        id,
+        -32022,
+        "Unsupported protocol version; supported: 2026-07-28",
+    );
+    response["error"]["data"] =
+        json!({"supported": [MCP_PROTOCOL_VERSION], "requested": requested});
+    response
+}
+
+fn handle_server_discover() -> Value {
+    json!({
+        "supportedVersions": [MCP_PROTOCOL_VERSION],
+        "capabilities": {"tools": {}, "resources": {}},
+        "_meta": {"io.modelcontextprotocol/serverInfo": {"name": MCP_SERVER_NAME, "version": MCP_SERVER_VERSION}},
+        "ttlMs": 300000,
+        "cacheScope": "public"
+    })
 }
 
 fn handle_resources_list() -> Value {
     json!({
+        "ttlMs": 300000,
+        "cacheScope": "private",
         "resources": [
             {
                 "uri": SYSTEM_MAP_RESOURCE_URI,
@@ -2057,6 +2048,12 @@ fn handle_resources_read(
             })
         }
     };
+    if is_error {
+        return Err(MethodError {
+            code: JSON_RPC_INTERNAL_ERROR,
+            message: text,
+        });
+    }
     let projection = tools::project_mcp_context(
         &format!("resources/read {uri}"),
         &text,
@@ -2071,7 +2068,9 @@ fn handle_resources_read(
         code: JSON_RPC_INTERNAL_ERROR,
         message,
     })?;
-    let mut response = json!({
+    let response = json!({
+        "ttlMs": 0,
+        "cacheScope": "private",
         "contents": [
             {
                 "uri": uri,
@@ -2081,9 +2080,6 @@ fn handle_resources_read(
         ],
         "context": projection.metadata(),
     });
-    if is_error {
-        response["isError"] = Value::Bool(true);
-    }
     Ok(response)
 }
 
@@ -2131,10 +2127,9 @@ pub(super) const MCP_RESULT_TYPE_COMPLETE: &str = "complete";
 pub(super) fn mark_result_complete(result: Value) -> Value {
     match result {
         Value::Object(mut object) => {
-            object.insert(
-                "resultType".to_string(),
-                Value::String(MCP_RESULT_TYPE_COMPLETE.to_string()),
-            );
+            object
+                .entry("resultType")
+                .or_insert_with(|| Value::String(MCP_RESULT_TYPE_COMPLETE.to_string()));
             Value::Object(object)
         }
         // MCP results are objects; anything else keeps its shape rather than
@@ -2171,7 +2166,37 @@ pub(super) struct MethodError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    // Fixtures are clients too: supply modern metadata at the request producer.
+    macro_rules! json {
+        ($($tokens:tt)*) => { modern_fixture(serde_json::json!($($tokens)*)) };
+    }
+
+    fn modern_fixture(mut value: Value) -> Value {
+        if let Some(items) = value.as_array_mut() {
+            for item in items {
+                *item = modern_fixture(item.take());
+            }
+        } else if value.get("jsonrpc").and_then(Value::as_str) == Some("2.0")
+            && value.get("id").is_some()
+            && value
+                .get("method")
+                .and_then(Value::as_str)
+                .is_some_and(|method| method != "initialize")
+        {
+            if value.get("params").is_none() {
+                value["params"] = serde_json::json!({});
+            }
+            if let Some(params) = value.get_mut("params").and_then(Value::as_object_mut) {
+                params.entry("_meta").or_insert_with(|| {
+                    serde_json::json!({
+                        "io.modelcontextprotocol/protocolVersion": MCP_PROTOCOL_VERSION,
+                        "io.modelcontextprotocol/clientCapabilities": {}
+                    })
+                });
+            }
+        }
+        value
+    }
 
     #[test]
     fn idle_timeout_defaults_to_bounded_reap_window() {
@@ -2188,123 +2213,50 @@ mod tests {
     }
 
     #[test]
-    fn initialize_returns_protocol_and_server_info() {
-        let request = json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": {
-                "protocolVersion": MCP_PROTOCOL_VERSION,
-                "capabilities": {},
-                "clientInfo": { "name": "mcp-test", "version": "1.0.0" }
-            }
-        });
-        let response = dispatch_for_test(&request).expect("response present");
-        assert_eq!(response["jsonrpc"], "2.0");
-        assert_eq!(response["id"], json!(1));
-        let result = &response["result"];
-        assert_eq!(result["protocolVersion"], json!(MCP_PROTOCOL_VERSION));
-        assert_eq!(result["serverInfo"]["name"], json!(MCP_SERVER_NAME));
-        assert_eq!(result["serverInfo"]["version"], json!(MCP_SERVER_VERSION));
-        assert!(result["capabilities"]["tools"].is_object());
-        assert!(result["capabilities"]["resources"].is_object());
+    fn modern_discovery_is_query_free_and_legacy_is_rejected() {
+        let context = McpRequestContext::authoritative(None);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let modern = json!({"jsonrpc":"2.0","id":1,"method":"server/discover","params":{"_meta":{
+            "io.modelcontextprotocol/protocolVersion": MCP_PROTOCOL_VERSION,
+            "io.modelcontextprotocol/clientCapabilities": {}
+        }}});
+        let response = dispatch_cancellable_with_context(&modern, &cancel, &context).unwrap();
+        assert_eq!(
+            response["result"]["supportedVersions"],
+            json!([MCP_PROTOCOL_VERSION])
+        );
+        assert!(response["result"]["capabilities"]["tools"].is_object());
+        assert!(response["result"].get("tools").is_none());
+        let legacy = json!({"jsonrpc":"2.0","id":2,"method":"initialize","params":{"protocolVersion":"2024-11-05"}});
+        let response = dispatch_cancellable_with_context(&legacy, &cancel, &context).unwrap();
+        assert_eq!(response["error"]["code"], -32022);
+        assert_eq!(
+            response["error"]["data"]["supported"],
+            json!([MCP_PROTOCOL_VERSION])
+        );
+        assert!(response.get("result").is_none());
     }
 
     #[test]
-    fn initialize_echoes_client_requested_protocol_version() {
-        // Per the MCP lifecycle spec the server responds with the client's
-        // requested protocolVersion when it can support it, rather than forcing
-        // its own. This keeps the server compatible as the spec revises without a
-        // constant bump. A client asking for an older revision gets that revision
-        // back; omitting it falls back to MCP_PROTOCOL_VERSION (covered above).
-        let request = json!({
-            "jsonrpc": "2.0",
-            "id": 7,
-            "method": "initialize",
-            "params": {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {},
-                "clientInfo": { "name": "mcp-test", "version": "1.0.0" }
-            }
-        });
-        let response = dispatch_for_test(&request).expect("response present");
-        assert_eq!(
-            response["result"]["protocolVersion"],
-            json!("2024-11-05"),
-            "server must echo the client's requested protocol version"
-        );
-
-        // A non-string protocolVersion is invalid per InitializeRequestParams.
-        let bad = json!({
-            "jsonrpc": "2.0",
-            "id": 8,
-            "method": "initialize",
-            "params": {
-                "protocolVersion": 1234,
-                "capabilities": {},
-                "clientInfo": { "name": "mcp-test", "version": "1.0.0" }
-            }
-        });
-        let bad_response = dispatch_for_test(&bad).expect("response present");
-        assert_eq!(
-            bad_response["error"]["code"],
-            json!(JSON_RPC_INVALID_PARAMS),
-            "a non-string protocolVersion must be rejected"
-        );
-
-        // An explicit null protocolVersion is invalid, just like any other
-        // missing or non-string required field.
-        let null_version = json!({
-            "jsonrpc": "2.0",
-            "id": 9,
-            "method": "initialize",
-            "params": {
-                "protocolVersion": null,
-                "capabilities": {},
-                "clientInfo": { "name": "mcp-test", "version": "1.0.0" }
-            }
-        });
-        let null_response = dispatch_for_test(&null_version).expect("response present");
-        assert_eq!(
-            null_response["error"]["code"],
-            json!(JSON_RPC_INVALID_PARAMS),
-            "a null protocolVersion must be rejected"
-        );
-    }
-
-    #[test]
-    fn initialize_rejects_missing_required_parameters() {
-        for params in [
+    fn metadata_is_required_on_every_request_and_versions_never_downgrade() {
+        let context = McpRequestContext::authoritative(None);
+        let cancel = Arc::new(AtomicBool::new(false));
+        for meta in [
             json!({}),
-            Value::Null,
-            json!({
-                "protocolVersion": MCP_PROTOCOL_VERSION,
-                "capabilities": {}
-            }),
-            json!({
-                "protocolVersion": MCP_PROTOCOL_VERSION,
-                "clientInfo": { "name": "mcp-test", "version": "1.0.0" }
-            }),
-            json!({
-                "protocolVersion": MCP_PROTOCOL_VERSION,
-                "capabilities": [],
-                "clientInfo": { "name": "mcp-test", "version": "1.0.0" }
-            }),
-            json!({
-                "protocolVersion": MCP_PROTOCOL_VERSION,
-                "capabilities": {},
-                "clientInfo": { "name": "mcp-test" }
-            }),
+            json!({"io.modelcontextprotocol/protocolVersion":MCP_PROTOCOL_VERSION}),
+            json!({"io.modelcontextprotocol/protocolVersion":MCP_PROTOCOL_VERSION,"io.modelcontextprotocol/clientCapabilities":[]}),
         ] {
-            let response = dispatch_for_test(&json!({
-                "jsonrpc": "2.0",
-                "id": "invalid-init",
-                "method": "initialize",
-                "params": params,
-            }))
-            .expect("response present");
-            assert_eq!(response["error"]["code"], json!(JSON_RPC_INVALID_PARAMS));
+            let request = json!({"jsonrpc":"2.0","id":3,"method":"ping","params":{"_meta":meta}});
+            assert_eq!(
+                dispatch_cancellable_with_context(&request, &cancel, &context).unwrap()["error"]
+                    ["code"],
+                -32602
+            );
         }
+        let request = json!({"jsonrpc":"2.0","id":4,"method":"ping","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2099-01-01","io.modelcontextprotocol/clientCapabilities":{}}}});
+        let response = dispatch_cancellable_with_context(&request, &cancel, &context).unwrap();
+        assert_eq!(response["error"]["code"], -32022);
+        assert_eq!(response["error"]["data"]["requested"], "2099-01-01");
     }
 
     #[test]
@@ -2644,24 +2596,11 @@ mod tests {
     }
 
     #[test]
-    fn request_with_id_null_receives_response() {
-        let request = json!({
-            "jsonrpc": "2.0",
-            "id": Value::Null,
-            "method": "ping"
-        });
-        let response = dispatch_for_test(&request).expect("response present");
-        assert_eq!(response["jsonrpc"], "2.0");
-        assert_eq!(
-            response["id"],
-            json!(Value::Null),
-            "id must be null as per request"
-        );
-        assert_eq!(
-            response["result"]["resultType"],
-            json!("complete"),
-            "every result must carry the required resultType"
-        );
+    fn request_with_id_null_is_invalid_mcp() {
+        let response =
+            dispatch_for_test(&json!({"jsonrpc":"2.0","id":null,"method":"ping"})).unwrap();
+        assert_eq!(response["error"]["code"], JSON_RPC_INVALID_REQUEST);
+        assert!(response.get("result").is_none());
     }
 
     #[test]
@@ -3109,9 +3048,8 @@ mod tests {
     }
 
     #[test]
-    fn write_framed_response_replaces_oversized_result_with_is_error() {
-        // Oversized tools/call-shaped result must become isError text, not a
-        // silent drop that leaves the host waiting out its full timeout.
+    fn write_framed_response_replaces_oversized_result_with_protocol_error() {
+        // Framing failures are protocol failures, not tool execution outcomes.
         let mut huge_text = String::from("pad-");
         while huge_text.len() < MAX_STDIO_FRAME_BYTES + 2_000 {
             huge_text.push('x');
@@ -3136,13 +3074,7 @@ mod tests {
         );
         let parsed: Value = serde_json::from_str(line).expect("json");
         assert_eq!(parsed["id"], json!(42));
-        assert_eq!(parsed["result"]["isError"], json!(true));
-        let text = parsed["result"]["content"][0]["text"]
-            .as_str()
-            .unwrap_or("");
-        assert!(
-            text.contains("truncated") || text.contains("frame"),
-            "text={text}"
-        );
+        assert_eq!(parsed["error"]["code"], JSON_RPC_INTERNAL_ERROR);
+        assert!(parsed.get("result").is_none());
     }
 }
