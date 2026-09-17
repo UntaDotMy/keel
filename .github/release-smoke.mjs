@@ -6,6 +6,9 @@ import { dirname, resolve } from "node:path";
 import { createInterface } from "node:readline";
 
 const MCP_PROTOCOL_VERSION = "2026-07-28";
+const CLASSIC_PROTOCOL_VERSIONS = ["2024-11-05", "2025-03-26", "2025-11-25"];
+// Truly unsupported: not classic and not modern (see CLASSIC_PROTOCOL_VERSIONS + MCP_PROTOCOL_VERSION).
+const UNSUPPORTED_PROTOCOL_VERSION = "1999-01-01";
 const MCP_FRAME_LIMIT_BYTES = 24_000;
 const MCP_TEXT_LIMIT_CHARS = 12_000;
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -162,6 +165,33 @@ class McpSession {
     });
   }
 
+  // Classic-era requests omit `_meta`; do not route through modernize().
+  rawRequest(method, params) {
+    if (this.closed) {
+      return Promise.reject(new Error(`cannot request from closed MCP server: ${method}`));
+    }
+    const id = this.nextId;
+    this.nextId += 1;
+    const request = { jsonrpc: "2.0", id, method };
+    if (params !== undefined) {
+      request.params = params;
+    }
+    return new Promise((resolveResult, rejectResult) => {
+      const timer = setTimeout(() => {
+        this.waiters.delete(id);
+        rejectResult(new Error(`MCP request ${method} timed out after ${REQUEST_TIMEOUT_MS}ms`));
+      }, REQUEST_TIMEOUT_MS);
+      this.waiters.set(id, { method, resolve: resolveResult, reject: rejectResult, timer });
+      try {
+        this.child.stdin.write(`${JSON.stringify(request)}\n`);
+      } catch (error) {
+        clearTimeout(timer);
+        this.waiters.delete(id);
+        rejectResult(error);
+      }
+    });
+  }
+
   async close() {
     if (this.closed) {
       return;
@@ -273,16 +303,55 @@ async function runSmoke(options) {
         const id = session.nextId;
         session.nextId += 1;
         const rejection = await new Promise((resolve, reject) => {
-          const timer = setTimeout(() => reject(new Error("legacy initialize not rejected within 30s")), REQUEST_TIMEOUT_MS);
-          session.waiters.set(id, { method: "initialize", resolve: () => reject(new Error("legacy initialize unexpectedly succeeded")), reject: resolve, timer });
-          session.child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, method: "initialize", params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "keel-release-smoke-legacy", version: "1" } } })}\n`);
+          const timer = setTimeout(() => reject(new Error("unsupported initialize not rejected within 30s")), REQUEST_TIMEOUT_MS);
+          session.waiters.set(id, { method: "initialize", resolve: () => reject(new Error("unsupported initialize unexpectedly succeeded")), reject: resolve, timer });
+          session.child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, method: "initialize", params: { protocolVersion: UNSUPPORTED_PROTOCOL_VERSION, capabilities: {}, clientInfo: { name: "keel-release-smoke-unsupported", version: "1" } } })}\n`);
         });
-        if (rejection?.mcpError?.code !== -32022 || rejection?.mcpError?.data?.requested !== "2025-11-25") {
-          throw new Error(`legacy initialize was not rejected with -32022: ${JSON.stringify(rejection)}`);
+        if (rejection?.mcpError?.code !== -32022 || rejection?.mcpError?.data?.requested !== UNSUPPORTED_PROTOCOL_VERSION) {
+          throw new Error(`unsupported initialize was not rejected with -32022: ${JSON.stringify(rejection)}`);
         }
-        return { rejected: rejection.mcpError.code };
+        const supported = rejection?.mcpError?.data?.supported;
+        if (!Array.isArray(supported)) {
+          throw new Error(`unsupported initialize omitted data.supported: ${JSON.stringify(rejection)}`);
+        }
+        for (const version of [...CLASSIC_PROTOCOL_VERSIONS, MCP_PROTOCOL_VERSION]) {
+          if (!supported.includes(version)) {
+            throw new Error(`data.supported missing ${version}: ${JSON.stringify(supported)}`);
+          }
+        }
+        return { rejected: rejection.mcpError.code, requested: UNSUPPORTED_PROTOCOL_VERSION, supported };
       });
       return { supportedVersions: result.supportedVersions, server: result._meta["io.modelcontextprotocol/serverInfo"] };
+    });
+
+    // Classic initialize needs a fresh session: Modern→Classic downgrade is refused
+    // on a shared modern wire era after server/discover.
+    await recordCheck(checks, "classic-initialize-handshake", async () => {
+      const negotiated = [];
+      for (const version of CLASSIC_PROTOCOL_VERSIONS) {
+        const classic = new McpSession(options.binary, options.bundleRoot, options.claudeHome);
+        try {
+          const result = await classic.rawRequest("initialize", {
+            protocolVersion: version,
+            capabilities: {},
+            clientInfo: { name: "keel-release-smoke-classic", version: "1" },
+          });
+          if (result?.protocolVersion !== version || result?.serverInfo?.name !== "keel"
+            || result?.capabilities?.tools === undefined) {
+            throw new Error(`classic initialize ${version} unexpected: ${JSON.stringify(result)}`);
+          }
+          classic.child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" })}\n`);
+          // Classic path: tools/list must work without `_meta` after initialize.
+          const listed = await classic.rawRequest("tools/list", {});
+          if (!Array.isArray(listed?.tools) || listed.tools.length < 1) {
+            throw new Error(`classic tools/list without _meta failed (${version}): ${JSON.stringify(listed)}`);
+          }
+          negotiated.push(version);
+        } finally {
+          await classic.close();
+        }
+      }
+      return { classicVersions: negotiated };
     });
 
     await recordCheck(checks, "tools-list", async () => {
