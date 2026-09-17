@@ -223,7 +223,7 @@ impl McpRequestContext {
         scoped
     }
 
-    fn wire_era(&self) -> WireEra {
+    pub(super) fn wire_era(&self) -> WireEra {
         match self.wire_era_state.load(Ordering::Acquire) {
             1 => WireEra::Classic,
             2 => WireEra::Modern,
@@ -231,7 +231,7 @@ impl McpRequestContext {
         }
     }
 
-    fn set_wire_era(&self, era: WireEra) {
+    pub(super) fn set_wire_era(&self, era: WireEra) {
         // Refuse Classic downgrade once Modern for this session/connection so a
         // late classic initialize cannot weaken `_meta` on an established modern path.
         if era == WireEra::Classic && self.wire_era() == WireEra::Modern {
@@ -299,7 +299,13 @@ pub(super) const MCP_CAPABILITIES_META: &str = "io.modelcontextprotocol/clientCa
 
 /// Classic initialize revisions (Stack A) accepted without `_meta`.
 /// Cursor / Antigravity-class hosts speak these; keep them additive with modern.
-pub(super) const CLASSIC_PROTOCOL_VERSIONS: &[&str] = &["2024-11-05", "2025-03-26", "2025-11-25"];
+pub(super) const CLASSIC_PROTOCOL_VERSIONS: &[&str] = &[
+    "2024-11-05",
+    "2025-03-26",
+    "2025-11-25",
+    "2024-10-07",
+    "legacy",
+];
 
 /// Every version Keel advertises in `-32022` `data.supported` (both eras).
 pub(super) fn all_supported_protocol_versions() -> Vec<&'static str> {
@@ -320,7 +326,7 @@ fn is_negotiable_initialize_version(version: &str) -> bool {
 /// Stdio shares one context across the process (one host session).
 /// HTTP builds a fresh context per request (sessionless multi-client).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum WireEra {
+pub(super) enum WireEra {
     Unset = 0,
     Classic = 1,
     Modern = 2,
@@ -1949,6 +1955,9 @@ fn handle_method_cancellable(
         }
         "resources/list" => Ok(handle_resources_list()),
         "resources/read" => handle_resources_read(params, context),
+        "resources/templates/list" => Ok(json!({ "resourceTemplates": [] })),
+        "prompts/list" => Ok(json!({ "prompts": [] })),
+        "logging/setLevel" => Ok(json!({})),
         // Test-only in-process delay — never ships in non-test binaries.
         // Used to prove concurrent workers without spawning OS hang children.
         #[cfg(test)]
@@ -2280,6 +2289,24 @@ pub(super) struct MethodError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    struct EnvVarGuard(&'static str, Option<std::ffi::OsString>);
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let guard = Self(key, std::env::var_os(key));
+            std::env::set_var(key, value);
+            guard
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match self.1.take() {
+                Some(value) => std::env::set_var(self.0, value),
+                None => std::env::remove_var(self.0),
+            }
+        }
+    }
     // Fixtures are clients too: supply modern metadata at the request producer.
     macro_rules! json {
         ($($tokens:tt)*) => { modern_fixture(serde_json::json!($($tokens)*)) };
@@ -2329,9 +2356,16 @@ mod tests {
     #[test]
     fn modern_discovery_is_query_free_and_classic_initialize_succeeds() {
         // G1–G6 dual-era gates (Architect tip).
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let temp_home = crate::test_support::unique_temp_dir("mcp-dual-era");
+        let _home_guard = EnvVarGuard::set(
+            "CLAUDE_TARGET_OVERRIDE",
+            temp_home.to_str().expect("temp path"),
+        );
         let context = McpRequestContext::authoritative(None);
         let cancel = Arc::new(AtomicBool::new(false));
-
         // G1 / G3: modern discover + minimal _meta succeeds (query-free).
         let modern = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"server/discover","params":{"_meta":{
             "io.modelcontextprotocol/protocolVersion": MCP_PROTOCOL_VERSION,
@@ -2395,6 +2429,20 @@ mod tests {
             listed.get("result").is_some(),
             "classic tools/list: {listed}"
         );
+        // G1 legacy: initialize with explicit "legacy" protocolVersion succeeds.
+        let legacy_init = serde_json::json!({
+            "jsonrpc":"2.0","id":100,"method":"initialize",
+            "params":{"protocolVersion":"legacy","capabilities":{},"clientInfo":{"name":"legacy-host","version":"1"}}
+        });
+        let legacy_resp =
+            dispatch_cancellable_with_context(&legacy_init, &cancel, &classic_context).unwrap();
+        assert!(
+            legacy_resp.get("error").is_none(),
+            "legacy initialize failed: {legacy_resp}"
+        );
+        assert_eq!(legacy_resp["result"]["protocolVersion"], "legacy");
+        assert!(legacy_resp["result"]["capabilities"]["tools"].is_object());
+
         let call = serde_json::json!({
             "jsonrpc":"2.0","id":6,"method":"tools/call",
             "params":{"name":"recall_status","arguments":{}}

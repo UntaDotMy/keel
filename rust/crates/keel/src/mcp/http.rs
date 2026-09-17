@@ -634,8 +634,14 @@ fn handle_post(stream: &mut TcpStream, headers: &HttpHeaders, body: &[u8]) -> st
             ),
         );
     }
-    // Modern HTTP remains sessionless; a client-supplied session id is rejected.
-    if headers.session_id.is_some() {
+    let method = value["method"].as_str().unwrap_or("");
+    let is_modern = method == "server/discover"
+        || headers.protocol_version.as_deref() == Some(super::MCP_PROTOCOL_VERSION)
+        || headers.mcp_method.is_some()
+        || value["params"].get("_meta").is_some();
+
+    // Modern HTTP remains sessionless; a client-supplied session id is rejected on modern path.
+    if is_modern && headers.session_id.is_some() {
         return write_json_error(
             stream,
             400,
@@ -647,11 +653,9 @@ fn handle_post(stream: &mut TcpStream, headers: &HttpHeaders, body: &[u8]) -> st
             ),
         );
     }
-    // Stack A (classic initialize) skips the modern routing-header contract.
-    // Stack B keeps validate_http_metadata for discover/tools/resources/ping.
-    let method = value["method"].as_str().unwrap_or("");
-    let classic_initialize = method == "initialize" || method == "notifications/initialized";
-    if !classic_initialize {
+    // Stack B keeps validate_http_metadata for modern discover/tools/resources/ping.
+    // Stack A (classic initialize and legacy requests without modern headers) skips it.
+    if is_modern {
         if let Err(response) = validate_http_metadata(headers, &value) {
             return write_json_error(stream, 400, response);
         }
@@ -660,6 +664,11 @@ fn handle_post(stream: &mut TcpStream, headers: &HttpHeaders, body: &[u8]) -> st
     // Application identity remains with the existing authoritative owner, never
     // an HTTP session or the client's untrusted display-name metadata.
     let context = super::McpRequestContext::authoritative(None);
+    if is_modern {
+        context.set_wire_era(super::WireEra::Modern);
+    } else {
+        context.set_wire_era(super::WireEra::Classic);
+    }
     match super::dispatch_cancellable_with_context(&value, &cancellation, &context) {
         None => write_http(stream, 202, "application/json", b""),
         Some(response) => {

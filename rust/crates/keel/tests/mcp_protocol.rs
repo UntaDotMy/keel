@@ -652,6 +652,119 @@ fn mcp_http_classic_2025_initialize_succeeds() {
 }
 
 #[test]
+fn mcp_http_legacy_client_handshake_and_tools_list_succeeds() {
+    let claude_home = unique_temp_directory("http-legacy-client");
+    let (mut server, address) = spawn_http_server(&claude_home);
+
+    let send_request = |body_val: &Value, session_id: Option<&str>| -> (u16, Value) {
+        let body = serde_json::to_string(body_val).unwrap();
+        let session_header = session_id
+            .map(|id| format!("Mcp-Session-Id: {id}\r\n"))
+            .unwrap_or_default();
+        let request = format!(
+            "POST /mcp HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/json\r\n\
+             Accept: application/json, text/event-stream\r\n\
+             {session_header}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(2)).unwrap();
+        stream.write_all(request.as_bytes()).unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        let status = response
+            .split_whitespace()
+            .nth(1)
+            .and_then(|s| s.parse::<u16>().ok())
+            .unwrap_or(0);
+        let json_part = response
+            .split_once("\r\n\r\n")
+            .map(|(_, b)| b)
+            .unwrap_or("");
+        let val: Value = serde_json::from_str(json_part).unwrap_or(Value::Null);
+        (status, val)
+    };
+
+    let (status, init) = send_request(
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "legacy",
+                "capabilities": {},
+                "clientInfo": {"name": "legacy-mcp-client", "version": "1"}
+            }
+        }),
+        Some("session-123"),
+    );
+    assert_eq!(status, 200, "init failed: {init}");
+    assert_eq!(init["result"]["protocolVersion"], "legacy");
+    assert!(init["result"]["capabilities"]["tools"].is_object());
+
+    let (status, _) = send_request(
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized"
+        }),
+        Some("session-123"),
+    );
+    assert_eq!(status, 202);
+
+    let (status, listed) = send_request(
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/list",
+            "params": {}
+        }),
+        Some("session-123"),
+    );
+    assert_eq!(status, 200, "tools/list failed: {listed}");
+    let tools = listed["result"]["tools"].as_array().expect("tools array");
+    assert!(!tools.is_empty(), "tools list must not be empty");
+
+    let (status, called) = send_request(
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "name": "recall_status",
+                "arguments": {}
+            }
+        }),
+        Some("session-123"),
+    );
+    assert_eq!(status, 200, "tools/call failed: {called}");
+    assert!(called["result"].get("content").is_some());
+
+    let (status, ping) = send_request(
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "ping"
+        }),
+        Some("session-123"),
+    );
+    assert_eq!(status, 200, "ping failed: {ping}");
+
+    let (status, prompts) = send_request(
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 5,
+            "method": "prompts/list"
+        }),
+        Some("session-123"),
+    );
+    assert_eq!(status, 200, "prompts/list failed: {prompts}");
+    assert_eq!(prompts["result"]["prompts"], json!([]));
+
+    let _ = server.kill();
+    let _ = server.wait();
+    let _ = std::fs::remove_dir_all(&claude_home);
+}
+
+#[test]
 fn mcp_stdio_classic_initialize_handshake_succeeds() {
     let home = unique_temp_directory("classic-stdio");
     let mut server = McpServerProcess::spawn(&home);
