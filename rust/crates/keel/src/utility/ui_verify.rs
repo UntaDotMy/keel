@@ -378,7 +378,16 @@ pub fn run_verify_ui_command(
         }
     };
 
-    let (verdict, reasons) = evaluate_visual_criterion(&criterion, fixture_val.as_ref(), adapter);
+    let (mut verdict, mut reasons) =
+        evaluate_visual_criterion(&criterion, fixture_val.as_ref(), adapter);
+    if criterion.screenshot_required && screenshot_data.is_none() && verdict == VisualVerdict::Pass
+    {
+        verdict = VisualVerdict::NeedsHuman;
+        reasons.push(
+            "Screenshot proof is required but no screenshot capture was provided; cannot substitute placeholder PNG for visual acceptance"
+                .to_string(),
+        );
+    }
     let reasons = bound_ui_reasons(reasons);
 
     let raw_store_root = resolve_claude_home(claude_home_flag)
@@ -395,7 +404,12 @@ pub fn run_verify_ui_command(
 
     let exit_code = if verdict == VisualVerdict::Fail { 1 } else { 0 };
 
-    let png_bytes = screenshot_data.as_deref().unwrap_or(MINIMAL_PNG_BYTES);
+    let empty_png: &[u8] = &[];
+    let png_bytes = match screenshot_data.as_deref() {
+        Some(bytes) => bytes,
+        None if criterion.screenshot_required => empty_png,
+        None => MINIMAL_PNG_BYTES,
+    };
 
     let stdout_summary = format!(
         "state: {}\nadapter: {}\nverdict: {}\nreasons: {}\n",
