@@ -487,7 +487,7 @@ fn send_http_json(
         .split_once("\r\n\r\n")
         .map(|(_, body)| body.trim())
         .filter(|body| !body.is_empty())
-        .map(|body| serde_json::from_str::<Value>(body))
+        .map(serde_json::from_str::<Value>)
         .transpose()
         .map_err(|error| format!("parse body: {error}"))?
         .unwrap_or(Value::Null);
