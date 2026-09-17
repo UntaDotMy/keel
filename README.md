@@ -6,7 +6,7 @@
 
 Keel is a single Rust binary that adds discipline-as-code to AI coding harnesses — iron-law hooks, skills, MCP, multi-host install, and fail-closed anvil/review gates — so agents research first and cannot merge on vibes alone. It does not route models.
 
-No Node. No Python. One binary. Default MCP is stdio (no always-on daemon); optional `keel mcp serve-http` is a loopback shared server for multi-window hosts.
+No Node. No Python. One binary — MCP HTTP daemon optional.
 
 ## Why
 
@@ -78,8 +78,8 @@ No fake testimonials. Homepage blank until a real URL exists.
 
 ## Demo
 
-No polished public demo clip in this draft. Real walkthrough docs: docs/demo-pr-fix-flow.md, docs/demo-branch-closeout-flow.md, docs/first-success-path.md.
+No polished public demo clip yet. Real walkthrough docs: docs/demo-pr-fix-flow.md, docs/demo-branch-closeout-flow.md, docs/first-success-path.md.
 
 ## Docs and license
 
-docs/why-keel.md · docs/compatibility-matrix.md · docs/model-tiers.md · MIT LICENSE
+[docs/why-keel.md](docs/why-keel.md) · [docs/compatibility-matrix.md](docs/compatibility-matrix.md) · [docs/model-tiers.md](docs/model-tiers.md) · [MIT LICENSE](LICENSE)
