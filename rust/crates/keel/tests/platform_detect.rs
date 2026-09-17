@@ -466,6 +466,18 @@ fn with_flag_wires_antigravity_global_plugin() {
         global_mcp["mcpServers"]["keel"]["args"],
         serde_json::json!(["mcp", "serve"])
     );
+    assert_eq!(
+        global_mcp["mcpServers"]["keel"]["env"]["KEEL_MCP_IDLE_TIMEOUT_SECS"], "0",
+        "Antigravity must disable idle self-reap for live attached sessions (Claude parity)"
+    );
+    let plugin_mcp: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(plugin.join("mcp_config.json")).expect("read plugin MCP config"),
+    )
+    .expect("plugin MCP config JSON");
+    assert_eq!(
+        plugin_mcp["mcpServers"]["keel"]["env"]["KEEL_MCP_IDLE_TIMEOUT_SECS"],
+        "0"
+    );
     let _ = fs::remove_dir_all(&home);
 }
 

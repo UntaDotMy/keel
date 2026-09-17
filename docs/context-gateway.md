@@ -97,21 +97,19 @@ adapters still expose only the capabilities they can prove; unsupported host
 boundaries remain explicitly unprotected rather than being represented as a
 successful governed path.
 
-Keel implements only [MCP 2026-07-28](https://modelcontextprotocol.io/specification/2026-07-28/basic/versioning).
-Every request supplies `params._meta["io.modelcontextprotocol/protocolVersion"]`
-and `params._meta["io.modelcontextprotocol/clientCapabilities"]`; client identity
-metadata is optional and does not authorize application state. Query-free
-`server/discover` returns supported versions and capabilities; `keel/discover`
-remains the separate query-based capability search. There is no initialization
-handshake, legacy downgrade, or HTTP protocol session. Legacy requests fail with
-`-32022`; HTTP routing metadata mismatches fail with `-32020`.
+Keel speaks a **dual-era** MCP wire contract:
 
-HTTP clients send `MCP-Protocol-Version`, `Mcp-Method`, and `Mcp-Name` for named
-operations, matching their JSON-RPC body. Catalog pages preserve callable schemas,
-carry private cache hints, and bind cursors to application identity, snapshot,
-budget and expiry. Continuations never refresh a snapshot's expiry; their cache
-TTL cannot outlive it. Mutable resource reads are private with zero cache TTL.
+| Era | Who | Handshake | Per-request `_meta` |
+| --- | --- | --- | --- |
+| Classic (Stack A) | Cursor, Antigravity, Claude-class hosts using `initialize` | `initialize` + silent `notifications/initialized` for `2024-11-05`, `2025-03-26`, and `2025-11-25` (also accepts `2026-07-28` on `initialize` when offered) | Not required; missing `_meta` soft-defaults after classic handshake |
+| Modern (Stack B) | Hosts on [MCP 2026-07-28](https://modelcontextprotocol.io/specification/2026-07-28/basic/versioning) | Query-free `server/discover` | Required: `params._meta["io.modelcontextprotocol/protocolVersion"]` (string) and `params._meta["io.modelcontextprotocol/clientCapabilities"]` (object, `{}` OK); `clientInfo` optional |
+
+Unsupported versions fail closed with `-32022` and `data.supported` listing **both** eras (not a hang). Modern missing/malformed `_meta` fails with `-32602` in Architect order. `keel/discover` remains the separate query-based capability search. HTTP stays sessionless; classic `initialize` is accepted on HTTP without the modern routing-header contract. Modern HTTP clients send `MCP-Protocol-Version`, `Mcp-Method`, and `Mcp-Name` for named operations; Protocol-Version header vs body `_meta` is aligned when either side declares the modern revision (avoids hang-class `-32020` HeaderMismatch). Catalog pages preserve callable schemas, carry private cache hints, and bind cursors to application identity, snapshot, budget and expiry. Continuations never refresh a snapshot's expiry; their cache TTL cannot outlive it. Mutable resource reads are private with zero cache TTL.
+
+**Antigravity wire note:** the host may try `server/discover` then fall back to classic `initialize`. Keel completes that fallback; install writes `KEEL_MCP_IDLE_TIMEOUT_SECS=0` on Antigravity `mcp_config.json` entries (same live-session contract as Claude) so idle self-reap does not drop an attached stdio server. Prefer [GitHub Release](https://github.com/UntaDotMy/keel/releases) bootstrap assets over `raw.githubusercontent.com` `install.sh` on networks that 403 raw content.
+
 See the [HTTP binding](https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http)
 and [cache contract](https://modelcontextprotocol.io/specification/2026-07-28/server/utilities/caching).
 [Cleanup history](gateway-cleanup-report.md) retains earlier measurements, not
 proof of the current implementation's verification.
+[Host matrix](compatibility-matrix.md) maps which era each host uses.

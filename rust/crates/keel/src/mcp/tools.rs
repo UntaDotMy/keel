@@ -8852,6 +8852,7 @@ mod tests {
             session_id: "http-session-42".to_string(),
             workspace_id: workspace,
             request_id: Some("request-42".to_string()),
+            wire_era_state: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0)),
         };
         let projection =
             project_mcp_context("stats", "bounded result", ContextSource::McpTool, &context)
@@ -8869,6 +8870,7 @@ mod tests {
                 .to_string_lossy()
                 .to_string(),
             request_id: None,
+            wire_era_state: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0)),
         };
         let wrong_session = json!({
             "capability": "stats",

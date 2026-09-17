@@ -5,6 +5,9 @@ Deep MCP and memory-writer reference. The compact bootstrap lists only the core 
 
 ## MCP server (`keel mcp serve`)
 
+Keel MCP is **dual-era**: classic `initialize` (2024-11-05 / 2025-03-26 / 2025-11-25) for Cursor/Antigravity-class hosts, and modern `server/discover` + per-request `_meta` for MCP 2026-07-28. See `docs/context-gateway.md`.
+
+
 `.claude-plugin/plugin.json` registers `mcpServers.keel` at user scope, so the harness auto-discovers the server on **every** project — you do not need to start it. These tools are always available; **prefer them over guessing or ad-hoc file reading**:
 
 - Tool `context_brief` (full name `mcp__keel__context_brief`) — **call this first when you start a session or task.** One call returns the iron law, the full installed skill catalog (name + when_to_use), durable-memory health, and the newest working brief. This is how you become aware of what the toolkit offers when no skill loaded automatically. After reading it, route with `skill_route`, load with `skill_get`, and reach anything else through `cli`.

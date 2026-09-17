@@ -634,12 +634,8 @@ fn handle_post(stream: &mut TcpStream, headers: &HttpHeaders, body: &[u8]) -> st
             ),
         );
     }
-    if headers.session_id.is_some()
-        || matches!(
-            value["method"].as_str(),
-            Some("initialize" | "notifications/initialized")
-        )
-    {
+    // Modern HTTP remains sessionless; a client-supplied session id is rejected.
+    if headers.session_id.is_some() {
         return write_json_error(
             stream,
             400,
@@ -651,8 +647,14 @@ fn handle_post(stream: &mut TcpStream, headers: &HttpHeaders, body: &[u8]) -> st
             ),
         );
     }
-    if let Err(response) = validate_http_metadata(headers, &value) {
-        return write_json_error(stream, 400, response);
+    // Stack A (classic initialize) skips the modern routing-header contract.
+    // Stack B keeps validate_http_metadata for discover/tools/resources/ping.
+    let method = value["method"].as_str().unwrap_or("");
+    let classic_initialize = method == "initialize" || method == "notifications/initialized";
+    if !classic_initialize {
+        if let Err(response) = validate_http_metadata(headers, &value) {
+            return write_json_error(stream, 400, response);
+        }
     }
     let cancellation = Arc::new(AtomicBool::new(false));
     // Application identity remains with the existing authoritative owner, never
@@ -699,7 +701,28 @@ fn validate_http_metadata(headers: &HttpHeaders, value: &Value) -> Result<(), Va
     if Some(method) != value["method"].as_str() {
         return Err(mismatch("Mcp-Method"));
     }
-    if Some(version) != value["params"]["_meta"][super::MCP_PROTOCOL_META].as_str() {
+    // Align Protocol-Version header with body `_meta`: accept when they match,
+    // or when either side declares the modern revision (avoid -32020 hang-class
+    // HeaderMismatch for Antigravity-class clients that disagree on where the
+    // version lives). Body `_meta` remains authoritative via validate_request_metadata.
+    let meta_version = value
+        .get("params")
+        .and_then(|params| params.get("_meta"))
+        .and_then(|meta| meta.get(super::MCP_PROTOCOL_META))
+        .and_then(Value::as_str);
+    let header_ok = version == super::MCP_PROTOCOL_VERSION
+        || super::CLASSIC_PROTOCOL_VERSIONS.contains(&version);
+    let aligned = match meta_version {
+        Some(meta) if meta == version => true,
+        Some(meta)
+            if meta == super::MCP_PROTOCOL_VERSION || version == super::MCP_PROTOCOL_VERSION =>
+        {
+            true
+        }
+        None if header_ok => true,
+        _ => false,
+    };
+    if !aligned {
         return Err(mismatch("MCP-Protocol-Version"));
     }
     super::validate_request_metadata(&value["params"], &id)?;
@@ -996,15 +1019,25 @@ mod tests {
         }});
         let base = "POST /mcp HTTP/1.1\r\nMCP-Protocol-Version: 2026-07-28\r\nMcp-Method: tools/call\r\nMcp-Name: =?base64?Y2Fmw6k=?=\r\n\r\n";
         assert!(validate_http_metadata(&parse_headers(base), &request).is_ok());
+        // Method mismatch and Mcp-Name mismatch still fail with -32020.
+        // Protocol-Version header vs `_meta` disagreement is aligned when either
+        // side speaks the modern revision (no longer a hard -32020).
         for invalid in [
             base.replace("tools/call", "tools/list"),
-            base.replace("2026-07-28", "2025-11-25"),
             base.replace("=?base64?Y2Fmw6k=?=", "other"),
         ] {
             let error = validate_http_metadata(&parse_headers(&invalid), &request).unwrap_err();
             assert_eq!(error["error"]["code"], -32020);
             assert_eq!(error["id"], 7);
         }
+        let version_aligned = base.replace(
+            "MCP-Protocol-Version: 2026-07-28",
+            "MCP-Protocol-Version: 2025-11-25",
+        );
+        assert!(
+            validate_http_metadata(&parse_headers(&version_aligned), &request).is_ok(),
+            "header/body version disagree must align when body is modern"
+        );
         assert!(decode_header_value("=?base64?Y2Fmw6k?=").is_none());
     }
 
