@@ -6,7 +6,7 @@ import { dirname, resolve } from "node:path";
 import { createInterface } from "node:readline";
 
 const MCP_PROTOCOL_VERSION = "2026-07-28";
-const CLASSIC_PROTOCOL_VERSIONS = ["2024-11-05", "2025-03-26", "2025-11-25"];
+const CLASSIC_PROTOCOL_VERSIONS = ["2024-11-05", "2025-03-26", "2025-11-25", "legacy"];
 // Truly unsupported: not classic and not modern (see CLASSIC_PROTOCOL_VERSIONS + MCP_PROTOCOL_VERSION).
 const UNSUPPORTED_PROTOCOL_VERSION = "1999-01-01";
 const MCP_FRAME_LIMIT_BYTES = 24_000;

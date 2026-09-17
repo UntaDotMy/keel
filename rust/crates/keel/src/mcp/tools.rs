@@ -6250,13 +6250,36 @@ mod tests {
             std::env::set_var("KEEL_MCP_PAGE_TOKENS", value);
             guard
         }
-    }
 
+        fn clear() -> Self {
+            let guard = Self(std::env::var_os("KEEL_MCP_PAGE_TOKENS"));
+            std::env::remove_var("KEEL_MCP_PAGE_TOKENS");
+            guard
+        }
+    }
     impl Drop for PageBudgetGuard {
         fn drop(&mut self) {
             match self.0.take() {
                 Some(value) => std::env::set_var("KEEL_MCP_PAGE_TOKENS", value),
                 None => std::env::remove_var("KEEL_MCP_PAGE_TOKENS"),
+            }
+        }
+    }
+    struct EnvVarGuard(&'static str, Option<std::ffi::OsString>);
+
+    impl EnvVarGuard {
+        fn remove(key: &'static str) -> Self {
+            let guard = Self(key, std::env::var_os(key));
+            std::env::remove_var(key);
+            guard
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match self.1.take() {
+                Some(value) => std::env::set_var(self.0, value),
+                None => std::env::remove_var(self.0),
             }
         }
     }
@@ -7559,6 +7582,13 @@ mod tests {
     /// Identity-bound catalog responses must not be reusable by public caches.
     #[test]
     fn default_catalog_is_private_and_bounded() {
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _budget_guard = PageBudgetGuard::clear();
+        let _budget_env = EnvVarGuard::remove("KEEL_MCP_PAGE_BUDGET");
+        let _cursor_ttl = EnvVarGuard::remove("KEEL_MCP_CURSOR_TTL_SECONDS");
+
         for profile in [
             crate::mcp::McpCatalogProfile::Tiered,
             crate::mcp::McpCatalogProfile::Full,
@@ -7571,7 +7601,12 @@ mod tests {
             let ttl = page["ttlMs"].as_u64().expect("cache lifetime");
             assert!(ttl <= tools_list_cache_ttl_ms(), "{profile:?}");
             assert_eq!(page["cacheScope"], "private", "{profile:?}");
-            assert!(measure_tools_list_response(&page) <= mcp_tools_list_budget(profile));
+            assert!(
+                measure_tools_list_response(&page) <= mcp_tools_list_budget(profile),
+                "measured {} exceeds budget {}",
+                measure_tools_list_response(&page),
+                mcp_tools_list_budget(profile)
+            );
         }
     }
 
