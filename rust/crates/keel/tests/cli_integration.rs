@@ -158,10 +158,10 @@ fn grok_camel_case_post_tool_use_updates_lifecycle_state() {
     let timings_dir = root.join("state").join("tool-timings");
     let timing_path = std::fs::read_dir(&timings_dir)
         .expect("Grok PostToolUse must create tool timings")
-        .next()
-        .expect("timing row file")
-        .expect("timing directory entry")
-        .path();
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| path.extension().is_some_and(|ext| ext == "jsonl"))
+        .expect("timing jsonl file");
     let timing = std::fs::read_to_string(timing_path).expect("read timing row");
     assert!(timing.contains(r#""tool_name":"search_replace""#));
     assert!(timing.contains(r#""session_id":"grok-session""#));
