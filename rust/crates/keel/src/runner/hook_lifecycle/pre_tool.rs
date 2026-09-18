@@ -120,7 +120,7 @@ pub enum PreToolGateDecision {
 impl PreToolGateDecision {
     pub(crate) const DEFAULT_CONFIDENCE: f64 = 0.7;
 
-    /// Escalation threshold: below this confidence, escalate low-confidence denials.
+    /// Escalation threshold: denials below it escalate (J07 governs over the J01 sketch).
     pub const ESCALATION_CONFIDENCE_THRESHOLD: f64 = 0.6;
 
     /// Returns the confidence value, defaulting to 0.7 when Allow has no explicit value.
@@ -325,6 +325,24 @@ static DECISION_CACHE: std::sync::LazyLock<
     fn() -> std::sync::Mutex<DecisionCache>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(DecisionCache::new()));
 
+/// J02 observability: every gate-cache lookup records one hit or miss.
+static GATE_CACHE_HITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static GATE_CACHE_MISSES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Observable gate-cache counters for `keel decision cache-stats`.
+pub(crate) struct GateCacheStats {
+    pub hits: u64,
+    pub misses: u64,
+}
+
+pub(crate) fn gate_cache_stats() -> GateCacheStats {
+    use std::sync::atomic::Ordering;
+    GateCacheStats {
+        hits: GATE_CACHE_HITS.load(Ordering::Relaxed),
+        misses: GATE_CACHE_MISSES.load(Ordering::Relaxed),
+    }
+}
+
 /// Get a cached gate decision if available and not expired.
 pub(crate) fn cached_gate_decision(
     gate_name: &str,
@@ -336,7 +354,14 @@ pub(crate) fn cached_gate_decision(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
-    cache.get(gate_name, tool_name, session_id, now_ms)
+    let hit = cache.get(gate_name, tool_name, session_id, now_ms);
+    use std::sync::atomic::Ordering;
+    if hit.is_some() {
+        GATE_CACHE_HITS.fetch_add(1, Ordering::Relaxed);
+    } else {
+        GATE_CACHE_MISSES.fetch_add(1, Ordering::Relaxed);
+    }
+    hit
 }
 
 /// Cache a gate decision with the appropriate TTL.
@@ -964,17 +989,8 @@ pub(crate) fn pre_tool_gate_decision_with_markdown_context(
             )
         });
 
-        // Precedence: Iron Law deny > Plan deny > Anvil deny
-        if iron_law.is_denied() {
-            return iron_law;
-        }
-        if plan_dec.is_denied() {
-            return plan_dec;
-        }
-        if anvil_dec.is_denied() {
-            return anvil_dec;
-        }
-        return PreToolGateDecision::allow();
+        // Precedence fold: Iron Law deny wins, then Plan, then Anvil (J10).
+        return fold_gate_decisions(iron_law, plan_dec, anvil_dec);
     }
 
     // Single-gate path for non-edit tools (e.g. non-keel shell commands or Agent/Task)
@@ -983,6 +999,24 @@ pub(crate) fn pre_tool_gate_decision_with_markdown_context(
         return iron_law;
     }
 
+    PreToolGateDecision::allow()
+}
+
+/// J10 precedence fold: Iron Law deny wins, then Plan, then Anvil.
+pub(crate) fn fold_gate_decisions(
+    iron_law: PreToolGateDecision,
+    plan_dec: PreToolGateDecision,
+    anvil_dec: PreToolGateDecision,
+) -> PreToolGateDecision {
+    if iron_law.is_denied() {
+        return iron_law;
+    }
+    if plan_dec.is_denied() {
+        return plan_dec;
+    }
+    if anvil_dec.is_denied() {
+        return anvil_dec;
+    }
     PreToolGateDecision::allow()
 }
 /// Backward-compat wrapper: converts GateDecision to Option<&'static str>.
@@ -1319,5 +1353,93 @@ mod namespace_tests {
         assert!(!is_keel_research_tool_name("mcp__keel_evil__system_map"));
         assert!(!is_keel_research_tool_name("keel_evil__system_map"));
         assert!(!is_keel_research_tool_name("mcp__keel__run_command"));
+    }
+
+    #[test]
+    fn decision_cache_hit_miss_ttl_and_prune() {
+        // J02 checks: TTL expiration, hit/miss, prune on explicit timestamps.
+        let mut cache = DecisionCache::new();
+        cache.put(
+            "iron_law",
+            "Edit",
+            "sess-ttl",
+            PreToolGateDecision::allow(),
+            120,
+            1_000,
+        );
+        assert!(cache.get("iron_law", "Edit", "sess-ttl", 1_000).is_some());
+        assert!(
+            cache
+                .get("iron_law", "Edit", "sess-ttl", 1_000 + 120_000)
+                .is_none(),
+            "entry must expire exactly at now + ttl"
+        );
+        assert!(
+            cache.get("plan", "Edit", "sess-ttl", 1_000).is_none(),
+            "unknown gate must miss"
+        );
+        cache.prune(1_000 + 120_000);
+        cache.put(
+            "plan",
+            "Edit",
+            "sess-ttl",
+            PreToolGateDecision::allow(),
+            3_600,
+            2_000,
+        );
+        assert!(cache.get("plan", "Edit", "sess-ttl", 2_000).is_some());
+    }
+
+    fn deny(gate: &'static str) -> PreToolGateDecision {
+        PreToolGateDecision::deny_with_confidence("test denial", 0.9, false, gate)
+    }
+
+    #[test]
+    fn gate_decision_fold_prefers_iron_over_plan_over_anvil() {
+        // J10 checks: precedence over every denial combination.
+        let allow = PreToolGateDecision::allow();
+        assert!(fold_gate_decisions(allow.clone(), allow.clone(), allow.clone()).is_allowed());
+        let folded = fold_gate_decisions(deny("iron_law"), deny("plan"), deny("anvil"));
+        assert!(folded.is_denied());
+        // The winner carries its gate name: iron first, then plan, then anvil.
+        for (iron, plan, anvil, winner) in [
+            (true, true, true, "iron_law"),
+            (false, true, true, "plan"),
+            (false, false, true, "anvil"),
+            (true, false, false, "iron_law"),
+            (false, true, false, "plan"),
+        ] {
+            let pick = |denied: bool, gate: &'static str| {
+                if denied {
+                    deny(gate)
+                } else {
+                    PreToolGateDecision::allow()
+                }
+            };
+            let folded = fold_gate_decisions(
+                pick(iron, "iron_law"),
+                pick(plan, "plan"),
+                pick(anvil, "anvil"),
+            );
+            match folded {
+                PreToolGateDecision::Deny { gate_name, .. } => {
+                    assert_eq!(gate_name, winner, "iron={iron} plan={plan} anvil={anvil}")
+                }
+                other => panic!("expected Deny, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn gate_decision_fold_is_deterministic() {
+        // J10 acceptance: identical inputs always produce identical output,
+        // which is what makes parallel evaluation equivalent to sequential.
+        let first = fold_gate_decisions(deny("plan"), PreToolGateDecision::allow(), deny("anvil"));
+        let second = fold_gate_decisions(deny("plan"), PreToolGateDecision::allow(), deny("anvil"));
+        assert_eq!(first, second);
+        match first {
+            PreToolGateDecision::Deny { gate_name, .. } => assert_eq!(gate_name, "plan"),
+            other => panic!("expected plan Deny, got {other:?}"),
+        }
     }
 }

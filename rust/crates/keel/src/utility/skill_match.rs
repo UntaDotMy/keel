@@ -27,6 +27,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::proxy::token_meter::TokenMeter;
@@ -35,6 +36,194 @@ use crate::runtime::{safe_path_segment, skills_directory, state_directory};
 const SKILL_CATALOG_CACHE_VERSION: u32 = 3;
 const SKILL_CATALOG_CACHE_FILE: &str = "skill-catalog-v2.json";
 const SKILL_CATALOG_DEFAULT_INTEGRITY_INTERVAL_SECS: u64 = 300;
+// J02 content-hash routing cache (300s TTL): prompt plus skills-listing
+// fingerprint. Catalog edits miss; discovery failure misses fail-open.
+pub const SKILL_ROUTING_CACHE_TTL_SECS: u64 = 300;
+const SKILL_ROUTING_CACHE_MAX_ENTRIES: usize = 512;
+
+#[derive(Debug, Clone)]
+struct SkillRoutingCacheEntry {
+    decision: Option<SkillSelectionDecision>,
+    expires_at_secs: u64,
+}
+
+struct SkillRoutingCache {
+    entries: HashMap<String, SkillRoutingCacheEntry>,
+}
+
+static SKILL_ROUTING_CACHE: std::sync::LazyLock<
+    std::sync::Mutex<SkillRoutingCache>,
+    fn() -> std::sync::Mutex<SkillRoutingCache>,
+> = std::sync::LazyLock::new(|| {
+    std::sync::Mutex::new(SkillRoutingCache {
+        entries: HashMap::new(),
+    })
+});
+static SKILL_ROUTING_CACHE_HITS: AtomicU64 = AtomicU64::new(0);
+static SKILL_ROUTING_CACHE_MISSES: AtomicU64 = AtomicU64::new(0);
+static SKILL_ROUTING_CACHE_RECOMPUTES: AtomicU64 = AtomicU64::new(0);
+
+/// Observable cache counters: every lookup records exactly one hit or miss,
+/// every full recompute records one recompute.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SkillRoutingCacheStats {
+    pub hits: u64,
+    pub misses: u64,
+    pub recomputes: u64,
+    pub entries: usize,
+}
+
+pub fn skill_routing_cache_stats() -> SkillRoutingCacheStats {
+    SkillRoutingCacheStats {
+        hits: SKILL_ROUTING_CACHE_HITS.load(Ordering::Relaxed),
+        misses: SKILL_ROUTING_CACHE_MISSES.load(Ordering::Relaxed),
+        recomputes: SKILL_ROUTING_CACHE_RECOMPUTES.load(Ordering::Relaxed),
+        entries: SKILL_ROUTING_CACHE
+            .lock()
+            .map(|cache| cache.entries.len())
+            .unwrap_or(0),
+    }
+}
+
+/// Test and maintenance hook: drop every cached routing decision.
+#[allow(dead_code)]
+pub(crate) fn clear_skill_routing_cache() {
+    if let Ok(mut cache) = SKILL_ROUTING_CACHE.lock() {
+        cache.entries.clear();
+    }
+}
+
+fn skill_routing_cache_key(skills_dir: &Path, prompt: &str) -> Option<String> {
+    let files = discover_skill_files(skills_dir)?;
+    let mut material = String::new();
+    material.push_str(prompt.trim());
+    material.push('\0');
+    for file in &files {
+        material.push_str(&file.name);
+        material.push('\0');
+        material.push_str(&file.size.to_string());
+        material.push('\0');
+        material.push_str(&file.modified_at_nanos.to_string());
+        material.push('\n');
+    }
+    Some(crate::utility::hashing::fnv1a64_hex(&material))
+}
+
+fn skill_routing_cache_get(key: &str, now_secs: u64) -> Option<Option<SkillSelectionDecision>> {
+    let cache = SKILL_ROUTING_CACHE.lock().ok()?;
+    let entry = cache.entries.get(key)?;
+    if entry.expires_at_secs <= now_secs {
+        return None;
+    }
+    SKILL_ROUTING_CACHE_HITS.fetch_add(1, Ordering::Relaxed);
+    Some(entry.decision.clone())
+}
+
+fn skill_routing_cache_put(key: String, decision: &Option<SkillSelectionDecision>, now_secs: u64) {
+    let mut cache = match SKILL_ROUTING_CACHE.lock() {
+        Ok(cache) => cache,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if cache.entries.len() >= SKILL_ROUTING_CACHE_MAX_ENTRIES {
+        cache
+            .entries
+            .retain(|_, entry| entry.expires_at_secs > now_secs);
+        if cache.entries.len() >= SKILL_ROUTING_CACHE_MAX_ENTRIES {
+            cache.entries.clear();
+        }
+    }
+    cache.entries.insert(
+        key,
+        SkillRoutingCacheEntry {
+            decision: decision.clone(),
+            expires_at_secs: now_secs.saturating_add(SKILL_ROUTING_CACHE_TTL_SECS),
+        },
+    );
+    SKILL_ROUTING_CACHE_RECOMPUTES.fetch_add(1, Ordering::Relaxed);
+}
+
+fn skill_routing_cache_miss() {
+    SKILL_ROUTING_CACHE_MISSES.fetch_add(1, Ordering::Relaxed);
+}
+
+// J08 pending match ledger, reconciled at session end (cited is helpful).
+// All IO is fail-open.
+const SKILL_MATCH_PENDING_FILE: &str = "skill-match-pending.json";
+const SKILL_MATCH_PENDING_MAX: usize = 500;
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct PendingSkillMatch {
+    skill_name: String,
+    predicted_confidence: f64,
+    matched_at_secs: u64,
+}
+
+fn skill_match_pending_path(claude_home: &Path) -> PathBuf {
+    state_directory(claude_home).join(SKILL_MATCH_PENDING_FILE)
+}
+
+fn record_pending_skill_match(claude_home: &Path, skill_name: &str, predicted_confidence: f64) {
+    let path = skill_match_pending_path(claude_home);
+    let mut pending: Vec<PendingSkillMatch> = fs::read_to_string(&path)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default();
+    pending.push(PendingSkillMatch {
+        skill_name: skill_name.to_string(),
+        predicted_confidence: predicted_confidence.clamp(0.0, 1.0),
+        matched_at_secs: now_unix_secs(),
+    });
+    if pending.len() > SKILL_MATCH_PENDING_MAX {
+        let drain = pending.len() - SKILL_MATCH_PENDING_MAX;
+        pending.drain(..drain);
+    }
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if let Ok(text) = serde_json::to_string(&pending) {
+        let _ = fs::write(&path, text);
+    }
+}
+
+/// Reconcile staged routing decisions (cited records success); consumes the ledger.
+pub fn reconcile_skill_match_outcomes(claude_home: &Path) -> usize {
+    let path = skill_match_pending_path(claude_home);
+    let text = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(_) => return 0,
+    };
+    let pending: Vec<PendingSkillMatch> = serde_json::from_str(&text).unwrap_or_default();
+    if pending.is_empty() {
+        return 0;
+    }
+    let mut cited: HashSet<String> = HashSet::new();
+    if let Ok(rows) = crate::runner::observation::iter_recent_rows_at(claude_home, 1) {
+        for row in rows {
+            let haystack = format!("{}\n{}", row.signature, row.detail).to_ascii_lowercase();
+            for entry in &pending {
+                if haystack.contains(&entry.skill_name.to_ascii_lowercase()) {
+                    cited.insert(entry.skill_name.clone());
+                }
+            }
+        }
+    }
+    let mut reconciled = 0usize;
+    for entry in &pending {
+        let helpful = cited.contains(&entry.skill_name);
+        if crate::utility::decision::record_skill_session_outcome(
+            claude_home,
+            &entry.skill_name,
+            helpful,
+            entry.predicted_confidence,
+        )
+        .is_ok()
+        {
+            reconciled += 1;
+        }
+    }
+    let _ = fs::remove_file(&path);
+    reconciled
+}
 
 /// Score floor as a fraction of `ln(corpus_size)`. The floor must scale with
 /// corpus size because IDF does: a token present in exactly one skill scores
@@ -180,8 +369,31 @@ pub fn match_skill_for_prompt_with_details(
     claude_home: &Path,
     prompt: &str,
 ) -> Option<SkillSelectionDecision> {
+    // J03: sub-0.60 calibrated confidence never auto-applies (stay silent).
+    fn apply_confidence_gate(
+        decision: Option<SkillSelectionDecision>,
+    ) -> Option<SkillSelectionDecision> {
+        match decision {
+            Some(found) if found.confidence < 0.60 => None,
+            gated => gated,
+        }
+    }
     if prompt.trim().is_empty() {
         return None;
+    }
+    // J02 fast path: identical prompts over unchanged skills hit the cache.
+    let skills_dir = skills_directory(claude_home);
+    let cache_key = skill_routing_cache_key(&skills_dir, prompt);
+    if let Some(key) = &cache_key {
+        if let Some(cached) = skill_routing_cache_get(key, now_unix_secs()) {
+            let gated = apply_confidence_gate(cached);
+            if let Some(found) = &gated {
+                crate::utility::skill_usage::record_skill_match(claude_home, &found.name);
+                record_pending_skill_match(claude_home, &found.name, found.confidence);
+            }
+            return gated;
+        }
+        skill_routing_cache_miss();
     }
     let mut corpus = load_skill_corpus_for_home(claude_home);
     if corpus.terms.is_empty() {
@@ -212,10 +424,18 @@ pub fn match_skill_for_prompt_with_details(
             found.confidence,
         );
     }
+    let resolved = apply_confidence_gate(resolved);
     // Record match-usage telemetry for skill_list. Fail-open: a write error
     // inside record_skill_match never breaks the match path.
+    // J08: stage the (skill, predicted confidence) pair for session-end
+    // outcome reconcile (cited → helpful, never cited → mis-routed).
     if let Some(found) = &resolved {
         crate::utility::skill_usage::record_skill_match(claude_home, &found.name);
+        record_pending_skill_match(claude_home, &found.name, found.confidence);
+    }
+    // J02: publish the decision under its content-hash key.
+    if let Some(key) = cache_key {
+        skill_routing_cache_put(key, &resolved, now_unix_secs());
     }
     resolved
 }
@@ -287,6 +507,13 @@ pub fn match_skill_composition_for_prompt(
     scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     if scored.is_empty() {
         return None;
+    }
+    // J11: normalize raw IDF sums by the top score (evaluator takes 0.0-1.0).
+    let top = scored.first().map(|(_, score)| *score).unwrap_or(0.0);
+    if top > 0.0 {
+        for (_, score) in &mut scored {
+            *score = (*score / top).clamp(0.0, 1.0);
+        }
     }
     Some(crate::utility::decision::evaluate_skill_composition(
         &scored,
@@ -3184,5 +3411,213 @@ mod tests {
         let temp = std::env::temp_dir().join(format!("keel-skill-comp-{}", std::process::id()));
         assert!(match_skill_composition_for_prompt(&temp, "").is_none());
         assert!(match_skill_composition_for_prompt(&temp, "   ").is_none());
+    }
+
+    fn home_with_skills(label: &str, skills: &[(&str, &str)]) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default();
+        let home = std::env::temp_dir().join(format!(
+            "keel-skill-j02-{label}-{}-{unique}",
+            std::process::id()
+        ));
+        let skills_dir = skills_directory(&home);
+        for (name, description) in skills {
+            write_skill(&skills_dir, name, description);
+        }
+        home
+    }
+
+    #[test]
+    fn skill_routing_cache_hit_skips_recompute() {
+        // Lower bounds only: concurrent tests share the process-global counters.
+        let home = home_with_skills(
+            "hit",
+            &[
+                ("reviewer", "review code diffs carefully"),
+                ("planner", "plan project tasks roadmaps"),
+            ],
+        );
+        let prompt = "reviewer review this code diff j02-hit";
+        let before = skill_routing_cache_stats();
+        let first = match_skill_for_prompt_with_details(&home, prompt);
+        let second = match_skill_for_prompt_with_details(&home, prompt);
+        assert_eq!(first, second);
+        let after = skill_routing_cache_stats();
+        assert!(
+            after.misses > before.misses,
+            "first call must miss at least once"
+        );
+        assert!(
+            after.recomputes > before.recomputes,
+            "one miss must recompute at least once"
+        );
+        assert!(after.hits > before.hits, "repeat prompt must hit");
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn skill_routing_cache_invalidates_on_catalog_change() {
+        let home = home_with_skills("inval", &[("reviewer", "review code diffs carefully")]);
+        let skills_dir = skills_directory(&home);
+        let prompt = "reviewer review this code diff j02-inval";
+        let key_before =
+            skill_routing_cache_key(&skills_dir, prompt).expect("listing fingerprint must exist");
+        let before = skill_routing_cache_stats();
+        let _ = match_skill_for_prompt_with_details(&home, prompt);
+        // Any catalog add/remove/edit changes the listing fingerprint, which
+        // is the deterministic invalidation signal (no counters involved).
+        write_skill(&skills_dir, "planner", "plan project tasks roadmaps");
+        let key_after =
+            skill_routing_cache_key(&skills_dir, prompt).expect("listing fingerprint must exist");
+        assert_ne!(
+            key_before, key_after,
+            "catalog change must change the cache key"
+        );
+        let _ = match_skill_for_prompt_with_details(&home, prompt);
+        let after = skill_routing_cache_stats();
+        let miss_delta = after.misses.saturating_sub(before.misses);
+        assert!(
+            miss_delta >= 2,
+            "both calls must miss across a catalog change"
+        );
+        // No hits assertion on the global counter: concurrent tests share it.
+        // Key inequality above is the deterministic invalidation proof.
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn reconcile_skill_match_outcomes_records_failure_when_uncited() {
+        let home = home_with_skills("reconcile", &[("reviewer", "review code diffs")]);
+        record_pending_skill_match(&home, "reviewer", 0.8);
+        assert_eq!(reconcile_skill_match_outcomes(&home), 1);
+        let rate = crate::utility::skill_usage::skill_success_rate(&home, "reviewer");
+        assert!(
+            rate < 0.5,
+            "uncited routing must record failure, got {rate}"
+        );
+        assert_eq!(
+            reconcile_skill_match_outcomes(&home),
+            0,
+            "the pending ledger is consumed"
+        );
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn skill_composition_composes_distinct_strong_domains() {
+        let home = home_with_skills(
+            "compose",
+            &[
+                ("alpha-tool", "alpha widget forging furnaces"),
+                ("beta-tool", "beta gadget welding workshops"),
+            ],
+        );
+        let decision = match_skill_composition_for_prompt(&home, "alpha-tool beta-tool assistance")
+            .expect("dual-domain prompt must resolve");
+        match &decision.choice {
+            crate::utility::decision::SkillCompositionChoice::Compose(pair) => {
+                assert_eq!(pair.len(), 2, "composition stays pairwise")
+            }
+            other => panic!("expected Compose, got {other:?}"),
+        }
+        assert!(
+            decision.confidence > 0.0 && decision.confidence <= 0.95,
+            "confidence must be a bounded probability, got {}",
+            decision.confidence
+        );
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn decision_cache_routing_speedup_over_recompute() {
+        // Plan J02: cached beats recompute (~1.3x on 25 skills: both paths
+        // are file-IO dominated). Directional assertion only.
+        let bulk: Vec<(String, String)> = (0..23)
+            .map(|i| {
+                (
+                    format!("bulk-skill-{i}"),
+                    format!("bulk domain vocabulary number {i} zebrafinch"),
+                )
+            })
+            .collect();
+        let mut refs: Vec<(&str, &str)> = vec![
+            ("reviewer", "review code diffs carefully"),
+            ("planner", "plan project tasks roadmaps"),
+        ];
+        refs.extend(
+            bulk.iter()
+                .map(|(name, description)| (name.as_str(), description.as_str())),
+        );
+        let home = home_with_skills("bench", &refs);
+        let prompt = "reviewer review this code diff j02-bench";
+        let _ = match_skill_for_prompt_with_details(&home, prompt);
+        let iterations = 30u32;
+        let start = std::time::Instant::now();
+        for _ in 0..iterations {
+            let _ = match_skill_for_prompt_with_details(&home, prompt);
+        }
+        let cached = start.elapsed();
+        let start = std::time::Instant::now();
+        for i in 0..iterations {
+            let unique = format!("{prompt} {i}");
+            let _ = match_skill_for_prompt_with_details(&home, &unique);
+        }
+        let uncached = start.elapsed();
+        println!(
+            "routing cache: cached={cached:?} uncached={uncached:?} ratio={:.1}x",
+            uncached.as_secs_f64() / cached.as_secs_f64().max(f64::EPSILON)
+        );
+        assert!(
+            cached < uncached,
+            "cached routing must beat recomputation: cached={cached:?} uncached={uncached:?}"
+        );
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn low_calibrated_confidence_stays_silent() {
+        // Plan J03 acceptance: sub-0.60 calibrated confidence never auto-applies.
+        let skills = &[("reviewer", "review code diffs carefully")];
+        let prompt = "reviewer review this code diff j03-gate";
+        let clean = home_with_skills("gate-clean", skills);
+        assert!(
+            match_skill_for_prompt_with_details(&clean, prompt).is_some(),
+            "probe prompt must match on a clean home"
+        );
+        let poisoned = home_with_skills("gate-poisoned", skills);
+        // Eighty failures at 1.0 drag bin 9 below the 0.60 gate.
+        for _ in 0..80 {
+            crate::utility::decision::record_and_save_skill_calibration(
+                &poisoned, "reviewer", 1.0, false,
+            )
+            .expect("record calibration");
+        }
+        assert!(
+            match_skill_for_prompt_with_details(&poisoned, prompt).is_none(),
+            "sub-0.60 calibrated confidence must stay silent"
+        );
+        let _ = fs::remove_dir_all(&clean);
+        let _ = fs::remove_dir_all(&poisoned);
+    }
+
+    #[test]
+    fn reconcile_skill_match_outcomes_records_success_when_cited() {
+        let home = home_with_skills("reconcile-cited", &[("reviewer", "review code diffs")]);
+        record_pending_skill_match(&home, "reviewer", 0.8);
+        crate::runner::observation::record_observation_from_parts(
+            &home,
+            "Bash",
+            r#"{"command":"keel skill_get reviewer"}"#,
+            "/",
+            "sess-cited",
+            false,
+        )
+        .expect("record observation");
+        assert_eq!(reconcile_skill_match_outcomes(&home), 1);
+        let rate = crate::utility::skill_usage::skill_success_rate(&home, "reviewer");
+        assert!(rate > 0.5, "cited routing must record success, got {rate}");
+        let _ = fs::remove_dir_all(&home);
     }
 }

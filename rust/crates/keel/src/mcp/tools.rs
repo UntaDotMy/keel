@@ -1306,6 +1306,17 @@ fn tools_list_catalog() -> Value {
                         "json": { "type": "boolean", "description": "Output as JSON. Default true on this tool when omitted." }
                     }
                 }
+            },
+            {
+                "name": "decision",
+                "description": "Jev-style typed decisions with calibrated confidence: score (review/plan rubrics), noul (shell danger probability), choice (skill composition), calibrate (routing confidence), review-feedback (accuracy outcomes), cache-stats (hit/miss counters). Deterministic and local; escalates below 0.6 confidence.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "description": "Decision operation: score, noul, choice, calibrate, review-feedback, cache-stats." }
+                    },
+                    "required": ["action"]
+                }
             }
         ]
     })
@@ -1618,6 +1629,7 @@ pub(crate) const DEFERRED_MCP_TOOL_NAMES: &[&str] = &[
     "skill_eval",
     "design_intelligence",
     "stats",
+    "decision",
 ];
 
 // Canonical MCP tool name set matching the full tool catalog.
@@ -1659,6 +1671,7 @@ pub(crate) const MCP_TOOL_NAMES: &[&str] = &[
     "skill_eval",
     "design_intelligence",
     "stats",
+    "decision",
 ];
 
 /// Rank installed capabilities without exposing the full catalog. Historical

@@ -1566,6 +1566,29 @@ pub(crate) fn run_review_closeout_command(
             return 1;
         }
     };
+    // J09: record a review-accuracy outcome per closeout (Stale excluded;
+    // false positives only via explicit `decision review-feedback`).
+    {
+        let live: Vec<_> = ledger
+            .findings
+            .iter()
+            .filter(|finding| finding.status != ReviewFindingStatus::Stale)
+            .collect();
+        if !live.is_empty() {
+            let confirmed = live
+                .iter()
+                .filter(|finding| finding.status == ReviewFindingStatus::Closed)
+                .count();
+            let outcome = crate::utility::decision::ReviewOutcome::new(
+                &ledger.id,
+                live.len(),
+                confirmed,
+                0,
+                0.75,
+            );
+            let _ = crate::utility::decision::save_review_outcome(&claude_home, &outcome);
+        }
+    }
     let unresolved_finding_count = unresolved_findings(&ledger).len();
     let unresolved_requirement_count = unresolved_requirements(&ledger).len();
     let status = if unresolved_finding_count == 0 && unresolved_requirement_count == 0 {
