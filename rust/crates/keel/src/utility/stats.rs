@@ -7,8 +7,9 @@
 //! Dependencies: the gain, telemetry, recall, anvil, hook-lifecycle, and
 //!   fixed-context readers. Every datum comes from its owning reader; `stats`
 //!   renders those values and does not re-parse their storage formats.
-//! Side Effects: read-only. `recall_status_snapshot` lazily syncs the recall
-//!   index; everything else reads files. No writes, no network.
+//! Side Effects: read-only. `recall_status_snapshot` reads the stored recall
+//!   index for a health snapshot (no sync); everything else reads files.
+//!   No writes, no network.
 
 use std::fs;
 use std::io::Write;

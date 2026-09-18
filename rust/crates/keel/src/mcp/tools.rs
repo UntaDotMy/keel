@@ -2069,12 +2069,13 @@ fn run_tool_with_executor_cancellation<F>(
 where
     F: FnOnce() -> Result<String, String> + Send + 'static,
 {
-    let cancellation = cancellation.unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
+    let client_cancellation = cancellation;
+    let worker_cancellation = Arc::new(AtomicBool::new(false));
     let deadline = Instant::now() + timeout;
     let (tx, rx) = mpsc::channel();
     let job = ToolJob {
         deadline,
-        cancellation: Arc::clone(&cancellation),
+        cancellation: Arc::clone(&worker_cancellation),
         work: Box::new(move || {
             let _ = tx.send(work());
         }),
@@ -2089,12 +2090,16 @@ where
     })?;
 
     loop {
-        if cancellation.load(Ordering::Acquire) {
+        if client_cancellation
+            .as_ref()
+            .is_some_and(|token| token.load(Ordering::Acquire))
+        {
+            worker_cancellation.store(true, Ordering::Release);
             return Err(format!("{label}: request cancelled"));
         }
         let now = Instant::now();
         if now >= deadline {
-            cancellation.store(true, Ordering::Release);
+            worker_cancellation.store(true, Ordering::Release);
             return Err(format!(
                 "{label}: timed out after {}s; cancellation was requested",
                 timeout.as_secs()
@@ -5296,6 +5301,32 @@ mod mcp_timeout_tests {
         assert!(
             err.contains("timed out"),
             "expected timeout error, got: {err}"
+        );
+    }
+    #[test]
+    fn tool_timeout_leaves_client_cancellation_clear() {
+        // Regression: a tool timeout must only stop its own worker, never mark
+        // the request token, or the timeout error is dropped and clients hang.
+        let executor = ToolExecutor::new(1, 8);
+        let client_token = Arc::new(AtomicBool::new(false));
+        let err = run_tool_with_executor_cancellation(
+            &executor,
+            Duration::from_millis(200),
+            "slow-tool",
+            Some(Arc::clone(&client_token)),
+            || {
+                std::thread::sleep(Duration::from_secs(5));
+                Ok("should not return".into())
+            },
+        )
+        .expect_err("must time out");
+        assert!(
+            err.contains("timed out"),
+            "expected timeout error, got: {err}"
+        );
+        assert!(
+            !client_token.load(Ordering::Acquire),
+            "tool timeout must not mark the client request as cancelled"
         );
     }
 

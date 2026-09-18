@@ -65,6 +65,13 @@ pub const DEFAULT_RECALL_LIMIT: usize = 20;
 /// Bytes are used instead of characters so malformed or high-density Unicode
 /// cannot expand the FTS expression without passing the admission check.
 pub const MAX_RECALL_QUERY_BYTES: usize = 4 * 1024;
+/// Hard file size bound for indexed memory records (Markdown or JSON). Files
+/// exceeding this bound are logs, traces, or runtime artifacts, not memory notes.
+pub const MAX_INDEXABLE_FILE_BYTES: i64 = 256 * 1024;
+/// Maximum chunks extracted from a single document to prevent unbounded FTS rows.
+const MAX_CHUNKS_PER_FILE: usize = 64;
+/// Number of documents written per SQLite transaction to ensure forward progress.
+const RECALL_TRANSACTION_BATCH_SIZE: usize = 100;
 
 /// Hard result-count bound shared by the CLI, memory-family retrieval, and MCP
 /// callers. Callers may request less, but no caller can make the index return a
@@ -505,20 +512,8 @@ fn run_recall_status(
             return 1;
         }
     };
-    let database_path = recall_database_path(&claude_home);
-    let mut connection = match open_recall_connection(&database_path) {
-        Ok(connection) => connection,
-        Err(error_message) => {
-            let _ = writeln!(
-                standard_error,
-                "{command_group} recall status: open index {}: {error_message}",
-                display_path(&database_path)
-            );
-            return 1;
-        }
-    };
-    let report = match sync_recall_index(&mut connection, &claude_home, false) {
-        Ok(report) => report,
+    let snapshot = match recall_status_snapshot(&claude_home) {
+        Ok(snapshot) => snapshot,
         Err(error_message) => {
             let _ = writeln!(
                 standard_error,
@@ -527,16 +522,8 @@ fn run_recall_status(
             return 1;
         }
     };
-    let document_count = match count_documents(&connection) {
-        Ok(count) => count,
-        Err(error_message) => {
-            let _ = writeln!(
-                standard_error,
-                "{command_group} recall status: {error_message}"
-            );
-            return 1;
-        }
-    };
+    let document_count = snapshot.document_count;
+    let database_path = snapshot.index_path.clone();
     if flag_set.bool_value("json") {
         let fields = vec![
             (
@@ -557,19 +544,19 @@ fn run_recall_status(
             ),
             (
                 "lastIndexedAtMillis".into(),
-                Value::Number(report.last_indexed_at_millis.to_string()),
+                Value::Number(snapshot.last_indexed_at_millis.to_string()),
             ),
             (
                 "addedSinceLastSync".into(),
-                Value::Number(report.added.to_string()),
+                Value::Number(snapshot.added_since_last_sync.to_string()),
             ),
             (
                 "updatedSinceLastSync".into(),
-                Value::Number(report.updated.to_string()),
+                Value::Number(snapshot.updated_since_last_sync.to_string()),
             ),
             (
                 "removedSinceLastSync".into(),
-                Value::Number(report.removed.to_string()),
+                Value::Number(snapshot.removed_since_last_sync.to_string()),
             ),
         ];
         let payload = Value::Object(fields);
@@ -585,7 +572,7 @@ fn run_recall_status(
         document_count,
         display_path(&database_path),
         SCHEMA_VERSION,
-        report.last_indexed_at_millis,
+        snapshot.last_indexed_at_millis,
     );
     0
 }
@@ -964,7 +951,7 @@ pub(crate) fn search_recall_index_with_options(
     if let Err(sync_error) =
         sync_recall_index_until(&mut connection, claude_home, false, Some(deadline))
     {
-        if !is_lock_contention(&sync_error) {
+        if !is_sync_degradable(&sync_error) {
             return Err(sync_error);
         }
     }
@@ -979,33 +966,44 @@ pub(crate) fn search_recall_index_with_options(
     }
 }
 
-/// True when a recall open/sync error is lock contention from another keel
-/// process (WAL write lock held) rather than corruption. Callers treat this as
-/// "search the existing index anyway"; anything else is a hard error.
-fn is_lock_contention(error_message: &str) -> bool {
+/// True when a recall open/sync error is transient (lock contention from another
+/// keel process holding the WAL write lock, or a wall-clock deadline exceeded
+/// mid-sync) rather than corruption. Callers treat this as "search the existing
+/// index anyway"; anything else is a hard error.
+fn is_sync_degradable(error_message: &str) -> bool {
     let lowered = error_message.to_ascii_lowercase();
-    lowered.contains("locked") || lowered.contains("busy")
+    lowered.contains("locked") || lowered.contains("busy") || lowered.contains("deadline")
 }
 
-/// Open (and if necessary create) the recall index under `claude_home`, run a
-/// non-forced sync, then return a snapshot of the resulting health metrics.
+/// Open (and if necessary create) the recall index under `claude_home`, then
+/// return a snapshot of the resulting health metrics read directly from the
+/// stored index with no filesystem sync. Syncing is a write-path concern owned
+/// by `reindex` and the write-time hook; status reads must stay millisecond-fast.
 /// Used by the MCP `recall_status` tool and the `keel://recall/status`
 /// resource so they share the same code path as `recall status` rather than
 /// reaching into the schema directly.
 pub fn recall_status_snapshot(claude_home: &Path) -> Result<RecallStatusSnapshot, String> {
     let database_path = recall_database_path(claude_home);
-    let mut connection = open_recall_connection(&database_path)?;
-    let report = sync_recall_index(&mut connection, claude_home, false)?;
+    let connection = open_recall_connection(&database_path)?;
     let document_count = count_documents(&connection)?;
+    let last_indexed_at_millis: i64 = connection
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'last_indexed_at_millis'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
+        .and_then(|val| val.parse::<i64>().ok())
+        .unwrap_or(0);
     Ok(RecallStatusSnapshot {
         claude_home: claude_home.to_path_buf(),
         index_path: database_path,
         schema_version: SCHEMA_VERSION.to_string(),
         document_count,
-        last_indexed_at_millis: report.last_indexed_at_millis,
-        added_since_last_sync: report.added,
-        updated_since_last_sync: report.updated,
-        removed_since_last_sync: report.removed,
+        last_indexed_at_millis: last_indexed_at_millis.max(0) as u128,
+        added_since_last_sync: 0,
+        updated_since_last_sync: 0,
+        removed_since_last_sync: 0,
     })
 }
 
@@ -1064,6 +1062,21 @@ fn open_recall_connection_until(
         .pragma_update(None, "synchronous", "NORMAL")
         .map_err(|database_error| {
             recall_open_error_hint(database_path, &format!("set synchronous: {database_error}"))
+        })?;
+    connection
+        .pragma_update(None, "temp_store", "MEMORY")
+        .map_err(|database_error| {
+            recall_open_error_hint(database_path, &format!("set temp_store: {database_error}"))
+        })?;
+    connection
+        .pragma_update(None, "mmap_size", 268_435_456i64)
+        .map_err(|database_error| {
+            recall_open_error_hint(database_path, &format!("set mmap_size: {database_error}"))
+        })?;
+    connection
+        .pragma_update(None, "cache_size", -64_000i64)
+        .map_err(|database_error| {
+            recall_open_error_hint(database_path, &format!("set cache_size: {database_error}"))
         })?;
     // why: WAL lets one writer proceed alongside readers, so a short wait lets a
     // concurrent `keel mcp serve` finish its transaction instead of erroring. The
@@ -1371,74 +1384,88 @@ fn sync_recall_index_until(
             was_existing: existing_rows.contains_key(&document.absolute_path),
         });
     }
-
-    // Phase 2 — short SQL-only write transaction.
-    let transaction = connection
-        .transaction()
-        .map_err(|database_error| format!("begin transaction: {database_error}"))?;
-    for document in &pending {
-        check_recall_deadline(deadline)?;
-        transaction
+    if force_full_rescan {
+        connection
             .execute(
-                "DELETE FROM document_meta WHERE path = ?1",
-                params![&document.path],
+                "INSERT INTO documents(documents, rank) VALUES('automerge', 0)",
+                [],
             )
-            .map_err(|database_error| format!("delete document metadata: {database_error}"))?;
-        transaction
-            .execute(
-                "DELETE FROM documents WHERE path = ?1",
-                params![&document.path],
-            )
-            .map_err(|database_error| format!("delete stale rows: {database_error}"))?;
-        for (chunk_index, chunk) in document.chunks.iter().enumerate() {
-            check_recall_deadline(deadline)?;
-            transaction
-                .execute(
-                    "INSERT INTO documents(path, modified_at, size, content) VALUES (?1, ?2, ?3, ?4)",
-                    params![&document.path, &document.modified_at, &document.size, &chunk.content],
-                )
-                .map_err(|database_error| format!("insert memory chunk: {database_error}"))?;
-            let rowid = transaction.last_insert_rowid();
-            transaction
-                .execute(
-                    "INSERT INTO document_meta(rowid, path, chunk_index, start_line, end_line, source_kind, scope, branch, content_hash, lifecycle, expires_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-                    params![
-                        rowid,
-                        &document.path,
-                        chunk_index as i64,
-                        chunk.start_line as i64,
-                        chunk.end_line as i64,
-                        &document.source_kind,
-                        &document.scope,
-                        &document.branch,
-                        &document.content_hash,
-                        document.lifecycle,
-                        document.expires_at_millis,
-                    ],
-                )
-                .map_err(|database_error| format!("insert memory metadata: {database_error}"))?;
-        }
-        transaction
-            .execute(
-                "INSERT OR REPLACE INTO file_state(path, modified_at, size, content_hash, last_verified_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![
-                    &document.path,
-                    document.modified_at.parse::<i64>().unwrap_or(0),
-                    document.size.parse::<i64>().unwrap_or(0),
-                    &document.content_hash,
-                    now_millis,
-                ],
-            )
-            .map_err(|database_error| format!("insert file state: {database_error}"))?;
-        if document.was_existing {
-            report.updated += 1;
-        } else {
-            report.added += 1;
-        }
+            .map_err(|database_error| format!("disable fts automerge: {database_error}"))?;
     }
 
-    for path in &verified_paths {
+    // Phase 2: batched SQL write transactions so partial progress is preserved.
+    for document_batch in pending.chunks(RECALL_TRANSACTION_BATCH_SIZE) {
         check_recall_deadline(deadline)?;
+        let transaction = connection
+            .transaction()
+            .map_err(|database_error| format!("begin transaction: {database_error}"))?;
+        for document in document_batch {
+            transaction
+                .execute(
+                    "DELETE FROM document_meta WHERE path = ?1",
+                    params![&document.path],
+                )
+                .map_err(|database_error| format!("delete document metadata: {database_error}"))?;
+            transaction
+                .execute(
+                    "DELETE FROM documents WHERE path = ?1",
+                    params![&document.path],
+                )
+                .map_err(|database_error| format!("delete stale rows: {database_error}"))?;
+            for (chunk_index, chunk) in document.chunks.iter().enumerate() {
+                transaction
+                    .execute(
+                        "INSERT INTO documents(path, modified_at, size, content) VALUES (?1, ?2, ?3, ?4)",
+                        params![&document.path, &document.modified_at, &document.size, &chunk.content],
+                    )
+                    .map_err(|database_error| format!("insert memory chunk: {database_error}"))?;
+                let rowid = transaction.last_insert_rowid();
+                transaction
+                    .execute(
+                        "INSERT INTO document_meta(rowid, path, chunk_index, start_line, end_line, source_kind, scope, branch, content_hash, lifecycle, expires_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                        params![
+                            rowid,
+                            &document.path,
+                            chunk_index as i64,
+                            chunk.start_line as i64,
+                            chunk.end_line as i64,
+                            &document.source_kind,
+                            &document.scope,
+                            &document.branch,
+                            &document.content_hash,
+                            document.lifecycle,
+                            document.expires_at_millis,
+                        ],
+                    )
+                    .map_err(|database_error| format!("insert memory metadata: {database_error}"))?;
+            }
+            transaction
+                .execute(
+                    "INSERT OR REPLACE INTO file_state(path, modified_at, size, content_hash, last_verified_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![
+                        &document.path,
+                        document.modified_at.parse::<i64>().unwrap_or(0),
+                        document.size.parse::<i64>().unwrap_or(0),
+                        &document.content_hash,
+                        now_millis,
+                    ],
+                )
+                .map_err(|database_error| format!("insert file state: {database_error}"))?;
+            if document.was_existing {
+                report.updated += 1;
+            } else {
+                report.added += 1;
+            }
+        }
+        transaction
+            .commit()
+            .map_err(|database_error| format!("commit batch: {database_error}"))?;
+    }
+
+    let transaction = connection
+        .transaction()
+        .map_err(|database_error| format!("begin final transaction: {database_error}"))?;
+    for path in &verified_paths {
         transaction
             .execute(
                 "UPDATE file_state SET last_verified_at = ?1 WHERE path = ?2",
@@ -1454,7 +1481,6 @@ fn sync_recall_index_until(
         }
     }
     for path in &paths_to_remove {
-        check_recall_deadline(deadline)?;
         transaction
             .execute("DELETE FROM document_meta WHERE path = ?1", params![path])
             .map_err(|database_error| format!("delete document metadata: {database_error}"))?;
@@ -1475,8 +1501,25 @@ fn sync_recall_index_until(
         .map_err(|database_error| format!("stamp last_indexed_at: {database_error}"))?;
     transaction
         .commit()
-        .map_err(|database_error| format!("commit transaction: {database_error}"))?;
+        .map_err(|database_error| format!("commit final transaction: {database_error}"))?;
 
+    if force_full_rescan {
+        connection
+            .execute(
+                "INSERT INTO documents(documents, rank) VALUES('optimize', 1)",
+                [],
+            )
+            .map_err(|database_error| format!("optimize fts index: {database_error}"))?;
+        connection
+            .execute(
+                "INSERT INTO documents(documents, rank) VALUES('automerge', 4)",
+                [],
+            )
+            .map_err(|database_error| format!("restore fts automerge: {database_error}"))?;
+    }
+    connection
+        .pragma_update(None, "wal_checkpoint", "PASSIVE")
+        .map_err(|database_error| format!("checkpoint wal: {database_error}"))?;
     report.indexed_total = on_disk.len() as u64;
     report.last_indexed_at_millis = now_millis.max(0) as u128;
     Ok(report)
@@ -1510,6 +1553,9 @@ fn split_memory_chunks(content: &str) -> Vec<MemoryChunk> {
     let mut start = 0usize;
     let mut bytes = 0usize;
     for index in 0..lines.len() {
+        if chunks.len() >= MAX_CHUNKS_PER_FILE {
+            break;
+        }
         bytes = bytes.saturating_add(lines[index].len() + 1);
         let heading_boundary = index > start && lines[index].trim_start().starts_with('#');
         let size_boundary = index.saturating_sub(start) + 1 >= MAX_LINES || bytes >= MAX_BYTES;
@@ -1524,7 +1570,7 @@ fn split_memory_chunks(content: &str) -> Vec<MemoryChunk> {
             bytes = lines[index].len() + 1;
         }
     }
-    if start < lines.len() {
+    if start < lines.len() && chunks.len() < MAX_CHUNKS_PER_FILE {
         chunks.push(MemoryChunk {
             start_line: start + 1,
             end_line: lines.len(),
@@ -1764,6 +1810,16 @@ fn collect_indexable_files_until(
             continue;
         }
         if file_type.is_dir() {
+            let dir_name = entry_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("");
+            if matches!(
+                dir_name,
+                "plans" | "raw_store" | "target" | "node_modules" | ".git"
+            ) {
+                continue;
+            }
             collect_indexable_files_until(&entry_path, out, deadline)?;
             continue;
         }
@@ -1785,6 +1841,9 @@ fn collect_indexable_files_until(
         // them, so `recall` never matched a working brief it had just written.
         // Both formats are UTF-8 text and FTS5-tokenize cleanly.
         if !matches!(extension.as_deref(), Some("md") | Some("json")) {
+            continue;
+        }
+        if metadata.len() > MAX_INDEXABLE_FILE_BYTES as u64 {
             continue;
         }
         let modified_at_millis = metadata
@@ -3320,6 +3379,17 @@ mod tests {
             write_memory(claude_home, "memories/b.md", "# B\nbeta\n");
             let mut stdout: Vec<u8> = Vec::new();
             let mut stderr: Vec<u8> = Vec::new();
+            // Status reads the stored index without syncing: index first.
+            let reindex_code =
+                run_recall_command("memory", &["reindex".to_string()], &mut stdout, &mut stderr);
+            assert_eq!(
+                reindex_code,
+                0,
+                "stderr: {}",
+                String::from_utf8_lossy(&stderr)
+            );
+            stdout.clear();
+            stderr.clear();
             let exit_code = run_recall_command(
                 "memory",
                 &["status".to_string(), "--json".to_string()],
