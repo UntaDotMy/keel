@@ -1325,9 +1325,12 @@ fn iron_law_gate_denies_without_evidence_and_does_not_ack_on_deny() {
 
     let session = "sess-iron-law-strict";
     let first = iron_law_gate_decision(session);
-    assert!(first.is_some(), "first edit with no research must DENY");
+    assert!(first.is_denied(), "first edit with no research must DENY");
     assert!(
-        first.unwrap().contains("STRICT"),
+        first
+            .denial_reason()
+            .map(|r| r.contains("STRICT"))
+            .unwrap_or(false),
         "default denial must name STRICT: {:?}",
         first
     );
@@ -1335,21 +1338,21 @@ fn iron_law_gate_denies_without_evidence_and_does_not_ack_on_deny() {
     // Critical: deny must not self-clear (the old one-shot acknowledge bug).
     let second = iron_law_gate_decision(session);
     assert!(
-        second.is_some(),
+        second.is_denied(),
         "retry without research must still DENY (no acknowledge-on-deny)"
     );
 
     // Marker write after a keel tool → allow.
     mark_iron_law_satisfied(session);
     assert!(
-        iron_law_gate_decision(session).is_none(),
+        !iron_law_gate_decision(session).is_denied(),
         "after mark_iron_law_satisfied, edits must ALLOW"
     );
 
     // Off disables.
     std::env::set_var(IRON_LAW_GATE_ENV_VAR, "off");
     // Fresh session, still off.
-    assert!(iron_law_gate_decision("sess-other").is_none());
+    assert!(!iron_law_gate_decision("sess-other").is_denied());
 
     match previous_home {
         Some(value) => std::env::set_var("CLAUDE_TARGET_OVERRIDE", value),
@@ -1455,7 +1458,7 @@ fn markdown_only_edits_skip_anvil_but_keep_unknown_and_iron_law_gated() {
             "C:/repo",
             true,
         )
-        .is_none(),
+        .is_allowed(),
         "an explicitly markdown-only edit should not require Anvil"
     );
 
@@ -1464,15 +1467,19 @@ fn markdown_only_edits_skip_anvil_but_keep_unknown_and_iron_law_gated() {
         "tool_input": { "file_path": "src/lib.rs" }
     });
     assert!(!pre_tool::markdown_only_edit_targets(&source, "Edit"));
+    let decision = pre_tool::pre_tool_gate_decision_with_markdown_context(
+        "source-session",
+        "Edit",
+        None,
+        "C:/repo",
+        false,
+    );
     assert!(
-        pre_tool::pre_tool_gate_decision_with_markdown_context(
-            "source-session",
-            "Edit",
-            None,
-            "C:/repo",
-            false,
-        )
-        .is_some_and(|reason| reason.contains("Anvil")),
+        decision.is_denied()
+            && decision
+                .denial_reason()
+                .map(|r| r.contains("Anvil"))
+                .unwrap_or(false),
         "source edits must remain behind the Anvil gate"
     );
 
@@ -1486,15 +1493,19 @@ fn markdown_only_edits_skip_anvil_but_keep_unknown_and_iron_law_gated() {
     assert!(!pre_tool::markdown_only_edit_targets(&mixed, "MultiEdit"));
 
     std::env::set_var(IRON_LAW_GATE_ENV_VAR, "strict");
+    let decision = pre_tool::pre_tool_gate_decision_with_markdown_context(
+        "iron-law-session",
+        "Edit",
+        None,
+        "C:/repo",
+        true,
+    );
     assert!(
-        pre_tool::pre_tool_gate_decision_with_markdown_context(
-            "iron-law-session",
-            "Edit",
-            None,
-            "C:/repo",
-            true,
-        )
-        .is_some_and(|reason| reason.contains("Iron Law")),
+        decision.is_denied()
+            && decision
+                .denial_reason()
+                .map(|r| r.contains("Iron Law"))
+                .unwrap_or(false),
         "the markdown exemption must not bypass the Iron Law gate"
     );
     let mounted_input = serde_json::json!({
@@ -1556,7 +1567,13 @@ fn plan_readiness_gate_denies_edit_when_plan_is_unready() {
         Some(value) => std::env::set_var("CLAUDE_TARGET_OVERRIDE", value),
         None => std::env::remove_var("CLAUDE_TARGET_OVERRIDE"),
     }
-    assert!(decision.is_some_and(|reason| reason.contains("Definition of Ready")));
+    assert!(
+        decision.is_denied()
+            && decision
+                .denial_reason()
+                .map(|r| r.contains("Definition of Ready"))
+                .unwrap_or(false)
+    );
 }
 
 #[test]
@@ -1600,7 +1617,11 @@ fn plan_gate_denies_edit_when_selected_task_is_blocked() {
         None => std::env::remove_var("CLAUDE_TARGET_OVERRIDE"),
     }
     assert!(
-        decision.is_some_and(|reason| reason.contains("blocked task")),
+        decision.is_denied()
+            && decision
+                .denial_reason()
+                .map(|r| r.contains("blocked task"))
+                .unwrap_or(false),
         "blocked prerequisite must deny the edit before DoR evaluation"
     );
     let _ = std::fs::remove_dir_all(&home);
@@ -1695,7 +1716,10 @@ fn verified_mode_requires_web_research_not_internal_state() {
     std::env::set_var("CLAUDE_TARGET_OVERRIDE", &verified_home);
     let decision = iron_law_gate_decision("sess-verified-fresh");
     assert!(
-        decision.map(|d| d.contains("VERIFIED")).unwrap_or(false),
+        decision
+            .denial_reason()
+            .map(|r| r.contains("VERIFIED"))
+            .unwrap_or(false),
         "fresh edit in Verified mode must deny with the VERIFIED message: {decision:?}"
     );
     std::env::remove_var(IRON_LAW_GATE_ENV_VAR);
@@ -5402,4 +5426,189 @@ fn test_tool_input_command_variants() {
 
     let doc6 = serde_json::json!({"other": 123});
     assert_eq!(pre_tool::tool_input_command(&doc6), None);
+}
+
+#[test]
+fn decision_cache_get_returns_none_for_empty_cache() {
+    // Clear any existing state first
+    prune_decision_cache();
+
+    let result = cached_gate_decision("iron_law", "Edit", "nonexistent-session");
+    assert!(result.is_none(), "empty cache must return None");
+}
+
+#[test]
+fn decision_cache_put_and_get_round_trip() {
+    prune_decision_cache();
+
+    let decision =
+        PreToolGateDecision::deny_with_confidence("test denial", 0.85, false, "iron_law");
+
+    // Cache the decision
+    cache_gate_decision("iron_law", "Edit", "test-session", &decision);
+
+    // Retrieve it
+    let retrieved = cached_gate_decision("iron_law", "Edit", "test-session");
+    assert!(retrieved.is_some(), "cached decision must be retrievable");
+    let retrieved = retrieved.unwrap();
+    assert!(retrieved.is_denied());
+    assert_eq!(retrieved.confidence(), 0.85);
+}
+
+#[test]
+fn decision_cache_respects_session_isolation() {
+    prune_decision_cache();
+
+    let decision_a = PreToolGateDecision::deny("session-a-denial", "iron_law");
+    let decision_b = PreToolGateDecision::allow();
+
+    cache_gate_decision("iron_law", "Edit", "session-a", &decision_a);
+    cache_gate_decision("iron_law", "Edit", "session-b", &decision_b);
+
+    let retrieved_a = cached_gate_decision("iron_law", "Edit", "session-a").unwrap();
+    let retrieved_b = cached_gate_decision("iron_law", "Edit", "session-b").unwrap();
+
+    assert!(retrieved_a.is_denied(), "session-a must be denied");
+    assert!(retrieved_b.is_allowed(), "session-b must be allowed");
+}
+
+#[test]
+fn decision_cache_respects_gate_name_separation() {
+    prune_decision_cache();
+
+    let iron_law_deny = PreToolGateDecision::deny("iron-law-denial", "iron_law");
+    let plan_allow = PreToolGateDecision::allow();
+
+    cache_gate_decision("iron_law", "Edit", "shared-session", &iron_law_deny);
+    cache_gate_decision("plan", "Edit", "shared-session", &plan_allow);
+
+    let iron_law = cached_gate_decision("iron_law", "Edit", "shared-session").unwrap();
+    let plan = cached_gate_decision("plan", "Edit", "shared-session").unwrap();
+
+    assert!(iron_law.is_denied(), "iron_law gate must deny");
+    assert!(plan.is_allowed(), "plan gate must allow");
+}
+
+#[test]
+fn decision_cache_different_tools_independent() {
+    prune_decision_cache();
+
+    let edit_deny = PreToolGateDecision::deny("edit-denial", "iron_law");
+    let write_allow = PreToolGateDecision::allow();
+
+    cache_gate_decision("iron_law", "Edit", "tool-test-session", &edit_deny);
+    cache_gate_decision("iron_law", "Write", "tool-test-session", &write_allow);
+
+    let edit = cached_gate_decision("iron_law", "Edit", "tool-test-session").unwrap();
+    let write = cached_gate_decision("iron_law", "Write", "tool-test-session").unwrap();
+
+    assert!(edit.is_denied(), "Edit must be denied");
+    assert!(write.is_allowed(), "Write must be allowed");
+}
+
+#[test]
+fn pre_tool_gate_decision_produces_typed_decision() {
+    // Test that pre_tool_gate_decision_with_markdown_context returns a typed decision
+    let decision = pre_tool_gate_decision_with_markdown_context(
+        "typed-decision-test",
+        "Read", // Read is not gated
+        None,
+        "",
+        false,
+    );
+
+    // Read is not gated, so should allow
+    assert!(decision.is_allowed(), "Read must be allowed (not gated)");
+    assert_eq!(
+        decision.confidence(),
+        PreToolGateDecision::DEFAULT_CONFIDENCE
+    );
+}
+
+#[test]
+fn pre_tool_gate_decision_has_confidence_field() {
+    // Create a deny decision with explicit confidence
+    let decision = PreToolGateDecision::deny_with_confidence(
+        "test reason",
+        0.92,
+        false, // escalate
+        "test_gate",
+    );
+    assert!(decision.is_denied());
+    assert_eq!(decision.confidence(), 0.92);
+
+    // High confidence (above threshold) with escalate flag - should NOT need escalation
+    let high_conf = PreToolGateDecision::deny_with_confidence(
+        "high confidence",
+        0.85, // above 0.6 threshold
+        true, // escalate flagged
+        "test",
+    );
+    assert!(
+        !high_conf.needs_escalation(),
+        "high confidence (0.85) with escalate flag must NOT need escalation"
+    );
+
+    // Below threshold with escalate flag - SHOULD need escalation
+    let below_threshold = PreToolGateDecision::deny_with_confidence(
+        "below threshold",
+        0.55, // below 0.6 threshold
+        true, // escalate flagged
+        "test",
+    );
+    assert!(
+        below_threshold.needs_escalation(),
+        "below threshold (0.55) with escalate flag must need escalation"
+    );
+
+    // High confidence without escalate flag - should NOT need escalation
+    let no_escalate = PreToolGateDecision::deny_with_confidence(
+        "no escalate",
+        0.80,
+        false, // escalate NOT flagged
+        "test",
+    );
+    assert!(
+        !no_escalate.needs_escalation(),
+        "high confidence without escalate flag must NOT need escalation"
+    );
+}
+
+#[test]
+fn escalate_flag_respects_confidence_threshold() {
+    // Low confidence with escalate flag - SHOULD need escalation (below 0.6 threshold)
+    let low_conf = PreToolGateDecision::deny_with_confidence(
+        "low confidence",
+        0.55, // below 0.6 threshold
+        true, // escalate flagged
+        "test",
+    );
+    assert!(
+        low_conf.needs_escalation(),
+        "low confidence (0.55) with escalate flag must need escalation"
+    );
+
+    // At threshold - should NOT need escalation (strictly less than)
+    let at_threshold = PreToolGateDecision::deny_with_confidence(
+        "at threshold",
+        0.6, // exactly at threshold - strict less than means not escalated
+        true,
+        "test",
+    );
+    assert!(
+        !at_threshold.needs_escalation(),
+        "confidence at threshold (0.6) must NOT need escalation (strictly less than)"
+    );
+
+    // Above threshold - should NOT need escalation
+    let above_threshold = PreToolGateDecision::deny_with_confidence(
+        "above threshold",
+        0.92, // above 0.6 threshold
+        true, // escalate flagged
+        "test",
+    );
+    assert!(
+        !above_threshold.needs_escalation(),
+        "confidence above threshold (0.92) with escalate flag must NOT need escalation"
+    );
 }

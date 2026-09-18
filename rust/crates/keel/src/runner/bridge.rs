@@ -438,22 +438,46 @@ fn run_bridge_pre_tool_use(
         return 0;
     }
     let session_id = session.trim();
-    let gate_decision = if markdown_only_edit {
-        hook_lifecycle::pre_tool_gate_decision_with_markdown_context(
-            session_id, tool_name, command, &cwd, true,
-        )
-    } else {
-        hook_lifecycle::pre_tool_gate_decision(session_id, tool_name, command, &cwd)
-    };
+    let gate_decision = hook_lifecycle::pre_tool_gate_decision_with_markdown_context(
+        session_id,
+        tool_name,
+        command,
+        &cwd,
+        markdown_only_edit,
+    );
+
     match gate_decision {
-        Some(reason) => {
-            let _ = writeln!(standard_output, "KEEL_GATE_DENY\n{reason}");
+        hook_lifecycle::PreToolGateDecision::Deny {
+            reason,
+            confidence,
+            escalate,
+            ..
+        } => {
+            if escalate
+                && confidence < hook_lifecycle::PreToolGateDecision::ESCALATION_CONFIDENCE_THRESHOLD
+            {
+                let _ = writeln!(standard_output, "KEEL_GATE_ESCALATE\nreason: {reason}\nconfidence: {confidence:.2}\ngate: iron_law");
+            } else {
+                let _ = writeln!(
+                    standard_output,
+                    "KEEL_GATE_DENY\nreason: {reason}\nconfidence: {confidence:.2}"
+                );
+            }
+            0
         }
-        None => {
+        hook_lifecycle::PreToolGateDecision::Warn {
+            message,
+            confidence,
+            continue_anyway,
+        } => {
+            let _ = writeln!(standard_output, "KEEL_GATE_WARN\nmessage: {message}\nconfidence: {confidence:.2}\ncontinue: {continue_anyway}");
+            0
+        }
+        hook_lifecycle::PreToolGateDecision::Allow => {
             let _ = writeln!(standard_output, "KEEL_GATE_ALLOW");
+            0
         }
     }
-    0
 }
 
 fn run_bridge_rewrite(

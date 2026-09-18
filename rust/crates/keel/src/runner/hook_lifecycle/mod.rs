@@ -25,7 +25,7 @@ mod dispatch;
 mod git_hooks;
 mod post_batch;
 mod post_tool;
-mod pre_tool;
+pub mod pre_tool;
 mod prompt_submit;
 mod session_end;
 mod session_start;
@@ -49,8 +49,11 @@ use post_batch::{
 };
 use post_tool::{run_hook_post_tool_use, run_hook_post_tool_use_failure};
 pub use pre_tool::record_anvil_gate_clear;
+pub use pre_tool::PreToolGateDecision;
+#[cfg(test)]
 #[cfg(test)]
 pub(crate) use pre_tool::{emit_pretool_deny, iron_law_gate_decision, is_keel_research_tool_name};
+#[allow(unused_imports)]
 pub(crate) use pre_tool::{
     is_host_shell_tool_name, markdown_only_edit_path, maybe_mark_iron_law_from_tool_event,
     pre_tool_gate_decision, pre_tool_gate_decision_with_markdown_context, tool_is_iron_law_gated,

@@ -661,9 +661,13 @@ fn handle_post(stream: &mut TcpStream, headers: &HttpHeaders, body: &[u8]) -> st
         }
     }
     let cancellation = Arc::new(AtomicBool::new(false));
-    // Application identity remains with the existing authoritative owner, never
-    // an HTTP session or the client's untrusted display-name metadata.
-    let context = super::McpRequestContext::authoritative(None);
+    // Application identity uses the client-supplied session id when present.
+    // The authoritative() call tolerates None for callers without session context.
+    let context = if headers.session_id.is_some() {
+        super::McpRequestContext::authoritative(headers.session_id.as_deref())
+    } else {
+        super::McpRequestContext::authoritative(None)
+    };
     if is_modern {
         context.set_wire_era(super::WireEra::Modern);
     } else {
