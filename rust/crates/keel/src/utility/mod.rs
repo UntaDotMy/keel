@@ -5,6 +5,7 @@
 
 pub mod anvil;
 pub mod architecture;
+pub mod calibration;
 pub mod code_graph;
 pub mod code_search;
 pub mod config_audit;

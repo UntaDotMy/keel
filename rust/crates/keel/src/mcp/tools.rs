@@ -1309,11 +1309,11 @@ fn tools_list_catalog() -> Value {
             },
             {
                 "name": "decision",
-                "description": "Jev-style typed decisions with calibrated confidence: score (review/plan rubrics), noul (shell danger probability), choice (skill composition), calibrate (routing confidence), review-feedback (accuracy outcomes), cache-stats (hit/miss counters). Deterministic and local; escalates below 0.6 confidence.",
+                "description": "Jev-style typed decisions with calibrated confidence: score (review/plan rubrics), noul (shell danger probability), choice (skill composition), calibrate (routing confidence), review-feedback (accuracy outcomes), noul-feedback (shell override labels), cache-stats (hit/miss counters), calibration-report (calibration health). Deterministic and local; escalates below 0.6 confidence.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "action": { "type": "string", "description": "Decision operation: score, noul, choice, calibrate, review-feedback, cache-stats." }
+                        "action": { "type": "string", "description": "Decision operation: score, noul, choice, calibrate, review-feedback, noul-feedback, cache-stats, calibration-report." }
                     },
                     "required": ["action"]
                 }
@@ -6142,7 +6142,7 @@ fn tool_stats(arguments: &Value) -> Result<String, String> {
         crate::utility::run_stats_command(&owned, out, err)
     })
 }
-/// Jev-inspired typed decision operations (score, noul, choice, calibrate, review-feedback).
+/// Typed decision operations (score, noul, choice, calibrate, both feedbacks, both reports).
 fn tool_decision(arguments: &Value) -> Result<String, String> {
     crate::utility::decision::handle_decision_tool(arguments)
 }
@@ -9260,6 +9260,16 @@ mod tests {
 
     #[test]
     fn decision_tool_evaluates_noul_and_score() {
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // Hermetic home: the score arm fuses host confidence against recorded
+        // review precision, which must not read the developer machine state.
+        let prior_home = std::env::var("KEEL_HOME").ok();
+        let hermetic_home =
+            std::env::temp_dir().join(format!("keel-decision-hermetic-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&hermetic_home);
+        std::env::set_var("KEEL_HOME", &hermetic_home);
         let noul_res = tool_decision(&json!({
             "action": "noul",
             "command": "cargo test"
@@ -9291,5 +9301,10 @@ mod tests {
         }))
         .expect("choice tool call ok");
         assert!(choice_res.contains("Compose") || choice_res.contains("Single"));
+        match prior_home {
+            Some(value) => std::env::set_var("KEEL_HOME", value),
+            None => std::env::remove_var("KEEL_HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&hermetic_home);
     }
 }

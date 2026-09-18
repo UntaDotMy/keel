@@ -196,17 +196,11 @@ pub fn reconcile_skill_match_outcomes(claude_home: &Path) -> usize {
     if pending.is_empty() {
         return 0;
     }
-    let mut cited: HashSet<String> = HashSet::new();
-    if let Ok(rows) = crate::runner::observation::iter_recent_rows_at(claude_home, 1) {
-        for row in rows {
-            let haystack = format!("{}\n{}", row.signature, row.detail).to_ascii_lowercase();
-            for entry in &pending {
-                if haystack.contains(&entry.skill_name.to_ascii_lowercase()) {
-                    cited.insert(entry.skill_name.clone());
-                }
-            }
-        }
-    }
+    let candidates: HashSet<String> = pending
+        .iter()
+        .map(|entry| entry.skill_name.clone())
+        .collect();
+    let cited = cited_skill_names(claude_home, &candidates);
     let mut reconciled = 0usize;
     for entry in &pending {
         let helpful = cited.contains(&entry.skill_name);
@@ -223,6 +217,163 @@ pub fn reconcile_skill_match_outcomes(claude_home: &Path) -> usize {
     }
     let _ = fs::remove_file(&path);
     reconciled
+}
+
+/// Skill names from `candidates` cited in recent observation signatures or
+/// details (case-insensitive). Shared by routing and composition reconcile.
+fn cited_skill_names(claude_home: &Path, candidates: &HashSet<String>) -> HashSet<String> {
+    let mut cited = HashSet::new();
+    if candidates.is_empty() {
+        return cited;
+    }
+    if let Ok(rows) = crate::runner::observation::iter_recent_rows_at(claude_home, 1) {
+        for row in rows {
+            let haystack = format!("{}\n{}", row.signature, row.detail).to_ascii_lowercase();
+            for name in candidates {
+                if haystack.contains(&name.to_ascii_lowercase()) {
+                    cited.insert(name.clone());
+                }
+            }
+        }
+    }
+    cited
+}
+
+/// Staged composition decision awaiting session-end outcome reconcile.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct PendingComposition {
+    kind: String,
+    skills: Vec<String>,
+    considered: Vec<String>,
+    confidence: f64,
+    matched_at_secs: u64,
+}
+
+const COMPOSITION_PENDING_FILE: &str = "composition-pending.json";
+const COMPOSITION_PENDING_MAX: usize = 200;
+
+fn composition_pending_path(claude_home: &Path) -> PathBuf {
+    state_directory(claude_home).join(COMPOSITION_PENDING_FILE)
+}
+
+fn record_pending_composition(
+    claude_home: &Path,
+    kind: &str,
+    skills: &[String],
+    considered: &[String],
+    confidence: f64,
+) {
+    let path = composition_pending_path(claude_home);
+    let mut pending: Vec<PendingComposition> = fs::read_to_string(&path)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default();
+    pending.push(PendingComposition {
+        kind: kind.to_string(),
+        skills: skills.to_vec(),
+        considered: considered.to_vec(),
+        confidence: confidence.clamp(0.0, 1.0),
+        matched_at_secs: now_unix_secs(),
+    });
+    if pending.len() > COMPOSITION_PENDING_MAX {
+        let drain = pending.len() - COMPOSITION_PENDING_MAX;
+        pending.drain(..drain);
+    }
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if let Ok(text) = serde_json::to_string(&pending) {
+        let _ = fs::write(&path, text);
+    }
+}
+
+/// Aggregate composition accuracy for the calibration report.
+#[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
+struct CompositionCalibration {
+    total: usize,
+    correct: usize,
+    compose_total: usize,
+    compose_correct: usize,
+}
+
+fn composition_calibration_file(claude_home: &Path) -> PathBuf {
+    state_directory(claude_home).join("composition-calibration.json")
+}
+
+fn load_composition_calibration(claude_home: &Path) -> CompositionCalibration {
+    fs::read_to_string(composition_calibration_file(claude_home))
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
+}
+
+/// Reconcile staged composition decisions: compose needs every chosen skill
+/// cited, single needs its skill cited, generic needs none considered cited.
+pub fn reconcile_composition_outcomes(claude_home: &Path) -> usize {
+    let path = composition_pending_path(claude_home);
+    let text = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(_) => return 0,
+    };
+    let pending: Vec<PendingComposition> = serde_json::from_str(&text).unwrap_or_default();
+    if pending.is_empty() {
+        return 0;
+    }
+    let mut names = HashSet::new();
+    for entry in &pending {
+        names.extend(entry.skills.iter().cloned());
+        names.extend(entry.considered.iter().cloned());
+    }
+    let cited = cited_skill_names(claude_home, &names);
+    let mut aggregate = load_composition_calibration(claude_home);
+    let mut reconciled = 0usize;
+    for entry in &pending {
+        let correct = match entry.kind.as_str() {
+            "compose" => !entry.skills.is_empty() && entry.skills.iter().all(|s| cited.contains(s)),
+            "single" => entry.skills.first().is_some_and(|s| cited.contains(s)),
+            _ => !entry.considered.iter().any(|s| cited.contains(s)),
+        };
+        aggregate.total = aggregate.total.saturating_add(1);
+        if correct {
+            aggregate.correct = aggregate.correct.saturating_add(1);
+        }
+        if entry.kind == "compose" {
+            aggregate.compose_total = aggregate.compose_total.saturating_add(1);
+            if correct {
+                aggregate.compose_correct = aggregate.compose_correct.saturating_add(1);
+            }
+        }
+        reconciled += 1;
+    }
+    if let Some(parent) = composition_calibration_file(claude_home).parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if let Ok(text) = serde_json::to_string_pretty(&aggregate) {
+        let _ = fs::write(composition_calibration_file(claude_home), text);
+    }
+    let _ = fs::remove_file(&path);
+    reconciled
+}
+
+/// Composition precision for the calibration report.
+pub fn composition_calibration_stats(claude_home: &Path) -> (usize, f64, usize, f64) {
+    let aggregate = load_composition_calibration(claude_home);
+    let precision = if aggregate.total > 0 {
+        aggregate.correct as f64 / aggregate.total as f64
+    } else {
+        1.0
+    };
+    let compose_precision = if aggregate.compose_total > 0 {
+        aggregate.compose_correct as f64 / aggregate.compose_total as f64
+    } else {
+        1.0
+    };
+    (
+        aggregate.total,
+        precision,
+        aggregate.compose_total,
+        compose_precision,
+    )
 }
 
 /// Score floor as a fraction of `ln(corpus_size)`. The floor must scale with
@@ -409,11 +560,30 @@ pub fn match_skill_for_prompt_with_details(
     // a readable SKILL.md on disk (catalog race, partial install, renamed dir).
     let resolved = resolved.and_then(|found| {
         let path = resolve_skill_path(claude_home, &found.name)?;
-        if path.is_file() {
-            Some(found)
-        } else {
-            None
+        if !path.is_file() {
+            return None;
         }
+        // Catalog-tied decay: a skill file edited after its calibration
+        // record halves that skill once (fail-open, rare path).
+        let mtime_ms = path
+            .metadata()
+            .ok()
+            .and_then(|meta| meta.modified().ok())
+            .and_then(|modified| {
+                modified
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .ok()
+                    .map(|elapsed| elapsed.as_millis() as u64)
+            })
+            .unwrap_or(0);
+        if mtime_ms > 0 {
+            crate::utility::decision::decay_calibration_for_skill_file(
+                claude_home,
+                &found.name,
+                mtime_ms,
+            );
+        }
+        Some(found)
     });
     // Calibrate confidence using empirical accuracy history (J03)
     let mut resolved = resolved;
@@ -515,9 +685,19 @@ pub fn match_skill_composition_for_prompt(
             *score = (*score / top).clamp(0.0, 1.0);
         }
     }
-    Some(crate::utility::decision::evaluate_skill_composition(
-        &scored,
-    ))
+    let decision = crate::utility::decision::evaluate_skill_composition(&scored);
+    let (kind, skills) = match &decision.choice {
+        crate::utility::decision::SkillCompositionChoice::Compose(pair) => {
+            ("compose", pair.clone())
+        }
+        crate::utility::decision::SkillCompositionChoice::Single(name) => {
+            ("single", vec![name.clone()])
+        }
+        crate::utility::decision::SkillCompositionChoice::Generic => ("generic", Vec::new()),
+    };
+    let considered: Vec<String> = candidates.iter().map(|skill| skill.name.clone()).collect();
+    record_pending_composition(claude_home, kind, &skills, &considered, decision.confidence);
+    Some(decision)
 }
 
 /// Public resolve of `<claude_home>/skills/<name>/SKILL.md` when the skill is
@@ -3618,6 +3798,42 @@ mod tests {
         assert_eq!(reconcile_skill_match_outcomes(&home), 1);
         let rate = crate::utility::skill_usage::skill_success_rate(&home, "reviewer");
         assert!(rate > 0.5, "cited routing must record success, got {rate}");
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn reconcile_composition_outcomes_scores_choice_kinds() {
+        let home = home_with_skills(
+            "comp-out",
+            &[
+                ("alpha-tool", "alpha widget forging furnaces"),
+                ("beta-tool", "beta gadget welding workshops"),
+            ],
+        );
+        let a = "alpha-tool".to_string();
+        let b = "beta-tool".to_string();
+        let pair = [a.clone(), b.clone()];
+        let solo = [a.clone()];
+        record_pending_composition(&home, "compose", &pair, &pair, 0.85);
+        record_pending_composition(&home, "single", &solo, &solo, 0.9);
+        record_pending_composition(&home, "generic", &[], &pair, 0.8);
+        // Only alpha-tool is cited: single correct, compose and generic wrong.
+        crate::runner::observation::record_observation_from_parts(
+            &home,
+            "Bash",
+            r#"{"command":"keel skill_get alpha-tool"}"#,
+            "/",
+            "sess-comp",
+            false,
+        )
+        .expect("record observation");
+        assert_eq!(reconcile_composition_outcomes(&home), 3);
+        let (total, precision, compose_total, compose_precision) =
+            composition_calibration_stats(&home);
+        assert_eq!((total, compose_total), (3, 1));
+        assert!((precision - 1.0 / 3.0).abs() < 1e-12, "got {precision}");
+        assert_eq!(compose_precision, 0.0);
+        assert_eq!(reconcile_composition_outcomes(&home), 0);
         let _ = fs::remove_dir_all(&home);
     }
 }
