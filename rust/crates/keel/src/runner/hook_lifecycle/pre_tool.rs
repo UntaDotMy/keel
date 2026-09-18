@@ -854,31 +854,16 @@ pub(crate) const GATE_NAME_ANVIL: &str = "anvil";
 /// 1. Iron Law gate (marker-based evidence)
 /// 2. Plan gate (blocked tasks or not ready)
 /// 3. Anvil gate (compile + dry-run required for edits)
-pub(crate) fn pre_tool_gate_decision_with_markdown_context(
+pub(crate) fn evaluate_plan_gate(
     session_id: &str,
     tool_name: &str,
-    command: Option<&str>,
     cwd: &str,
-    markdown_only_edit: bool,
 ) -> PreToolGateDecision {
-    if !tool_is_iron_law_gated(tool_name, command) {
-        return PreToolGateDecision::allow();
-    }
-
-    // Iron Law gate - no caching since it's a fast filesystem check and session
-    // state can change between calls (e.g., from mark_iron_law_satisfied)
-    let iron_law = iron_law_gate_decision(session_id);
-    if iron_law.is_denied() {
-        return iron_law;
-    }
-
-    // Jev-inspired: check cache for plan gate (if applicable)
     if let Ok(plan_id) =
         std::env::var("KEEL_PLAN_ID").or_else(|_| std::env::var("CLAUDE_SKILLS_PLAN"))
     {
         let plan = plan_id.trim();
-        if !plan.is_empty() && is_edit_class_tool(tool_name) && !markdown_only_edit {
-            // Cache key includes plan_id since plan state can change
+        if !plan.is_empty() && is_edit_class_tool(tool_name) {
             let plan_cache_key = &format!("{}:{}", tool_name, plan);
             let plan_cached = cached_gate_decision(GATE_NAME_PLAN, plan_cache_key, session_id);
             if let Some(cached) = plan_cached {
@@ -914,9 +899,15 @@ pub(crate) fn pre_tool_gate_decision_with_markdown_context(
             }
         }
     }
+    PreToolGateDecision::allow()
+}
 
-    // Jev-inspired: check cache for anvil gate (if applicable)
-    if anvil_gate_enabled() && is_edit_class_tool(tool_name) && !markdown_only_edit {
+pub(crate) fn evaluate_anvil_gate(
+    session_id: &str,
+    tool_name: &str,
+    cwd: &str,
+) -> PreToolGateDecision {
+    if anvil_gate_enabled() && is_edit_class_tool(tool_name) {
         let anvil_cached = cached_gate_decision(GATE_NAME_ANVIL, tool_name, session_id);
         if let Some(cached) = anvil_cached {
             if cached.is_denied() {
@@ -937,6 +928,59 @@ pub(crate) fn pre_tool_gate_decision_with_markdown_context(
             cache_gate_decision(GATE_NAME_ANVIL, tool_name, session_id, &decision);
             return decision;
         }
+    }
+    PreToolGateDecision::allow()
+}
+
+/// Decide whether to allow a tool call based on all applicable gates.
+/// Returns `GateDecision` with explicit confidence and escalation flags.
+///
+/// Checks (evaluated in parallel for edit tools per J10):
+/// 1. Iron Law gate (marker-based evidence)
+/// 2. Plan gate (blocked tasks or not ready)
+/// 3. Anvil gate (compile + dry-run required for edits)
+pub(crate) fn pre_tool_gate_decision_with_markdown_context(
+    session_id: &str,
+    tool_name: &str,
+    command: Option<&str>,
+    cwd: &str,
+    markdown_only_edit: bool,
+) -> PreToolGateDecision {
+    if !tool_is_iron_law_gated(tool_name, command) {
+        return PreToolGateDecision::allow();
+    }
+
+    // J10: When multiple gates apply to an edit-class tool, evaluate independent
+    // checks in parallel using std::thread::scope
+    if is_edit_class_tool(tool_name) && !markdown_only_edit {
+        let (iron_law, plan_dec, anvil_dec) = std::thread::scope(|s| {
+            let h1 = s.spawn(|| iron_law_gate_decision(session_id));
+            let h2 = s.spawn(|| evaluate_plan_gate(session_id, tool_name, cwd));
+            let h3 = s.spawn(|| evaluate_anvil_gate(session_id, tool_name, cwd));
+            (
+                h1.join().unwrap_or_else(|_| PreToolGateDecision::allow()),
+                h2.join().unwrap_or_else(|_| PreToolGateDecision::allow()),
+                h3.join().unwrap_or_else(|_| PreToolGateDecision::allow()),
+            )
+        });
+
+        // Precedence: Iron Law deny > Plan deny > Anvil deny
+        if iron_law.is_denied() {
+            return iron_law;
+        }
+        if plan_dec.is_denied() {
+            return plan_dec;
+        }
+        if anvil_dec.is_denied() {
+            return anvil_dec;
+        }
+        return PreToolGateDecision::allow();
+    }
+
+    // Single-gate path for non-edit tools (e.g. non-keel shell commands or Agent/Task)
+    let iron_law = iron_law_gate_decision(session_id);
+    if iron_law.is_denied() {
+        return iron_law;
     }
 
     PreToolGateDecision::allow()
@@ -1027,6 +1071,28 @@ pub(super) fn run_hook_pre_tool_use(
     // Compaction rewrite only applies to shell tools.
     if !is_shell_tool_name(tool_name) {
         return 0;
+    }
+    // J06: Shell destructive probability & risk action via Noul evaluation
+    let noul = crate::utility::decision::evaluate_shell_command_noul(command);
+    match noul.action {
+        crate::utility::decision::ShellRiskAction::Block => {
+            let reason = format!(
+                "[keel] Destructive command blocked (prob: {:.2}): {}",
+                noul.probability, noul.reason
+            );
+            emit_pretool_deny(&reason, standard_output, standard_error);
+            return 0;
+        }
+        crate::utility::decision::ShellRiskAction::Escalate => {
+            let escalation = crate::utility::decision::format_gate_escalation(
+                "shell_noul",
+                &noul.reason,
+                noul.confidence,
+            );
+            emit_pretool_deny(&escalation, standard_output, standard_error);
+            return 0;
+        }
+        _ => {}
     }
 
     // Inspect EVERY segment of a compound command, not just the first supported

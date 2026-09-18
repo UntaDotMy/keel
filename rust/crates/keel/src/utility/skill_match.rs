@@ -203,12 +203,94 @@ pub fn match_skill_for_prompt_with_details(
             None
         }
     });
+    // Calibrate confidence using empirical accuracy history (J03)
+    let mut resolved = resolved;
+    if let Some(found) = &mut resolved {
+        found.confidence = crate::utility::decision::get_calibrated_confidence(
+            claude_home,
+            &found.name,
+            found.confidence,
+        );
+    }
     // Record match-usage telemetry for skill_list. Fail-open: a write error
     // inside record_skill_match never breaks the match path.
     if let Some(found) = &resolved {
         crate::utility::skill_usage::record_skill_match(claude_home, &found.name);
     }
     resolved
+}
+
+/// Resolve skill composition (J11) for a prompt across installed skills.
+pub fn match_skill_composition_for_prompt(
+    claude_home: &Path,
+    prompt: &str,
+) -> Option<crate::utility::decision::SkillCompositionDecision> {
+    if prompt.trim().is_empty() {
+        return None;
+    }
+    let corpus = load_skill_corpus_for_home(claude_home);
+    if corpus.terms.is_empty() {
+        return None;
+    }
+    let prompt_tokens = tokenize(prompt);
+    if prompt_tokens.is_empty() {
+        return None;
+    }
+    let candidates: Vec<&SkillTerms> = corpus
+        .terms
+        .iter()
+        .filter(|skill| !is_learned_skill(&skill.name))
+        .collect();
+    if candidates.is_empty() {
+        return None;
+    }
+    let mut document_frequency: HashMap<&str, usize> = HashMap::new();
+    for skill in &candidates {
+        for token in &skill.all_tokens {
+            *document_frequency.entry(token.as_str()).or_insert(0) += 1;
+        }
+    }
+    let corpus_size = candidates.len() as f64;
+    let idf = |token: &str| -> f64 {
+        let df = document_frequency.get(token).copied().unwrap_or(0);
+        if df == 0 {
+            0.0
+        } else {
+            (corpus_size / df as f64).ln()
+        }
+    };
+    let min_score = MIN_SCORE_FACTOR * corpus_size.ln();
+    let mut scored: Vec<(String, f64)> = Vec::new();
+    for skill in &candidates {
+        let mut score = 0.0;
+        let mut has_distinctive = false;
+        for token in &prompt_tokens {
+            if !skill.all_tokens.contains(token) {
+                continue;
+            }
+            let is_own_name_token = skill.name_tokens.contains(token);
+            let weight = if is_own_name_token {
+                (corpus_size).ln() * NAME_TOKEN_BOOST
+            } else {
+                idf(token)
+            };
+            score += weight;
+            let df = document_frequency.get(token.as_str()).copied().unwrap_or(0);
+            if is_own_name_token || (df > 0 && df <= DISTINCTIVE_DF_MAX) {
+                has_distinctive = true;
+            }
+        }
+        if score > 0.0 && score >= min_score && has_distinctive {
+            scored.push((skill.name.clone(), score));
+        }
+    }
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    if scored.is_empty() {
+        return None;
+    }
+    Some(crate::utility::decision::evaluate_skill_composition(
+        &scored,
+    ))
 }
 
 /// Public resolve of `<claude_home>/skills/<name>/SKILL.md` when the skill is
@@ -3096,5 +3178,11 @@ mod tests {
             None,
             "ambiguous tie must stay silent"
         );
+    }
+    #[test]
+    fn skill_composition_returns_none_for_empty_prompt() {
+        let temp = std::env::temp_dir().join(format!("keel-skill-comp-{}", std::process::id()));
+        assert!(match_skill_composition_for_prompt(&temp, "").is_none());
+        assert!(match_skill_composition_for_prompt(&temp, "   ").is_none());
     }
 }

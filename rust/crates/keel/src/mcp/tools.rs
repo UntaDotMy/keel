@@ -1413,6 +1413,14 @@ fn handle_tools_call_with_executor(
     ));
     handle_tools_call_cancellable_with_context_and_executor(params, None, context, executor)
 }
+pub(crate) fn normalize_mcp_tool_name(name: &str) -> &str {
+    for prefix in ["mcp__keel__", "mcp__keel_", "keel__", "keel_"] {
+        if let Some(stripped) = name.strip_prefix(prefix) {
+            return stripped;
+        }
+    }
+    name
+}
 
 fn handle_tools_call_cancellable_with_context_and_executor(
     params: &Value,
@@ -1424,13 +1432,14 @@ fn handle_tools_call_cancellable_with_context_and_executor(
         code: JSON_RPC_INVALID_PARAMS,
         message: "tools/call params must be an object".to_string(),
     })?;
-    let tool_name = object
+    let raw_tool_name = object
         .get("name")
         .and_then(Value::as_str)
         .ok_or_else(|| MethodError {
             code: JSON_RPC_INVALID_PARAMS,
             message: "tools/call params.name is required".to_string(),
         })?;
+    let tool_name = normalize_mcp_tool_name(raw_tool_name);
     let arguments = object.get("arguments").cloned().unwrap_or(Value::Null);
 
     // Unknown tools fail fast without starting the deadline worker.
@@ -1905,7 +1914,8 @@ type McpToolHandler = fn(&Value) -> Result<String, String>;
 /// Resolve the handler for a tool name without invoking it. Used by dispatch and
 /// by the parity test so completeness is proven without re-exec side effects.
 fn mcp_tool_handler(name: &str) -> Option<McpToolHandler> {
-    Some(match name {
+    let clean = normalize_mcp_tool_name(name);
+    Some(match clean {
         "recall" => tool_recall,
         "system_map" => tool_system_map,
         "run_command" => tool_run_command,
@@ -1943,16 +1953,19 @@ fn mcp_tool_handler(name: &str) -> Option<McpToolHandler> {
         "skill_eval" => tool_skill_eval,
         "design_intelligence" => tool_design_intelligence,
         "stats" => tool_stats,
+        "decision" => tool_decision,
         _ => return None,
     })
 }
 
 fn is_known_mcp_tool(name: &str) -> bool {
-    mcp_tool_handler(name).is_some()
+    let clean = normalize_mcp_tool_name(name);
+    mcp_tool_handler(clean).is_some()
 }
 
 fn dispatch_mcp_tool(tool_name: &str, arguments: &Value) -> Result<String, String> {
-    match mcp_tool_handler(tool_name) {
+    let clean = normalize_mcp_tool_name(tool_name);
+    match mcp_tool_handler(clean) {
         Some(handler) => handler(arguments),
         None => Err(format!("Unknown tool: {tool_name}")),
     }
@@ -6116,6 +6129,10 @@ fn tool_stats(arguments: &Value) -> Result<String, String> {
         crate::utility::run_stats_command(&owned, out, err)
     })
 }
+/// Jev-inspired typed decision operations (score, noul, choice, calibrate, review-feedback).
+fn tool_decision(arguments: &Value) -> Result<String, String> {
+    crate::utility::decision::handle_decision_tool(arguments)
+}
 
 /// Inspect the compaction rewrite for a shell command (no execution).
 fn tool_rewrite(arguments: &Value) -> Result<String, String> {
@@ -9210,5 +9227,56 @@ mod tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(&id);
+    }
+    #[test]
+    fn normalize_mcp_tool_name_strips_known_host_prefixes() {
+        assert_eq!(normalize_mcp_tool_name("recall"), "recall");
+        assert_eq!(
+            normalize_mcp_tool_name("mcp__keel__system_map"),
+            "system_map"
+        );
+        assert_eq!(
+            normalize_mcp_tool_name("mcp__keel_system_map"),
+            "system_map"
+        );
+        assert_eq!(normalize_mcp_tool_name("keel__recall"), "recall");
+        assert_eq!(normalize_mcp_tool_name("keel_run_command"), "run_command");
+        assert_eq!(normalize_mcp_tool_name("decision"), "decision");
+        assert_eq!(normalize_mcp_tool_name("keel__decision"), "decision");
+    }
+
+    #[test]
+    fn decision_tool_evaluates_noul_and_score() {
+        let noul_res = tool_decision(&json!({
+            "action": "noul",
+            "command": "cargo test"
+        }))
+        .expect("noul tool call ok");
+        assert!(noul_res.contains("\"action\": \"Allow\"") || noul_res.contains("\"Allow\""));
+
+        let score_res = tool_decision(&json!({
+            "action": "score",
+            "operation": "review",
+            "scores": {
+                "correctness": 0.9,
+                "security": 0.95,
+                "readability": 0.85,
+                "test_coverage": 0.85,
+                "error_handling": 0.85
+            },
+            "confidence": 0.85
+        }))
+        .expect("score tool call ok");
+        assert!(score_res.contains("\"verdict\": \"Pass\"") || score_res.contains("\"Pass\""));
+
+        let choice_res = tool_decision(&json!({
+            "action": "choice",
+            "candidates": [
+                ["reviewer", 0.85],
+                ["qa-and-automation-engineer", 0.75]
+            ]
+        }))
+        .expect("choice tool call ok");
+        assert!(choice_res.contains("Compose") || choice_res.contains("Single"));
     }
 }

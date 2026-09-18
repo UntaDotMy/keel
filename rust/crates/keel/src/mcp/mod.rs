@@ -1866,14 +1866,8 @@ fn handle_initialize_request(
     let requested = params
         .get("protocolVersion")
         .and_then(Value::as_str)
-        .unwrap_or("");
-    if requested.is_empty() {
-        return error_response(
-            request_id,
-            JSON_RPC_INVALID_PARAMS,
-            "initialize params.protocolVersion must be a non-empty string",
-        );
-    }
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or("legacy");
     if !is_negotiable_initialize_version(requested) {
         return unsupported_version_response(request_id, requested);
     }

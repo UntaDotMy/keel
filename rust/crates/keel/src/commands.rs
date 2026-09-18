@@ -264,6 +264,9 @@ impl Application {
                 standard_output,
                 standard_error,
             ),
+            "decision" => {
+                utility::run_decision_command(command_arguments, standard_output, standard_error)
+            }
             "plan" => utility::run_plan_command(command_arguments, standard_output, standard_error),
             "memory" => utility::run_memory_command(
                 "memory",
