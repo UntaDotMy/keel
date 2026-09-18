@@ -798,9 +798,10 @@ fn invalidate_recall_paths(connection: &mut Connection, paths: &[&Path]) -> Resu
 
 /// Snapshot of recall-index health used by surfaces that just need to read
 /// the current document count, last sync timestamp, and on-disk index path.
-/// Built on top of the same `sync_recall_index` + `count_documents` pair the
-/// `recall status` command uses, so callers see exactly the values an explicit
-/// status invocation would print.
+/// Read directly from the stored index with no filesystem sync; indexing is a
+/// write-path concern owned by `reindex` and `reindex_after_write_paths`, so
+/// callers see exactly the values an explicit `recall status` invocation
+/// would print.
 #[derive(Debug, Clone)]
 pub struct RecallStatusSnapshot {
     pub claude_home: PathBuf,

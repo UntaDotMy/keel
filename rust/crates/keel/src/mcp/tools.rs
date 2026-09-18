@@ -44,7 +44,8 @@ use crate::runtime::{display_path, resolve_claude_home, safe_path_segment};
 use crate::utility::memory::refresh_system_map_with_status;
 use crate::utility::memory_families::family_counts;
 use crate::utility::recall::{
-    recall_workspace_context, search_recall_index_with_options, RecallQueryOptions,
+    recall_workspace_context, reindex_after_write_paths, search_recall_index_with_options,
+    RecallQueryOptions,
 };
 use crate::utility::record_store::{current_timestamp_millis, format_timestamp_iso8601};
 use crate::utility::skill_match::{
@@ -4447,6 +4448,8 @@ fn tool_brief_create(arguments: &Value) -> Result<String, String> {
     );
     let path =
         write_brief(&claude_home, &brief).map_err(|error| format!("brief_create: {error}"))?;
+    // why: `memory_status` reads the stored index without syncing, so index here (mirrors CLI `working-brief write`).
+    let _ = reindex_after_write_paths(&claude_home, &[path.as_path()]);
     // Multi-piece on-ramp: 2+ criteria means drive them through Anvil.
     let mut payload = json!({
         "written": true,
@@ -8469,6 +8472,40 @@ mod tests {
         assert_eq!(result["isError"], json!(true));
         let text = result["content"][0]["text"].as_str().unwrap_or("");
         assert!(text.contains("missing request"), "text: {text}");
+    }
+
+    #[test]
+    fn brief_create_is_visible_to_memory_status_without_explicit_reindex() {
+        // Regression: `memory_status` reads without syncing, so `brief_create` must index its write (smoke needs documents >= 1).
+        let _env = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let home = crate::test_support::unique_temp_dir("keel-mcp-brief-create-index");
+        let previous = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
+        std::env::set_var("CLAUDE_TARGET_OVERRIDE", home.as_path());
+
+        let created = handle_tools_call(&json!({
+            "name": "brief_create",
+            "arguments": { "id": "release-smoke-marker", "request": "packaged release smoke memory marker keelsmoke7est" }
+        }))
+        .expect("brief_create envelope");
+        assert_eq!(created["isError"], json!(false), "body: {created}");
+
+        let status = handle_tools_call(&json!({ "name": "memory_status", "arguments": {} }))
+            .expect("memory_status envelope");
+        assert_eq!(status["isError"], json!(false), "body: {status}");
+        let text = status["content"][0]["text"].as_str().unwrap_or("");
+        let payload: Value = serde_json::from_str(text).expect("status text is JSON");
+        let documents = payload["index"]["documents"].as_u64().unwrap_or(0);
+        assert!(
+            documents >= 1,
+            "brief_create must index its write so memory_status sees it: {text}"
+        );
+
+        match previous {
+            Some(value) => std::env::set_var("CLAUDE_TARGET_OVERRIDE", value),
+            None => std::env::remove_var("CLAUDE_TARGET_OVERRIDE"),
+        }
     }
 
     #[test]
