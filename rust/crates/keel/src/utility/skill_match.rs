@@ -514,18 +514,38 @@ pub fn match_skill_for_prompt(claude_home: &Path, prompt: &str) -> Option<SkillM
     })
 }
 
+/// Curated confirmation for the J03 confidence gate: a sub-0.60 statistical
+/// winner still routes when the independent curated phrase tier names the
+/// same skill and no outcomes were ever recorded for it. Recorded failures
+/// always keep the gate shut: learned evidence beats phrase agreement.
+fn confirmed_by_curated_tier(prompt: &str, skill_name: &str, claude_home: &Path) -> bool {
+    if curated_skill_for_prompt(prompt) != Some(skill_name) {
+        return false;
+    }
+    let record = crate::utility::decision::load_skill_calibration(claude_home, skill_name);
+    record.skill_totals().0 == 0
+}
+
 /// Resolve and record a cost-aware activation decision for an installed corpus.
 /// The returned details are bounded S0 telemetry; skill bodies remain on demand.
 pub fn match_skill_for_prompt_with_details(
     claude_home: &Path,
     prompt: &str,
 ) -> Option<SkillSelectionDecision> {
-    // J03: sub-0.60 calibrated confidence never auto-applies (stay silent).
+    // J03 gate: silence sub-0.60 matches unless curated-confirmed on clean history.
     fn apply_confidence_gate(
         decision: Option<SkillSelectionDecision>,
+        prompt: &str,
+        claude_home: &Path,
     ) -> Option<SkillSelectionDecision> {
         match decision {
-            Some(found) if found.confidence < 0.60 => None,
+            Some(found) if found.confidence < 0.60 => {
+                if confirmed_by_curated_tier(prompt, &found.name, claude_home) {
+                    Some(found)
+                } else {
+                    None
+                }
+            }
             gated => gated,
         }
     }
@@ -537,7 +557,7 @@ pub fn match_skill_for_prompt_with_details(
     let cache_key = skill_routing_cache_key(&skills_dir, prompt);
     if let Some(key) = &cache_key {
         if let Some(cached) = skill_routing_cache_get(key, now_unix_secs()) {
-            let gated = apply_confidence_gate(cached);
+            let gated = apply_confidence_gate(cached, prompt, claude_home);
             if let Some(found) = &gated {
                 crate::utility::skill_usage::record_skill_match(claude_home, &found.name);
                 record_pending_skill_match(claude_home, &found.name, found.confidence);
@@ -594,7 +614,7 @@ pub fn match_skill_for_prompt_with_details(
             found.confidence,
         );
     }
-    let resolved = apply_confidence_gate(resolved);
+    let resolved = apply_confidence_gate(resolved, prompt, claude_home);
     // Record match-usage telemetry for skill_list. Fail-open: a write error
     // inside record_skill_match never breaks the match path.
     // J08: stage the (skill, predicted confidence) pair for session-end
@@ -3780,6 +3800,66 @@ mod tests {
         );
         let _ = fs::remove_dir_all(&clean);
         let _ = fs::remove_dir_all(&poisoned);
+    }
+
+    #[test]
+    fn curated_confirmation_needs_agreement_and_clean_history() {
+        let home = home_with_skills("confirm", &[("reviewer", "review code diffs carefully")]);
+        assert!(confirmed_by_curated_tier(
+            "please review this diff",
+            "reviewer",
+            &home
+        ));
+        assert!(!confirmed_by_curated_tier(
+            "please review this diff",
+            "planner",
+            &home
+        ));
+        assert!(!confirmed_by_curated_tier(
+            "what time is it",
+            "reviewer",
+            &home
+        ));
+        for _ in 0..5 {
+            crate::utility::decision::record_and_save_skill_calibration(
+                &home, "reviewer", 0.8, false,
+            )
+            .expect("record calibration");
+        }
+        assert!(!confirmed_by_curated_tier(
+            "please review this diff",
+            "reviewer",
+            &home
+        ));
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn curated_confirmation_routes_weak_margin_match() {
+        // Release-rail regression: curated-confirmed weak-margin winner routes.
+        let home = home_with_skills(
+            "confirm-weak",
+            &[
+                ("reviewer", "review code diffs carefully before merge"),
+                ("review-assistant", "help review code diffs and changes"),
+                ("planner", "plan project tasks roadmaps"),
+            ],
+        );
+        let prompt = "review this code before we merge the feature";
+        assert_eq!(
+            curated_skill_for_prompt(prompt),
+            Some("reviewer"),
+            "probe prompt must hit the curated tier"
+        );
+        let found = match_skill_for_prompt_with_details(&home, prompt);
+        let found = found.expect("confirmed weak-margin match must route");
+        assert_eq!(found.name, "reviewer");
+        assert!(
+            found.confidence < 0.60,
+            "probe must stay below the gate, got {}",
+            found.confidence
+        );
+        let _ = fs::remove_dir_all(&home);
     }
 
     #[test]
