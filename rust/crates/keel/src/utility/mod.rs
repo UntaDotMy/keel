@@ -5,9 +5,11 @@
 
 pub mod anvil;
 pub mod architecture;
+pub mod calibration;
 pub mod code_graph;
 pub mod code_search;
 pub mod config_audit;
+pub mod decision;
 pub mod design_intelligence;
 pub mod eval;
 pub(crate) mod fixed_context;
@@ -38,6 +40,7 @@ pub use code_graph::run_code_graph_command;
 pub use code_search::run_code_index_command;
 pub use code_search::run_code_search_command;
 pub use config_audit::run_config_audit_command;
+pub use decision::run_decision_command;
 pub use design_intelligence::run_design_intelligence_command;
 pub use eval::run_eval_command;
 pub use gain::run_gain_command;

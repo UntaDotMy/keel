@@ -283,10 +283,10 @@ fn fixed_context_ledger_recomputes_every_ratified_surface() {
     assert_eq!(eager + deferred, tool_count);
     assert_eq!(eager, 17, "Tiered MCP catalog advertises 17 eager tools");
     assert_eq!(
-        deferred, 20,
-        "Tiered MCP catalog defers 20 specialist tools"
+        deferred, 21,
+        "Tiered MCP catalog defers 21 specialist tools"
     );
-    assert_eq!(tool_count, 37, "Total MCP catalog tools count is 37");
+    assert_eq!(tool_count, 38, "Total MCP catalog tools count is 38");
 
     let warning = by_surface["pointer.warning_status"];
     assert!(

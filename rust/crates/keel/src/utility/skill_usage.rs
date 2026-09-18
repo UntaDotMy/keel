@@ -52,14 +52,7 @@ pub fn skill_use_count(claude_home: &Path, skill_name: &str) -> u64 {
         .unwrap_or(0)
 }
 
-/// Record a known activation outcome for future cost-aware routing.
-///
-/// Keel has no reliable "did this skill help" signal yet, so nothing in the
-/// production path calls this writer and `skill_success_rate` consequently
-/// returns its neutral prior. The reader, the weights, and this writer are kept
-/// so an outcome source can populate them without a schema change; until then
-/// historical success is inert rather than wrong.
-#[allow(dead_code)]
+/// Record a known activation outcome; session-end reconcile writes it.
 pub fn record_skill_outcome(claude_home: &Path, skill_name: &str, success: bool) -> u64 {
     let outcome = if success { "success" } else { "failure" };
     let path = outcome_file(claude_home, skill_name, outcome);
@@ -83,9 +76,10 @@ pub fn skill_success_rate(claude_home: &Path, skill_name: &str) -> f64 {
             .and_then(|text| text.trim().parse::<u64>().ok())
             .unwrap_or(0)
     };
-    let success = read("success") as f64;
-    let failure = read("failure") as f64;
-    (success + 1.0) / (success + failure + 2.0)
+    let success = read("success");
+    let failure = read("failure");
+    let total = success.saturating_add(failure);
+    crate::utility::calibration::laplace_rate(total as usize, success as usize)
 }
 
 #[cfg(test)]

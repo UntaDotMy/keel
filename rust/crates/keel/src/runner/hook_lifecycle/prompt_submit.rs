@@ -18,14 +18,18 @@ pub(crate) fn user_prompt_submit_context(prompt_text: &str) -> String {
     // Name one matched skill; its body remains on-demand instead of becoming
     // recurring per-prompt context.
     if let (false, Some(home)) = (prompt_text.trim().is_empty(), claude_home.as_ref()) {
-        if let Some(matched) =
-            crate::utility::skill_match::match_skill_for_prompt(home, prompt_text)
+        let single = crate::utility::skill_match::match_skill_for_prompt(home, prompt_text);
+        let single_name = single.as_ref().map(|matched| matched.name.clone());
+        let composition =
+            crate::utility::skill_match::match_skill_composition_for_prompt(home, prompt_text);
+        // Prepend second-then-first so the primary reads first.
+        for pointer in composition_skill_pointers(single_name.as_deref(), composition.as_ref())
+            .iter()
+            .rev()
         {
-            let pointer = skill_pointer_fallback(&matched.name);
             body = format!("{pointer}\n\n{body}");
         }
     }
-
     // Point repo/structure and memory questions at the MCP tools.
     if !prompt_text.trim().is_empty() {
         if let Some(pointer) = mcp_tool_pointer_for_prompt(prompt_text) {
@@ -46,6 +50,41 @@ pub(crate) fn user_prompt_submit_context(prompt_text: &str) -> String {
     } else {
         format!("{USER_PROMPT_ENFORCEMENT_STRIP}\n\n{body}")
     }
+}
+
+/// J11 injection rule as a pure function (pair needs single-match
+/// confirmation and confidence above 0.8) for unit testing.
+pub(super) fn composition_skill_pointers(
+    single_name: Option<&str>,
+    composition: Option<&crate::utility::decision::SkillCompositionDecision>,
+) -> Vec<String> {
+    let pair: Option<(&str, &str)> = match composition {
+        Some(decision) => match &decision.choice {
+            crate::utility::decision::SkillCompositionChoice::Compose(skills)
+                if skills.len() >= 2 && decision.confidence > 0.8 =>
+            {
+                Some((skills[0].as_str(), skills[1].as_str()))
+            }
+            _ => None,
+        },
+        None => None,
+    };
+    if let Some((first, second)) = pair {
+        let use_pair = first != second
+            && match single_name {
+                Some(name) => name == first || name == second,
+                None => true,
+            };
+        if use_pair {
+            return vec![
+                skill_pointer_fallback(first),
+                skill_pointer_fallback(second),
+            ];
+        }
+    }
+    single_name
+        .map(|name| vec![skill_pointer_fallback(name)])
+        .unwrap_or_default()
 }
 
 /// Fallback per-prompt skill pointer used when the matched skill's body cannot
@@ -471,4 +510,64 @@ pub(super) fn count_session_tool_timing_rows(claude_home: &Path, session_id: &st
                 .unwrap_or(false)
         })
         .count()
+}
+
+#[cfg(test)]
+mod composition_tests {
+    use super::*;
+    use crate::utility::decision::{SkillCompositionChoice, SkillCompositionDecision};
+
+    fn compose(skills: &[&str], confidence: f64) -> SkillCompositionDecision {
+        SkillCompositionDecision {
+            choice: SkillCompositionChoice::Compose(
+                skills.iter().map(|name| name.to_string()).collect(),
+            ),
+            skills: skills.iter().map(|name| name.to_string()).collect(),
+            confidence,
+            reasoning: "test".to_string(),
+        }
+    }
+
+    #[test]
+    fn composition_pointers_emit_confirmed_pair_primary_first() {
+        // J11 checks: strong composition both skills confirm inject both.
+        let pointers = composition_skill_pointers(
+            Some("reviewer"),
+            Some(&compose(&["reviewer", "qa-and-automation-engineer"], 0.85)),
+        );
+        assert_eq!(pointers.len(), 2);
+        assert!(pointers[0].contains("reviewer"));
+        assert!(pointers[1].contains("qa-and-automation-engineer"));
+    }
+
+    #[test]
+    fn composition_pointers_reject_low_confidence_and_strangers() {
+        // Below the 0.8 risk cap, or when the single match confirms neither
+        // member, the pair must not inject.
+        let weak = composition_skill_pointers(
+            Some("reviewer"),
+            Some(&compose(&["reviewer", "qa-and-automation-engineer"], 0.7)),
+        );
+        assert_eq!(weak.len(), 1);
+        assert!(weak[0].contains("reviewer"));
+        let stranger = composition_skill_pointers(
+            Some("reviewer"),
+            Some(&compose(&["backend", "security"], 0.9)),
+        );
+        assert_eq!(stranger.len(), 1);
+        assert!(stranger[0].contains("reviewer"));
+    }
+
+    #[test]
+    fn composition_pointers_cover_silent_paths() {
+        // Silent single + strong pair still injects (both domains scored);
+        // silent single with no composition injects nothing.
+        let silent_pair =
+            composition_skill_pointers(None, Some(&compose(&["backend", "security"], 0.9)));
+        assert_eq!(silent_pair.len(), 2);
+        let silent_none = composition_skill_pointers(None, None);
+        assert!(silent_none.is_empty());
+        let single_only = composition_skill_pointers(Some("reviewer"), None);
+        assert_eq!(single_only.len(), 1);
+    }
 }

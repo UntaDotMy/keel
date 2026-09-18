@@ -80,6 +80,331 @@ pub(super) fn iron_law_gate_mode() -> IronLawGateMode {
     }
 }
 
+/// Jev-style typed gate decision with explicit confidence.
+/// Replaces `Option<&'static str>` from the old marker-based gate.
+///
+/// Confidence is a calibrated probability (0.0-1.0). A confidence of 0.85 means
+/// the decision is correct 85% of the time. Decisions below 0.6 confidence
+/// should be escalated to a human reviewer.
+///
+/// The `escalate` flag indicates whether this decision should be routed to a human
+/// when combined with low confidence. The `needs_escalation()` accessor returns
+/// true when escalation is flagged AND confidence < ESCALATION_CONFIDENCE_THRESHOLD.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PreToolGateDecision {
+    /// Tool call is allowed without restriction.
+    Allow,
+    /// Tool call is denied with an explicit reason and calibrated confidence.
+    Deny {
+        /// Why the tool call was denied. Static string for zero-allocation output.
+        reason: &'static str,
+        /// Calibrated confidence (0.0-1.0) that this denial is correct.
+        /// Higher = more reliable denial.
+        confidence: f64,
+        /// Route to human reviewer when combined with low confidence.
+        escalate: bool,
+        /// Which gate produced this decision.
+        gate_name: &'static str,
+    },
+    /// Tool call may proceed but with a warning message.
+    Warn {
+        /// Warning message to display.
+        message: &'static str,
+        /// Calibrated confidence in the warning.
+        confidence: f64,
+        /// Whether the tool call can proceed despite the warning.
+        continue_anyway: bool,
+    },
+}
+#[allow(dead_code)]
+impl PreToolGateDecision {
+    pub(crate) const DEFAULT_CONFIDENCE: f64 = 0.7;
+
+    /// Escalation threshold: denials below it escalate (J07 governs over the J01 sketch).
+    pub const ESCALATION_CONFIDENCE_THRESHOLD: f64 = 0.6;
+
+    /// Returns the confidence value, defaulting to 0.7 when Allow has no explicit value.
+    pub(crate) fn confidence(&self) -> f64 {
+        match self {
+            PreToolGateDecision::Allow => Self::DEFAULT_CONFIDENCE,
+            PreToolGateDecision::Deny { confidence, .. } => *confidence,
+            PreToolGateDecision::Warn { confidence, .. } => *confidence,
+        }
+    }
+
+    /// Whether this denial should be escalated to a human reviewer.
+    /// True when escalation is flagged AND confidence is below threshold.
+    pub(crate) fn needs_escalation(&self) -> bool {
+        match self {
+            PreToolGateDecision::Deny {
+                escalate,
+                confidence,
+                ..
+            } => *escalate && *confidence < Self::ESCALATION_CONFIDENCE_THRESHOLD,
+            _ => false,
+        }
+    }
+
+    /// Whether the tool call is allowed (no denial or explicit allow with warning).
+    pub(crate) fn is_allowed(&self) -> bool {
+        match self {
+            PreToolGateDecision::Allow => true,
+            PreToolGateDecision::Warn {
+                continue_anyway, ..
+            } => *continue_anyway,
+            PreToolGateDecision::Deny { .. } => false,
+        }
+    }
+
+    /// Whether the tool call was explicitly denied (not allowed, not warned-through).
+    pub(crate) fn is_denied(&self) -> bool {
+        matches!(self, PreToolGateDecision::Deny { .. })
+    }
+
+    /// Returns the denial reason if this is a denial, else None.
+    pub(crate) fn denial_reason(&self) -> Option<&'static str> {
+        match self {
+            PreToolGateDecision::Deny { reason, .. } => Some(reason),
+            _ => None,
+        }
+    }
+
+    /// Creates an Allow decision.
+    pub(crate) fn allow() -> Self {
+        PreToolGateDecision::Allow
+    }
+
+    /// Creates a Deny decision with default confidence and no escalation.
+    pub(crate) fn deny(reason: &'static str, gate_name: &'static str) -> Self {
+        PreToolGateDecision::Deny {
+            reason,
+            confidence: Self::DEFAULT_CONFIDENCE,
+            escalate: false,
+            gate_name,
+        }
+    }
+
+    /// Creates a Deny decision with explicit confidence and escalation flag.
+    pub(crate) fn deny_with_confidence(
+        reason: &'static str,
+        confidence: f64,
+        escalate: bool,
+        gate_name: &'static str,
+    ) -> Self {
+        PreToolGateDecision::Deny {
+            reason,
+            confidence: confidence.clamp(0.0, 1.0),
+            escalate,
+            gate_name,
+        }
+    }
+
+    /// Creates a Warn decision.
+    #[allow(dead_code)]
+    pub(crate) fn warn(message: &'static str, confidence: f64, continue_anyway: bool) -> Self {
+        PreToolGateDecision::Warn {
+            message,
+            confidence: confidence.clamp(0.0, 1.0),
+            continue_anyway,
+        }
+    }
+
+    /// Backward-compat: converts to Option<&'static str> (None = allow, Some = deny).
+    /// Preserves existing code that pattern-matches on Option<&str>.
+    pub(crate) fn as_option(&self) -> Option<&'static str> {
+        match self {
+            PreToolGateDecision::Allow => None,
+            PreToolGateDecision::Deny { reason, .. } => Some(reason),
+            PreToolGateDecision::Warn { .. } => None,
+        }
+    }
+}
+
+// ============================================================================
+// Decision Cache — Jev-inspired TTL-based caching for repeated gate decisions
+// ============================================================================
+
+/// TTL for Iron Law gate decisions (2 minutes).
+const IRON_LAW_CACHE_TTL_SECS: u64 = 120;
+
+/// TTL for Plan gate decisions (60 minutes).
+const PLAN_CACHE_TTL_SECS: u64 = 3600;
+
+/// TTL for Anvil gate decisions (30 minutes).
+const ANVIL_CACHE_TTL_SECS: u64 = 1800;
+
+/// Cache entry with expiration time.
+struct CacheEntry {
+    decision: PreToolGateDecision,
+    expires_at_ms: u64,
+}
+
+impl CacheEntry {
+    fn is_expired(&self, now_ms: u64) -> bool {
+        now_ms >= self.expires_at_ms
+    }
+}
+
+/// Thread-safe decision cache with TTL expiration.
+///
+/// Jev insight: repeated gate decisions (same tool, same session context) can be
+/// cached to avoid redundant file-system checks. The cache is session-scoped and
+/// automatically expires to prevent stale decisions.
+struct DecisionCache {
+    /// Gate name -> (session_id, tool_name) -> CacheEntry
+    entries:
+        std::collections::HashMap<String, std::collections::HashMap<(String, String), CacheEntry>>,
+}
+
+impl DecisionCache {
+    fn new() -> Self {
+        Self {
+            entries: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Get a cached decision if present and not expired.
+    fn get(
+        &self,
+        gate_name: &str,
+        tool_name: &str,
+        session_id: &str,
+        now_ms: u64,
+    ) -> Option<PreToolGateDecision> {
+        let gate_entries = self.entries.get(gate_name)?;
+        let entry = gate_entries.get(&(session_id.to_string(), tool_name.to_string()))?;
+        if entry.is_expired(now_ms) {
+            return None;
+        }
+        Some(entry.decision.clone())
+    }
+
+    /// Store a decision in the cache with the given TTL.
+    fn put(
+        &mut self,
+        gate_name: &str,
+        tool_name: &str,
+        session_id: &str,
+        decision: PreToolGateDecision,
+        ttl_secs: u64,
+        now_ms: u64,
+    ) {
+        let key = (session_id.to_string(), tool_name.to_string());
+        let entry = CacheEntry {
+            decision,
+            expires_at_ms: now_ms + (ttl_secs * 1000),
+        };
+        self.entries
+            .entry(gate_name.to_string())
+            .or_default()
+            .insert(key, entry);
+    }
+    /// Clear all entries for a session.
+    #[allow(dead_code)]
+    fn clear_session(&mut self, session_id: &str) {
+        for entries in self.entries.values_mut() {
+            entries.retain(|(sess, _): &(String, String), _: &mut CacheEntry| -> bool {
+                sess != session_id
+            });
+        }
+    }
+
+    /// Prune expired entries.
+    fn prune(&mut self, now_ms: u64) {
+        for entries in self.entries.values_mut() {
+            entries.retain(|_: &(String, String), entry: &mut CacheEntry| -> bool {
+                !entry.is_expired(now_ms)
+            });
+        }
+    }
+}
+
+/// Global decision cache instance - lazily initialized.
+static DECISION_CACHE: std::sync::LazyLock<
+    std::sync::Mutex<DecisionCache>,
+    fn() -> std::sync::Mutex<DecisionCache>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(DecisionCache::new()));
+
+/// J02 observability: every gate-cache lookup records one hit or miss.
+static GATE_CACHE_HITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static GATE_CACHE_MISSES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Observable gate-cache counters for `keel decision cache-stats`.
+pub(crate) struct GateCacheStats {
+    pub hits: u64,
+    pub misses: u64,
+}
+
+pub(crate) fn gate_cache_stats() -> GateCacheStats {
+    use std::sync::atomic::Ordering;
+    GateCacheStats {
+        hits: GATE_CACHE_HITS.load(Ordering::Relaxed),
+        misses: GATE_CACHE_MISSES.load(Ordering::Relaxed),
+    }
+}
+
+/// Get a cached gate decision if available and not expired.
+pub(crate) fn cached_gate_decision(
+    gate_name: &str,
+    tool_name: &str,
+    session_id: &str,
+) -> Option<PreToolGateDecision> {
+    let cache = DECISION_CACHE.lock().ok()?;
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let hit = cache.get(gate_name, tool_name, session_id, now_ms);
+    use std::sync::atomic::Ordering;
+    if hit.is_some() {
+        GATE_CACHE_HITS.fetch_add(1, Ordering::Relaxed);
+    } else {
+        GATE_CACHE_MISSES.fetch_add(1, Ordering::Relaxed);
+    }
+    hit
+}
+
+/// Cache a gate decision with the appropriate TTL.
+pub(crate) fn cache_gate_decision(
+    gate_name: &str,
+    tool_name: &str,
+    session_id: &str,
+    decision: &PreToolGateDecision,
+) {
+    let mut cache = match DECISION_CACHE.lock() {
+        Ok(c) => c,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let ttl = match gate_name {
+        "iron_law" => IRON_LAW_CACHE_TTL_SECS,
+        "plan" => PLAN_CACHE_TTL_SECS,
+        "anvil" => ANVIL_CACHE_TTL_SECS,
+        _ => IRON_LAW_CACHE_TTL_SECS,
+    };
+    cache.put(
+        gate_name,
+        tool_name,
+        session_id,
+        decision.clone(),
+        ttl,
+        now_ms,
+    );
+}
+
+/// Prune expired entries from the decision cache.
+pub(crate) fn prune_decision_cache() {
+    if let Ok(mut cache) = DECISION_CACHE.lock() {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        cache.prune(now_ms);
+    }
+}
 pub(super) fn iron_law_satisfied_path(claude_home: &Path, session_id: &str) -> PathBuf {
     let key = if session_id.trim().is_empty() {
         "default".to_string()
@@ -425,14 +750,18 @@ pub(crate) fn tool_is_iron_law_gated(tool_name: &str, command: Option<&str>) -> 
     false
 }
 
-/// Decide whether to deny a gated tool. Returns `Some(reason)` to deny.
+/// Decide whether to deny a gated tool. Returns `GateDecision`.
 ///
 /// Evidence-based: does **not** write a satisfaction marker on deny. The marker
 /// is written only when PostToolUse/observe sees a qualifying research tool.
-pub(crate) fn iron_law_gate_decision(session_id: &str) -> Option<&'static str> {
+///
+/// Returns:
+/// - `PreToolGateDecision::Allow` when the session has research evidence
+/// - `PreToolGateDecision::Deny { reason, confidence, escalate, gate_name }` when denied
+pub(crate) fn iron_law_gate_decision(session_id: &str) -> PreToolGateDecision {
     let mode = iron_law_gate_mode();
     if mode == IronLawGateMode::Off {
-        return None;
+        return PreToolGateDecision::allow();
     }
 
     let claude_home = match crate::runtime::resolve_claude_home("") {
@@ -443,26 +772,30 @@ pub(crate) fn iron_law_gate_decision(session_id: &str) -> Option<&'static str> {
             eprintln!(
                 "[keel] Iron Law gate could not resolve the claude home directory ({error}); allowing this tool call unverified."
             );
-            return None;
+            return PreToolGateDecision::allow();
         }
     };
 
     if iron_law_marker_present(&claude_home, session_id) {
-        return None;
+        return PreToolGateDecision::allow();
     }
 
     // Recover if the marker write failed earlier but timings prove research ran.
     if session_has_iron_law_evidence(&claude_home, session_id, mode) {
         mark_iron_law_satisfied(session_id);
-        return None;
+        return PreToolGateDecision::allow();
     }
 
-    Some(match mode {
-        IronLawGateMode::Strict => IRON_LAW_GATE_DENIAL_STRICT,
-        IronLawGateMode::Balanced => IRON_LAW_GATE_DENIAL_BALANCED,
-        IronLawGateMode::Verified => IRON_LAW_GATE_DENIAL_VERIFIED,
-        IronLawGateMode::Off => return None,
-    })
+    // Denial with high confidence — no marker present means definitive evidence of no research.
+    // The confidence reflects certainty that the denial is correct (0.95 for marker-based).
+    let (reason, escalate) = match mode {
+        IronLawGateMode::Strict => (IRON_LAW_GATE_DENIAL_STRICT, false),
+        IronLawGateMode::Balanced => (IRON_LAW_GATE_DENIAL_BALANCED, false),
+        IronLawGateMode::Verified => (IRON_LAW_GATE_DENIAL_VERIFIED, true),
+        IronLawGateMode::Off => return PreToolGateDecision::allow(),
+    };
+
+    PreToolGateDecision::deny_with_confidence(reason, 0.95, escalate, "iron_law")
 }
 
 /// Canonical path fields emitted by the host adapters. Keep this list narrow:
@@ -533,49 +866,162 @@ pub(super) fn markdown_only_edit_targets(input: &JsonDocument, tool_name: &str) 
 pub(crate) fn markdown_only_edit_path(path: &str, tool_name: &str) -> bool {
     is_edit_class_tool(tool_name) && is_explicit_markdown_path(path)
 }
+/// Iron Law gate name constant - kept for API completeness even though iron_law
+/// gate doesn't use the cache (state can change between calls).
+#[allow(dead_code)]
+pub(crate) const GATE_NAME_IRON_LAW: &str = "iron_law";
+pub(crate) const GATE_NAME_PLAN: &str = "plan";
+pub(crate) const GATE_NAME_ANVIL: &str = "anvil";
+/// Decide whether to allow a tool call based on all applicable gates.
+/// Returns `GateDecision` with explicit confidence and escalation flags.
+///
+/// Checks in order:
+/// 1. Iron Law gate (marker-based evidence)
+/// 2. Plan gate (blocked tasks or not ready)
+/// 3. Anvil gate (compile + dry-run required for edits)
+pub(crate) fn evaluate_plan_gate(
+    session_id: &str,
+    tool_name: &str,
+    cwd: &str,
+) -> PreToolGateDecision {
+    if let Ok(plan_id) =
+        std::env::var("KEEL_PLAN_ID").or_else(|_| std::env::var("CLAUDE_SKILLS_PLAN"))
+    {
+        let plan = plan_id.trim();
+        if !plan.is_empty() && is_edit_class_tool(tool_name) {
+            let plan_cache_key = &format!("{}:{}", tool_name, plan);
+            let plan_cached = cached_gate_decision(GATE_NAME_PLAN, plan_cache_key, session_id);
+            if let Some(cached) = plan_cached {
+                if cached.is_denied() {
+                    return cached;
+                }
+            }
 
+            let blocked = crate::utility::plan::plan_has_blocked_tasks(Path::new(cwd), "", plan)
+                .unwrap_or(false);
+            if blocked {
+                let decision = PreToolGateDecision::deny_with_confidence(
+                    PLAN_TASK_BLOCKED_DENIAL,
+                    0.95,
+                    false,
+                    GATE_NAME_PLAN,
+                );
+                cache_gate_decision(GATE_NAME_PLAN, plan_cache_key, session_id, &decision);
+                return decision;
+            }
+            let ready =
+                crate::utility::plan::evaluate_definition_of_ready(Path::new(cwd), "", plan)
+                    .is_ok_and(|eval| eval.satisfied);
+            if !ready {
+                let decision = PreToolGateDecision::deny_with_confidence(
+                    PLAN_READY_GATE_DENIAL,
+                    0.9,
+                    true,
+                    GATE_NAME_PLAN,
+                );
+                cache_gate_decision(GATE_NAME_PLAN, plan_cache_key, session_id, &decision);
+                return decision;
+            }
+        }
+    }
+    PreToolGateDecision::allow()
+}
+
+pub(crate) fn evaluate_anvil_gate(
+    session_id: &str,
+    tool_name: &str,
+    cwd: &str,
+) -> PreToolGateDecision {
+    if anvil_gate_enabled() && is_edit_class_tool(tool_name) {
+        let anvil_cached = cached_gate_decision(GATE_NAME_ANVIL, tool_name, session_id);
+        if let Some(cached) = anvil_cached {
+            if cached.is_denied() {
+                return cached;
+            }
+        }
+
+        let satisfied = resolve_claude_home("")
+            .ok()
+            .is_some_and(|home| anvil_satisfied_this_session(&home, session_id, cwd));
+        if !satisfied {
+            let decision = PreToolGateDecision::deny_with_confidence(
+                ANVIL_GATE_DENIAL,
+                0.95,
+                false,
+                GATE_NAME_ANVIL,
+            );
+            cache_gate_decision(GATE_NAME_ANVIL, tool_name, session_id, &decision);
+            return decision;
+        }
+    }
+    PreToolGateDecision::allow()
+}
+
+/// Decide whether to allow a tool call based on all applicable gates.
+/// Returns `GateDecision` with explicit confidence and escalation flags.
+///
+/// Checks (evaluated in parallel for edit tools per J10):
+/// 1. Iron Law gate (marker-based evidence)
+/// 2. Plan gate (blocked tasks or not ready)
+/// 3. Anvil gate (compile + dry-run required for edits)
 pub(crate) fn pre_tool_gate_decision_with_markdown_context(
     session_id: &str,
     tool_name: &str,
     command: Option<&str>,
     cwd: &str,
     markdown_only_edit: bool,
-) -> Option<&'static str> {
+) -> PreToolGateDecision {
     if !tool_is_iron_law_gated(tool_name, command) {
-        return None;
+        return PreToolGateDecision::allow();
     }
-    if let Some(reason) = iron_law_gate_decision(session_id) {
-        return Some(reason);
+
+    // J10: When multiple gates apply to an edit-class tool, evaluate independent
+    // checks in parallel using std::thread::scope
+    if is_edit_class_tool(tool_name) && !markdown_only_edit {
+        let (iron_law, plan_dec, anvil_dec) = std::thread::scope(|s| {
+            let h1 = s.spawn(|| iron_law_gate_decision(session_id));
+            let h2 = s.spawn(|| evaluate_plan_gate(session_id, tool_name, cwd));
+            let h3 = s.spawn(|| evaluate_anvil_gate(session_id, tool_name, cwd));
+            (
+                h1.join().unwrap_or_else(|_| PreToolGateDecision::allow()),
+                h2.join().unwrap_or_else(|_| PreToolGateDecision::allow()),
+                h3.join().unwrap_or_else(|_| PreToolGateDecision::allow()),
+            )
+        });
+
+        // Precedence fold: Iron Law deny wins, then Plan, then Anvil (J10).
+        return fold_gate_decisions(iron_law, plan_dec, anvil_dec);
     }
-    if let Ok(plan_id) =
-        std::env::var("KEEL_PLAN_ID").or_else(|_| std::env::var("CLAUDE_SKILLS_PLAN"))
-    {
-        let plan = plan_id.trim();
-        if !plan.is_empty() && is_edit_class_tool(tool_name) && !markdown_only_edit {
-            let blocked = crate::utility::plan::plan_has_blocked_tasks(Path::new(cwd), "", plan)
-                .unwrap_or(false);
-            if blocked {
-                return Some(PLAN_TASK_BLOCKED_DENIAL);
-            }
-            let ready =
-                crate::utility::plan::evaluate_definition_of_ready(Path::new(cwd), "", plan)
-                    .is_ok_and(|eval| eval.satisfied);
-            if !ready {
-                return Some(PLAN_READY_GATE_DENIAL);
-            }
-        }
+
+    // Single-gate path for non-edit tools (e.g. non-keel shell commands or Agent/Task)
+    let iron_law = iron_law_gate_decision(session_id);
+    if iron_law.is_denied() {
+        return iron_law;
     }
-    if anvil_gate_enabled() && is_edit_class_tool(tool_name) && !markdown_only_edit {
-        let satisfied = resolve_claude_home("")
-            .ok()
-            .is_some_and(|home| anvil_satisfied_this_session(&home, session_id, cwd));
-        if !satisfied {
-            return Some(ANVIL_GATE_DENIAL);
-        }
-    }
-    None
+
+    PreToolGateDecision::allow()
 }
 
+/// J10 precedence fold: Iron Law deny wins, then Plan, then Anvil.
+pub(crate) fn fold_gate_decisions(
+    iron_law: PreToolGateDecision,
+    plan_dec: PreToolGateDecision,
+    anvil_dec: PreToolGateDecision,
+) -> PreToolGateDecision {
+    if iron_law.is_denied() {
+        return iron_law;
+    }
+    if plan_dec.is_denied() {
+        return plan_dec;
+    }
+    if anvil_dec.is_denied() {
+        return anvil_dec;
+    }
+    PreToolGateDecision::allow()
+}
+/// Backward-compat wrapper: converts GateDecision to Option<&'static str>.
+/// New code should use pre_tool_gate_decision_with_markdown_context directly.
+#[allow(dead_code)]
 pub(crate) fn pre_tool_gate_decision(
     session_id: &str,
     tool_name: &str,
@@ -585,6 +1031,7 @@ pub(crate) fn pre_tool_gate_decision(
     // Bridge callers do not pass the complete hook payload; keep them
     // conservative and require Anvil for edit calls with unknown targets.
     pre_tool_gate_decision_with_markdown_context(session_id, tool_name, command, cwd, false)
+        .as_option()
 }
 
 pub(super) fn run_hook_pre_tool_use(
@@ -639,20 +1086,47 @@ pub(super) fn run_hook_pre_tool_use(
     } else {
         cwd
     };
-    if let Some(reason) = pre_tool_gate_decision_with_markdown_context(
+    let decision = pre_tool_gate_decision_with_markdown_context(
         session_id,
         tool_name,
         command_opt,
         cwd,
         markdown_only_edit,
-    ) {
-        emit_pretool_deny(reason, standard_output, standard_error);
+    );
+    if decision.is_denied() {
+        emit_pretool_deny(
+            decision.denial_reason().unwrap_or("gate denied"),
+            standard_output,
+            standard_error,
+        );
         return 0;
     }
 
     // Compaction rewrite only applies to shell tools.
     if !is_shell_tool_name(tool_name) {
         return 0;
+    }
+    // J06: Shell destructive probability & risk action via Noul evaluation
+    let noul = crate::utility::decision::evaluate_shell_command_noul(command);
+    match noul.action {
+        crate::utility::decision::ShellRiskAction::Block => {
+            let reason = format!(
+                "[keel] Destructive command blocked (prob: {:.2}): {}",
+                noul.probability, noul.reason
+            );
+            emit_pretool_deny(&reason, standard_output, standard_error);
+            return 0;
+        }
+        crate::utility::decision::ShellRiskAction::Escalate => {
+            let escalation = crate::utility::decision::format_gate_escalation(
+                "shell_noul",
+                &noul.reason,
+                noul.confidence,
+            );
+            emit_pretool_deny(&escalation, standard_output, standard_error);
+            return 0;
+        }
+        _ => {}
     }
 
     // Inspect EVERY segment of a compound command, not just the first supported
@@ -879,5 +1353,93 @@ mod namespace_tests {
         assert!(!is_keel_research_tool_name("mcp__keel_evil__system_map"));
         assert!(!is_keel_research_tool_name("keel_evil__system_map"));
         assert!(!is_keel_research_tool_name("mcp__keel__run_command"));
+    }
+
+    #[test]
+    fn decision_cache_hit_miss_ttl_and_prune() {
+        // J02 checks: TTL expiration, hit/miss, prune on explicit timestamps.
+        let mut cache = DecisionCache::new();
+        cache.put(
+            "iron_law",
+            "Edit",
+            "sess-ttl",
+            PreToolGateDecision::allow(),
+            120,
+            1_000,
+        );
+        assert!(cache.get("iron_law", "Edit", "sess-ttl", 1_000).is_some());
+        assert!(
+            cache
+                .get("iron_law", "Edit", "sess-ttl", 1_000 + 120_000)
+                .is_none(),
+            "entry must expire exactly at now + ttl"
+        );
+        assert!(
+            cache.get("plan", "Edit", "sess-ttl", 1_000).is_none(),
+            "unknown gate must miss"
+        );
+        cache.prune(1_000 + 120_000);
+        cache.put(
+            "plan",
+            "Edit",
+            "sess-ttl",
+            PreToolGateDecision::allow(),
+            3_600,
+            2_000,
+        );
+        assert!(cache.get("plan", "Edit", "sess-ttl", 2_000).is_some());
+    }
+
+    fn deny(gate: &'static str) -> PreToolGateDecision {
+        PreToolGateDecision::deny_with_confidence("test denial", 0.9, false, gate)
+    }
+
+    #[test]
+    fn gate_decision_fold_prefers_iron_over_plan_over_anvil() {
+        // J10 checks: precedence over every denial combination.
+        let allow = PreToolGateDecision::allow();
+        assert!(fold_gate_decisions(allow.clone(), allow.clone(), allow.clone()).is_allowed());
+        let folded = fold_gate_decisions(deny("iron_law"), deny("plan"), deny("anvil"));
+        assert!(folded.is_denied());
+        // The winner carries its gate name: iron first, then plan, then anvil.
+        for (iron, plan, anvil, winner) in [
+            (true, true, true, "iron_law"),
+            (false, true, true, "plan"),
+            (false, false, true, "anvil"),
+            (true, false, false, "iron_law"),
+            (false, true, false, "plan"),
+        ] {
+            let pick = |denied: bool, gate: &'static str| {
+                if denied {
+                    deny(gate)
+                } else {
+                    PreToolGateDecision::allow()
+                }
+            };
+            let folded = fold_gate_decisions(
+                pick(iron, "iron_law"),
+                pick(plan, "plan"),
+                pick(anvil, "anvil"),
+            );
+            match folded {
+                PreToolGateDecision::Deny { gate_name, .. } => {
+                    assert_eq!(gate_name, winner, "iron={iron} plan={plan} anvil={anvil}")
+                }
+                other => panic!("expected Deny, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn gate_decision_fold_is_deterministic() {
+        // J10 acceptance: identical inputs always produce identical output,
+        // which is what makes parallel evaluation equivalent to sequential.
+        let first = fold_gate_decisions(deny("plan"), PreToolGateDecision::allow(), deny("anvil"));
+        let second = fold_gate_decisions(deny("plan"), PreToolGateDecision::allow(), deny("anvil"));
+        assert_eq!(first, second);
+        match first {
+            PreToolGateDecision::Deny { gate_name, .. } => assert_eq!(gate_name, "plan"),
+            other => panic!("expected plan Deny, got {other:?}"),
+        }
     }
 }

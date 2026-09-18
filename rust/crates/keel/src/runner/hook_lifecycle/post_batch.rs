@@ -1130,6 +1130,9 @@ pub(super) fn run_hook_post_tool_batch(
     standard_output: &mut dyn Write,
     standard_error: &mut dyn Write,
 ) -> u8 {
+    // Jev-inspired: prune expired decision cache entries on every batch
+    crate::runner::hook_lifecycle::pre_tool::prune_decision_cache();
+
     let review_mode = review_gate_mode();
     let brief_mode = brief_gate_mode();
     let memory_mode = memory_gate_mode();

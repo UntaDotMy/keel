@@ -45,7 +45,7 @@ measurement. Actual values are recomputed on every invocation and in CI.
 | `pointer.warning_status` | 9 | 10 |
 | `pointer.ui_verification` | 15 | 17 |
 
-The MCP baseline is 37 total tools: 17 eager and 20 deferred. Phase 12 implements the
+The MCP baseline is 38 total tools: 17 eager and 21 deferred. Phase 12 implements the
 tiered catalog profile. The skill baseline covers 51 parseable first-party
 `SKILL.md` files.
 

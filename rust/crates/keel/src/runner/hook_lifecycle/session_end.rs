@@ -177,6 +177,23 @@ pub(crate) fn run_session_end_learning(standard_error: &mut dyn Write) {
         Ok(path) => path,
         Err(_) => return,
     };
+    // J08: reconcile staged routing outcomes (cited = helpful). Fail-open.
+    let outcomes_reconciled =
+        crate::utility::skill_match::reconcile_skill_match_outcomes(&claude_home);
+    if outcomes_reconciled > 0 {
+        let _ = writeln!(
+            standard_error,
+            "keel learn: reconciled {outcomes_reconciled} skill routing outcome(s)"
+        );
+    }
+    let compositions_reconciled =
+        crate::utility::skill_match::reconcile_composition_outcomes(&claude_home);
+    if compositions_reconciled > 0 {
+        let _ = writeln!(
+            standard_error,
+            "keel learn: reconciled {compositions_reconciled} skill composition outcome(s)"
+        );
+    }
     // synthesize: true so SessionStart can surface refinement briefs for any
     // template-state skills (growth without an LLM inside the binary).
     let options = learning::CycleOptions {
