@@ -7,8 +7,9 @@
 //! Caller: commands.rs `observe` dispatch.
 //! Dependencies: the recall, anvil job-store, and working_brief utility
 //!   surfaces, plus the shared args/json/runtime helpers.
-//! Side Effects: read-only. `recall_status_snapshot` opens (and lazily syncs)
-//!   the recall index; everything else reads files. No writes, no network.
+//! Side Effects: read-only. `recall_status_snapshot` opens the recall index
+//!   for a read-only health snapshot (no sync); everything else reads files.
+//!   No writes, no network.
 //!
 //! Design: reuse existing command data so `observe` cannot drift from its
 //! source surfaces; this command is an aggregating read, not a second source.
