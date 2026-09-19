@@ -81,6 +81,22 @@ function markSessionStarted(ctx: ModContext | undefined, sessionId: string): voi
   }
 }
 
+/** Run `keel hook stop`, the native closeout gate rather than a bridge subcommand. */
+function runHookStop(payload: unknown): string {
+  try {
+    const result = execFileSync(BRIDGE_BIN, ["hook", "stop"], {
+      timeout: 5000,
+      stdio: ["pipe", "pipe", "pipe"],
+      encoding: "utf-8",
+      windowsHide: true,
+      input: JSON.stringify(payload),
+    });
+    return result ?? "";
+  } catch {
+    return "";
+  }
+}
+
 /** Session id captured from the `run_start` event (hook params expose none). */
 let hostSessionId = "";
 
@@ -251,6 +267,28 @@ export default function keelCmdcMod(cmd: ModApi): void {
       ];
       if (isError) args.push("--failed");
       runBridge("observe", args, 2000, payload);
+    },
+
+    // Closeout gate: `keel hook stop` can force the run onward, and `onStop` is
+    // the only Command Code seam that can. An unreadable decision is no opinion.
+    onStop: async () => {
+      const output = runHookStop({
+        session_id: sessionIdFor(cmd.cwd),
+        cwd: cmd.cwd,
+      });
+      if (!output.trim()) return undefined;
+      try {
+        const decision = JSON.parse(output) as { decision?: string; reason?: string };
+        if (decision.decision === "block") {
+          return {
+            continue: true,
+            reason: decision.reason || "Keel closeout checks are incomplete.",
+          };
+        }
+      } catch {
+        return undefined;
+      }
+      return undefined;
     },
 
     // Session end: learning + marker cleanup
