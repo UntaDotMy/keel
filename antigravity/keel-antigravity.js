@@ -196,13 +196,22 @@ function handlePostToolUse(input) {
 }
 
 function handlePreInvocation(input) {
-  if (Number(input.invocationNum ?? 0) !== 0) return { injectSteps: [] };
-  const context = runBridge("session-start", [
-    "--session",
-    sessionId(input),
-    "--cwd",
-    cwd(input),
-  ]);
+  // First invocation bootstraps the session; later ones restate the per-prompt
+  // brief. PreInvocation is Antigravity's only per-prompt context seam.
+  const firstInvocation = Number(input.invocationNum ?? 0) === 0;
+  const context = firstInvocation
+    ? runBridge("session-start", [
+        "--session",
+        sessionId(input),
+        "--cwd",
+        cwd(input),
+      ])
+    : runBridge("user-prompt", [
+        "--session",
+        sessionId(input),
+        "--cwd",
+        cwd(input),
+      ]);
   return context
     ? { injectSteps: [{ ephemeralMessage: context }] }
     : { injectSteps: [] };

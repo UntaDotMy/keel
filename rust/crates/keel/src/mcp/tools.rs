@@ -6776,7 +6776,11 @@ mod tests {
         let tools = synthetic_paging_tools("ttl");
         let profile = crate::mcp::McpCatalogProfile::Tiered;
         let fingerprint = catalog_snapshot_fingerprint(profile, &tools, 2, 1200);
-        let expiry = now_unix_seconds() + 2;
+        // A two-second deadline raced the wall clock: on a loaded runner the
+        // cursor expired between encoding and paging, so the unexpired-continuation
+        // expectation failed intermittently. The assertions below only need the
+        // cursor to outlive the loop, so the window is generous.
+        let expiry = now_unix_seconds() + 60;
         let cursor =
             encode_catalog_cursor(1, profile, 2, 1200, &fingerprint, &context, expiry, false);
         for _ in 0..2 {
@@ -6791,7 +6795,11 @@ mod tests {
                 tools.clone(),
             )
             .expect("unexpired continuation");
-            assert!(page["ttlMs"].as_u64().unwrap() <= 2000);
+            let ttl_ms = page["ttlMs"].as_u64().unwrap();
+            assert!(
+                ttl_ms > 0 && ttl_ms <= 60_000,
+                "{ttl_ms} must track the cursor"
+            );
             assert_eq!(page["cacheScope"], "private");
             if let Some(next) = page["nextCursor"].as_str() {
                 assert_eq!(peek_catalog_cursor(next).unwrap().expires_at, expiry);

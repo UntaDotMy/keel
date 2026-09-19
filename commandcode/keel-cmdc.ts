@@ -97,6 +97,31 @@ function runHookStop(payload: unknown): string {
   }
 }
 
+/** Last user-visible text in the thread, used as the skill-routing prompt. */
+function lastUserText(messages: unknown): string {
+  if (!Array.isArray(messages)) return "";
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const entry = messages[index] as { role?: string; content?: unknown };
+    if (!entry || entry.role !== "user") continue;
+    if (typeof entry.content === "string" && entry.content.trim()) {
+      return entry.content;
+    }
+    if (Array.isArray(entry.content)) {
+      const text = entry.content
+        .map((part) =>
+          part && typeof part === "object" &&
+          typeof (part as { text?: unknown }).text === "string"
+            ? (part as { text: string }).text
+            : "",
+        )
+        .join(" ")
+        .trim();
+      if (text) return text;
+    }
+  }
+  return "";
+}
+
 /** Session id captured from the `run_start` event (hook params expose none). */
 let hostSessionId = "";
 
@@ -136,6 +161,8 @@ export default function keelCmdcMod(cmd: ModApi): void {
   // Run-scoped post-compact context: populated by compaction_done (which has
   // no ctx/session seam) and consumed by transformContext on the next run.
   let postCompactContext = "";
+  // The per-prompt brief is worth one bridge call per session, not one per round.
+  let promptBriefFetched = false;
   // Full keel contract from `bridge session-start` (iron law, MCP pointers,
   // memory protocol). Injected via appendSystemPrompt; short fallback below.
   let sessionStartContract = "";
@@ -166,15 +193,26 @@ export default function keelCmdcMod(cmd: ModApi): void {
 
     // Per-run context: post-compact re-push (EPHEMERAL, never rewrites transcript)
     transformContext: async ({ messages, state }) => {
-      if (!postCompactContext) return messages;
+      // `transformContext` is the only per-run seam Command Code exposes for
+      // injecting context, so the per-prompt brief is fetched here, once.
+      let promptBrief = "";
+      if (!promptBriefFetched) {
+        promptBriefFetched = true;
+        const prompt = lastUserText(messages);
+        const args = ["--session", sessionIdFor(cmd.cwd), "--cwd", cmd.cwd];
+        if (prompt) args.push("--prompt", prompt);
+        promptBrief = runBridge("user-prompt", args, 5000);
+      }
+      if (!postCompactContext && !promptBrief) return messages;
       const restored = postCompactContext;
       postCompactContext = "";
+      const blocks = [promptBrief, restored].filter((block) => block !== "");
       const keelBlock: { role: "user"; content: string } = {
         role: "user",
-        content: `--- keel post-compaction context (re-injected; use this to resume the job) ---\n${restored}\n--- end keel post-compaction context ---`,
+        content: `--- keel context (injected; this is not user input) ---\n${blocks.join("\n\n")}\n--- end keel context ---`,
       };
       // Inject as the first user message after the system prompt so the model
-      // sees it at the top of the resumed window.
+      // sees it at the top of the window.
       const insertAt = Math.min(
         1,
         Array.isArray(messages) ? messages.length : 0,

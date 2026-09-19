@@ -338,8 +338,42 @@ pub(crate) fn maybe_wire_opencode(
         Err(error) => format!("MCP skipped ({error})"),
     };
 
+    // OpenCode reads global rules from ~/.config/opencode/AGENTS.md.
+    let agents_status = match sync_host_agents_md(
+        &home.join(".config").join("opencode").join("AGENTS.md"),
+        "OpenCode",
+    ) {
+        Ok(status) => status,
+        Err(error) => format!("AGENTS.md skipped ({error})"),
+    };
     let core_status = copy_bridge_core(repository_root, &home.join(".config").join("opencode"));
-    Some(format!("{plugin_status}; {core_status}; {mcp_status}"))
+    Some(format!(
+        "{plugin_status}; {core_status}; {agents_status}; {mcp_status}"
+    ))
+}
+
+/// Cursor hook registry for Windows.
+///
+/// The shipped `cursor/hooks/hooks.json` invokes the POSIX adapter through
+/// `bash`, which is not a safe assumption on Windows, so this variant names the
+/// PowerShell adapter by absolute path. An absolute path is used deliberately:
+/// the hook command may be spawned by `cmd`, where `~` never expands.
+fn cursor_hooks_payload(script: &Path) -> serde_json::Value {
+    let command = format!(
+        "powershell -NoProfile -ExecutionPolicy Bypass -File \"{}\"",
+        display_path(script)
+    );
+    let matcher = "Write|Edit|Delete|StrReplace|MultiEdit|NotebookEdit|ApplyPatch|Patch|SearchReplace|Shell|Bash|PowerShell|Command|Terminal|Read|Grep";
+    serde_json::json!({
+        "version": 1,
+        "hooks": {
+            "preToolUse": [{"command": command, "matcher": matcher, "timeout": 5}],
+            "postToolUse": [{"command": command, "timeout": 5}],
+            "preCompact": [{"command": command, "timeout": 5}],
+            "stop": [{"command": command, "timeout": 5}],
+            "sessionEnd": [{"command": command, "timeout": 5}],
+        }
+    })
 }
 
 pub(crate) fn maybe_wire_cursor(
@@ -384,7 +418,7 @@ pub(crate) fn maybe_wire_cursor(
         }
     }
 
-    // Copy compaction reroute hooks (preToolUse + keel-cursor.sh)
+    // Copy the lifecycle adapters. Both ship: Windows runs the PowerShell one.
     let hooks_json_source = repository_root
         .join("cursor")
         .join("hooks")
@@ -393,11 +427,66 @@ pub(crate) fn maybe_wire_cursor(
         .join("cursor")
         .join("hooks")
         .join("keel-cursor.sh");
-    if hooks_json_source.is_file() || rewrite_script_source.is_file() {
-        let hooks_dir = home.join(".cursor").join("hooks");
-        let _ = std::fs::create_dir_all(&hooks_dir);
-        if hooks_json_source.is_file() {
-            let target = home.join(".cursor").join("hooks.json");
+    let powershell_script_source = repository_root
+        .join("cursor")
+        .join("hooks")
+        .join("keel-cursor.ps1");
+    let hooks_dir = home.join(".cursor").join("hooks");
+    let ps1_target = hooks_dir.join("keel-cursor.ps1");
+    let _ = std::fs::create_dir_all(&hooks_dir);
+    if rewrite_script_source.is_file() {
+        let target = hooks_dir.join("keel-cursor.sh");
+        match copy_managed_file(&rewrite_script_source, &target) {
+            Ok(ManagedCopyStatus::Copied) => status_parts.push("keel-cursor.sh copied".to_string()),
+            Ok(ManagedCopyStatus::AlreadyCurrent) => {
+                status_parts.push("keel-cursor.sh already current".to_string())
+            }
+            Ok(ManagedCopyStatus::PreservedCustom) => {
+                status_parts.push("keel-cursor.sh skipped (user-customized)".to_string())
+            }
+            Err(error) => status_parts.push(format!("keel-cursor.sh copy failed ({error})")),
+        }
+    }
+    if powershell_script_source.is_file() {
+        match copy_managed_file(&powershell_script_source, &ps1_target) {
+            Ok(ManagedCopyStatus::Copied) => {
+                status_parts.push("keel-cursor.ps1 copied".to_string())
+            }
+            Ok(ManagedCopyStatus::AlreadyCurrent) => {
+                status_parts.push("keel-cursor.ps1 already current".to_string())
+            }
+            Ok(ManagedCopyStatus::PreservedCustom) => {
+                status_parts.push("keel-cursor.ps1 skipped (user-customized)".to_string())
+            }
+            Err(error) => status_parts.push(format!("keel-cursor.ps1 copy failed ({error})")),
+        }
+    }
+    if hooks_json_source.is_file() {
+        let target = home.join(".cursor").join("hooks.json");
+        if cfg!(windows) {
+            match serde_json::to_string_pretty(&cursor_hooks_payload(&ps1_target)) {
+                Err(error) => status_parts.push(format!("hooks.json skipped ({error})")),
+                Ok(rendered) => {
+                    let existing = crate::runtime::read_text_if_exists(&target).unwrap_or_default();
+                    // Never clobber a hand-written registry; only replace our own.
+                    let ours = existing.trim().is_empty() || existing.contains("keel-cursor");
+                    if !ours {
+                        status_parts.push("hooks.json skipped (user-customized)".to_string());
+                    } else if existing.trim_end() == rendered.trim_end() {
+                        status_parts.push("hooks.json already current".to_string());
+                    } else {
+                        match write_text(&target, &rendered) {
+                            Ok(()) => {
+                                status_parts.push("hooks.json written for PowerShell".to_string())
+                            }
+                            Err(error) => {
+                                status_parts.push(format!("hooks.json write failed ({error})"))
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
             match copy_managed_file(&hooks_json_source, &target) {
                 Ok(ManagedCopyStatus::Copied) => status_parts.push("hooks.json copied".to_string()),
                 Ok(ManagedCopyStatus::AlreadyCurrent) => {
@@ -407,21 +496,6 @@ pub(crate) fn maybe_wire_cursor(
                     status_parts.push("hooks.json skipped (user-customized)".to_string())
                 }
                 Err(error) => status_parts.push(format!("hooks.json copy failed ({error})")),
-            }
-        }
-        if rewrite_script_source.is_file() {
-            let target = hooks_dir.join("keel-cursor.sh");
-            match copy_managed_file(&rewrite_script_source, &target) {
-                Ok(ManagedCopyStatus::Copied) => {
-                    status_parts.push("keel-cursor.sh copied".to_string())
-                }
-                Ok(ManagedCopyStatus::AlreadyCurrent) => {
-                    status_parts.push("keel-cursor.sh already current".to_string())
-                }
-                Ok(ManagedCopyStatus::PreservedCustom) => {
-                    status_parts.push("keel-cursor.sh skipped (user-customized)".to_string())
-                }
-                Err(error) => status_parts.push(format!("keel-cursor.sh copy failed ({error})")),
             }
         }
     }
@@ -759,17 +833,38 @@ pub(crate) fn maybe_wire_omp(
     let extension_source = repository_root.join("pi").join("keel-pi.ts");
     let extension_target = omp_root.join("extensions").join("keel-pi.ts");
     if extension_source.is_file() {
-        match copy_managed_file(&extension_source, &extension_target) {
-            Ok(ManagedCopyStatus::Copied) => {
-                status_parts.push(format!("extension -> {}", display_path(&extension_target)))
-            }
-            Ok(ManagedCopyStatus::AlreadyCurrent) => {
-                status_parts.push("extension already current".to_string())
-            }
-            Ok(ManagedCopyStatus::PreservedCustom) => {
-                status_parts.push("extension preserved (user-customized)".to_string())
-            }
+        // OMP and Pi share this source but must not share a session namespace:
+        // one dedup marker would make each suppress the other's startup injection.
+        match std::fs::read_to_string(&extension_source).map(|text| {
+            text.replace(
+                "sessionMarkerDirectory(\"pi\")",
+                "sessionMarkerDirectory(\"omp\")",
+            )
+        }) {
             Err(error) => status_parts.push(format!("extension skipped ({error})")),
+            Ok(desired) => {
+                let existing =
+                    crate::runtime::read_text_if_exists(&extension_target).unwrap_or_default();
+                if existing == desired {
+                    status_parts.push("extension already current".to_string());
+                } else if existing.trim().is_empty()
+                    || existing.contains("keel:managed-host-file")
+                    || existing.contains("keel Pi Agent Extension")
+                {
+                    if let Some(parent) = extension_target.parent() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                    match write_text(&extension_target, &desired) {
+                        Ok(()) => status_parts
+                            .push(format!("extension -> {}", display_path(&extension_target))),
+                        Err(error) => {
+                            status_parts.push(format!("extension write failed ({error})"))
+                        }
+                    }
+                } else {
+                    status_parts.push("extension preserved (user-customized)".to_string());
+                }
+            }
         }
     } else {
         status_parts.push("extension source absent".to_string());

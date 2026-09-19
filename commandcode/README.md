@@ -51,7 +51,7 @@ cmdc --mod ./commandcode/keel-cmdc.ts
 | keel capability | Command Code seam | `keel bridge` call |
 |---|---|---|
 | SessionStart context | `cmd.hooks({onSessionStart})` | `bridge session-start --session <id> --cwd <cwd>` (once per session) |
-| Per-prompt memory push | none | No `bridge user-prompt` call: the mod has no per-prompt seam, so only the post-compact digest is re-injected |
+| Per-prompt memory push | `cmd.hooks({transformContext})` | `bridge user-prompt --session --cwd --prompt` (fetched once per session, then re-injected with any post-compact digest) |
 | **Post-compact continuity** | `cmd.on('compaction_start')` + `cmd.on('compaction_done')` | `compaction_start` → `bridge pre-compact`; `compaction_done` → `bridge post-compact` (memory digest re-push) |
 | Iron Law gate | `cmd.hooks({beforeToolCall})` | `bridge pre-tool-use --session --cwd --tool <name>` (`KEEL_GATE_DENY` → block) |
 | `run_command` compaction wrapper | `cmd.hooks({beforeToolCall})` (shell tools) | `bridge rewrite --tool <name>` (stdin) → `KEEL_REWRITE <cmd>` |

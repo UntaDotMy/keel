@@ -57,7 +57,7 @@ fn remove_managed_cursor_hooks(path: &Path) -> usize {
                 !entry
                     .get("command")
                     .and_then(serde_json::Value::as_str)
-                    .is_some_and(|command| command.contains("keel-cursor.sh"))
+                    .is_some_and(|command| command.contains("keel-cursor"))
             });
             changed |= entries.len() != original_len;
         }
@@ -519,6 +519,10 @@ pub(crate) fn remove_wired_adapters(claude_home: &Path) -> usize {
     removed += remove_managed_cursor_hooks(&home.join(".cursor").join("hooks.json"));
     removed += remove_owned_file_if_marked(
         &home.join(".cursor").join("hooks").join("keel-cursor.sh"),
+        "keel Cursor",
+    );
+    removed += remove_owned_file_if_marked(
+        &home.join(".cursor").join("hooks").join("keel-cursor.ps1"),
         "keel Cursor",
     );
 

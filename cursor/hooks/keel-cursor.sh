@@ -151,8 +151,14 @@ case "$HOOK_EVENT" in
     exit 0
     ;;
   postToolUse)
-    # Observation capture (fire-and-forget). stdin payload to bridge observe.
-    printf '%s' "$INPUT" | "$KEEL_BIN" bridge observe --session "$SESSION_ID" --cwd "$CWD" --tool "$TOOL_NAME" --phase post >/dev/null 2>&1 || true
+    # Observation capture (fire-and-forget), failures included. Cursor reports the
+    # failure signal as tool_output.exit_code, so pass --failed when it is non-zero.
+    TOOL_EXIT=$(printf '%s' "$INPUT" | "$JQ_BIN" -r '.tool_output.exit_code // empty' 2>/dev/null) || TOOL_EXIT=""
+    if [ -n "$TOOL_EXIT" ] && [ "$TOOL_EXIT" != "0" ]; then
+      printf '%s' "$INPUT" | "$KEEL_BIN" bridge observe --session "$SESSION_ID" --cwd "$CWD" --tool "$TOOL_NAME" --phase post --failed >/dev/null 2>&1 || true
+    else
+      printf '%s' "$INPUT" | "$KEEL_BIN" bridge observe --session "$SESSION_ID" --cwd "$CWD" --tool "$TOOL_NAME" --phase post >/dev/null 2>&1 || true
+    fi
     echo '{}'
     exit 0
     ;;
