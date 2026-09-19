@@ -1090,16 +1090,55 @@ fn muse_settings_path(home: &Path) -> PathBuf {
     home.join(".config").join("muse").join("settings.json")
 }
 
+#[cfg(windows)]
+fn windows_short_path(path: &Path) -> Option<PathBuf> {
+    use std::ffi::{OsStr, OsString};
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetShortPathNameW(long_path: *const u16, short_path: *mut u16, capacity: u32) -> u32;
+    }
+
+    let input: Vec<u16> = OsStr::new(path.as_os_str())
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let required = unsafe { GetShortPathNameW(input.as_ptr(), std::ptr::null_mut(), 0) };
+    if required == 0 {
+        return None;
+    }
+    let mut output = vec![0u16; required as usize];
+    let written = unsafe { GetShortPathNameW(input.as_ptr(), output.as_mut_ptr(), required) };
+    if written == 0 || written >= required {
+        return None;
+    }
+    output.truncate(written as usize);
+    Some(PathBuf::from(OsString::from_wide(&output)))
+}
+
+#[cfg(not(windows))]
+fn windows_short_path(path: &Path) -> Option<PathBuf> {
+    let _ = path;
+    None
+}
+
 /// Shell command for a Muse hook.
 ///
 /// Muse's documented platforms are macOS and Linux (Windows through WSL2), where
-/// POSIX quoting is right. A Windows install still reads this file, and POSIX
-/// single quotes are literal characters under `cmd`, so Windows gets a
-/// double-quoted path instead, which both `cmd` and PowerShell accept.
+/// POSIX quoting is right. On native Windows, Muse invokes hook commands through
+/// `cmd.exe /c <command>`. When the command string contains double quotes,
+/// standard Windows argument escaping produces `\"`, which `cmd.exe` treats as
+/// literal syntax and fails (`'\"C:\...\"' is not recognized as an internal or
+/// external command`). Therefore, Windows hook commands must not be wrapped in
+/// quotes; if the executable path contains spaces, convert to an 8.3 short path
+/// so `cmd.exe` can execute it without quotes.
 fn muse_hook_command(binary: &Path, subcommand: &str) -> String {
-    let path = display_path(binary);
     if cfg!(windows) {
-        format!("\"{path}\" hook {subcommand}")
+        let path = windows_short_path(binary)
+            .map(|p| display_path(&p))
+            .unwrap_or_else(|| display_path(binary));
+        format!("{path} hook {subcommand}")
     } else {
         crate::runner::shell_rewrite::bash_command_for_executable_args(
             binary,
@@ -1177,16 +1216,16 @@ fn merge_muse_settings(path: &Path, binary: &Path) -> Result<String, String> {
         serde_json::from_str(original.strip_prefix('\u{feff}').unwrap_or(&original))
             .map_err(|error| format!("parse {}: {error}", display_path(path)))?
     };
-    let root = document
-        .as_object_mut()
-        .ok_or("root is not an object".to_string())?;
-    match root
+    match document
         .get("schema_version")
         .and_then(serde_json::Value::as_u64)
     {
         Some(1) => {}
         Some(other) => return Err(format!("schema_version {other} is unsupported")),
         None => {
+            let root = document
+                .as_object_mut()
+                .ok_or("root is not an object".to_string())?;
             root.insert("schema_version".to_string(), serde_json::json!(1));
         }
     }
@@ -1199,15 +1238,29 @@ fn merge_muse_settings(path: &Path, binary: &Path) -> Result<String, String> {
     }
 
     {
-        let servers = json_object_child_mut(&mut document, "mcp_servers")?;
+        // Muse faults or drops MCP if both `mcp_servers` and `mcpServers` exist.
+        // Migrate any legacy entries to `mcpServers` and drop `mcp_servers`.
+        let legacy_entries = document
+            .as_object_mut()
+            .and_then(|root| root.remove("mcp_servers"))
+            .and_then(|val| val.as_object().cloned());
+        if let Some(legacy_obj) = legacy_entries {
+            let mcp_servers = json_object_child_mut(&mut document, "mcpServers")?;
+            for (key, val) in legacy_obj {
+                mcp_servers.entry(key).or_insert(val);
+            }
+        }
+        let servers = json_object_child_mut(&mut document, "mcpServers")?;
         let keel_value = servers
             .entry("keel".to_string())
             .or_insert_with(|| serde_json::json!({}));
         let keel = keel_value
             .as_object_mut()
-            .ok_or("mcp_servers.keel is not an object")?;
+            .ok_or("mcpServers.keel is not an object")?;
+        keel.remove("transport");
+        keel.remove("enabled");
         keel.insert(
-            "transport".to_string(),
+            "type".to_string(),
             serde_json::Value::String("stdio".to_string()),
         );
         keel.insert(
@@ -1215,7 +1268,6 @@ fn merge_muse_settings(path: &Path, binary: &Path) -> Result<String, String> {
             serde_json::Value::String(display_path(binary)),
         );
         keel.insert("args".to_string(), serde_json::json!(["mcp", "serve"]));
-        keel.insert("enabled".to_string(), serde_json::Value::Bool(true));
         // A required server that fails to start aborts the whole Muse run, so
         // keel must never be able to take the user's session down with it.
         keel.insert(
@@ -1301,17 +1353,26 @@ mod muse_wiring_tests {
                 "{event} must carry the keel hook for {subcommand}"
             );
         }
+        if cfg!(windows) {
+            let hook_command = written["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+                .as_str()
+                .expect("command string");
+            assert!(
+                !hook_command.starts_with('"'),
+                "Windows hook commands must omit wrapping double-quotes: {hook_command}"
+            );
+        }
         assert_eq!(
-            written["mcp_servers"]["keel"]["transport"].as_str(),
+            written["mcpServers"]["keel"]["type"].as_str(),
             Some("stdio")
         );
         assert_eq!(
-            written["mcp_servers"]["keel"]["command"].as_str(),
+            written["mcpServers"]["keel"]["command"].as_str(),
             Some(display_path(&binary).as_str())
         );
         // A failed server must never abort the user's whole Muse run.
         assert_eq!(
-            written["mcp_servers"]["keel"]["mode"].as_str(),
+            written["mcpServers"]["keel"]["mode"].as_str(),
             Some("optional")
         );
 
@@ -1324,6 +1385,35 @@ mod muse_wiring_tests {
                 "{event} must be updated in place, not duplicated"
             );
         }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn muse_settings_migrates_legacy_mcp_servers_key() {
+        let root = crate::test_support::unique_temp_dir("keel-muse-legacy-mcp");
+        let path = root.join("settings.json");
+        std::fs::write(
+            &path,
+            r#"{"schema_version":1,"mcp_servers":{"custom":{"type":"stdio","command":"foo"}}}"#,
+        )
+        .expect("seed legacy settings");
+        let binary = root.join("keel");
+
+        merge_muse_settings(&path, &binary).expect("merge muse settings");
+        let written = read_settings(&path);
+        assert!(
+            written.get("mcp_servers").is_none(),
+            "legacy mcp_servers key must be removed to avoid Muse loader fault"
+        );
+        assert_eq!(
+            written["mcpServers"]["custom"]["command"].as_str(),
+            Some("foo"),
+            "pre-existing custom server must be preserved in mcpServers"
+        );
+        assert_eq!(
+            written["mcpServers"]["keel"]["type"].as_str(),
+            Some("stdio")
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
