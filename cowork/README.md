@@ -62,9 +62,11 @@ Desktop would not read them.
 
 ## Uninstall
 
-`keel uninstall` removes the keel MCP entry from `claude_desktop_config.json` and
-cleans up the legacy `~/.claude/plugins/keel-cowork/` directory that older builds
-created.
+`keel uninstall` removes the keel MCP entry from `claude_desktop_config.json`.
+
+A legacy `~/.claude/plugins/keel-cowork/` directory is left untouched: the current
+installer never created it, so removing it would delete a user-owned path. Delete
+it by hand if an older build put it there.
 
 ## License
 
