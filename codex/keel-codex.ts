@@ -110,6 +110,22 @@ function denyOutput(reason: string): string {
 // Bridge runner. Lifecycle reads receive a bounded index and disk budget.
 // ---------------------------------------------------------------------------
 
+/** Run `keel hook <event>` (the native hook router, not a bridge subcommand). */
+function runHookStop(payload: unknown, timeoutMs = 5000): string {
+  try {
+    const result = execFileSync(BRIDGE_BIN, ["hook", "stop"], {
+      timeout: timeoutMs,
+      input: JSON.stringify(payload),
+      stdio: ["pipe", "pipe", "pipe"],
+      encoding: "utf-8",
+      windowsHide: true,
+    });
+    return result ?? "";
+  } catch {
+    return "";
+  }
+}
+
 function runBridge(subcommand: string, args: string[], timeoutMs = 5000): string {
   try {
     const result = execFileSync(
@@ -331,15 +347,35 @@ function handlePostCompact(input: CodexHookInput): string {
   ]);
 }
 
-function handleStop(_input: CodexHookInput): string {
-  // Stop fires on EVERY turn end. It must NOT run `bridge post-compact`: that
-  // subcommand runs the full session-end learning cycle, so invoking it per turn
-  // spawned and SIGTERM-killed a learning cycle every turn and discarded its
-  // output. The learning checkpoint belongs on the actual compaction event
-  // (handlePostCompact) and on session end (handleSessionEnd). Printing context
-  // on Stop also risks a keep-going loop, so this handler is silenced (matches
-  // the native Claude Code Stop handler and the OpenCode adapter, which do not
-  // run learning on turn end).
+function handleStop(input: CodexHookInput): string {
+  // Stop fires on EVERY turn end, so it must NOT run `bridge post-compact` (the
+  // full learning cycle). `keel hook stop` only evaluates closeout readiness.
+  const { sessionID, cwd } = resolveSessionContext(input);
+  const stopHookActive =
+    input.stop_hook_active === true || Number(input.execution_num ?? 1) > 1;
+  const output = runHookStop({
+    session_id: sessionID,
+    cwd,
+    stop_hook_active: stopHookActive,
+  });
+  if (!output.trim()) {
+    return "";
+  }
+  try {
+    const decision = JSON.parse(output) as { decision?: string; reason?: string };
+    if (decision.decision === "block") {
+      return JSON.stringify({
+        decision: "block",
+        reason: decision.reason || "Keel closeout checks are incomplete.",
+      });
+    }
+  } catch {
+    // Fail closed on an unreadable decision, matching the other adapters.
+    return JSON.stringify({
+      decision: "block",
+      reason: "Keel could not evaluate closeout. Run `keel doctor` and retry.",
+    });
+  }
   return "";
 }
 
@@ -410,6 +446,10 @@ function main(): void {
         break;
       case "PostToolUse":
         handlePreToolUse(input, false);
+        break;
+      case "PostToolUseFailure":
+        // The event name is authoritative here; Codex does not have to set `failed`.
+        handlePreToolUse({ ...input, failed: true }, false);
         break;
       case "PreCompact":
         contextText = handlePreCompact(input);

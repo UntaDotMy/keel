@@ -26,7 +26,7 @@ The goal is to keep the supported entry points explicit for both human operators
 | --- | --- | --- | --- | --- | --- |
 | `help`, `help advanced`, `version`, `platform` | Supported | Supported | Supported | Supported | Safe discovery surfaces for both operators and agents. |
 | `install`, `update`, `status`, `doctor`, `repair`, `verify`, `uninstall` | Supported | Supported | Supported | Supported | Checkout and packaged-release installs retain their owning source so lifecycle commands work outside the original extraction directory. |
-| Host adapter wiring | Supported | Supported | Supported | Supported | Claude, OpenCode, Codex, Cursor, Pi, Cowork, Command Code, Grok, Oh My Pi, ZCode, and Antigravity are detected or selected with `--with`; `keel doctor` verifies the installed files and configuration, plus runtime prerequisites on adapters that declare them. |
+| Host adapter wiring | Supported | Supported | Supported | Supported | Claude, OpenCode, Codex, Cursor, Pi, Cowork, Command Code, Grok, Oh My Pi, ZCode, Antigravity, and Muse Code are detected or selected with `--with`; `keel doctor` verifies the installed files and configuration, plus runtime prerequisites on adapters that declare them. |
 | `review pre-commit`, `review pre-pr`, `review gates check` | Supported | Supported | Supported | Supported | Native review surfaces are the default deterministic proof path. |
 | `git-workflow preflight` | Supported | Supported | Supported | Supported | Main branch and PR hygiene gate before publish or merge. |
 | `memory scope`, `memory system-map`, `memory working-brief`, `memory completion-gate`, `memory recall` | Supported | Supported | Supported | Supported | Core surfaces of the **unified** `keel memory` group. |
@@ -48,6 +48,7 @@ The goal is to keep the supported entry points explicit for both human operators
 | Grok CLI | Native host configuration; Grok also discovers shared Agent Skills | Claude-compatible hooks by default; native fallback when compatibility is disabled | Native TOML entry | Existing sessions must be restarted to load new configuration. Keel keeps exactly one effective hook source. |
 | Cursor | `.cursorrules` | Native hooks | Native JSON entry | Use `--with cursor` when its config directory is absent during installation. |
 | Command Code | Mod-provided instructions | Mod lifecycle events | Native JSON entry | The installed mod requires the bundled `_shared/ts/bridge-core.ts`; doctor verifies it. |
+| Muse Code | Shared gateway skill at `~/.agents/skills`; project `AGENTS.md` or `CLAUDE.md` discovery | Native event hooks in `~/.config/muse/settings.json` | Native `mcp_servers` entry, registered `optional` | macOS and Linux only, running on Windows through WSL2. Its PreToolUse hook can block a call; input rewriting is undocumented, so the compaction reroute is not claimed. |
 | Claude Desktop / Cowork | MCP tool descriptions only | Not available | Native Desktop config | Cowork exposes no lifecycle hook surface, so it cannot enforce the pre-edit gate. |
 
 ## MCP wire eras

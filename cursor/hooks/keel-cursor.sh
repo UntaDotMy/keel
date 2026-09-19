@@ -239,8 +239,8 @@ if is_edit_class_tool "$TOOL_NAME"; then
   fi
 fi
 
-# --- Compaction reroute for Shell tools. ---
-if [ "$TOOL_NAME" = "Shell" ] && [ -n "$CMD" ]; then
+# --- Compaction reroute for every shell tool, not only the literal `Shell`. ---
+if is_shell_tool "$TOOL_NAME" && [ -n "$CMD" ]; then
   # Already wrapped — skip.
   case "$CMD" in
     keel\ run\ --*) echo '{}'; exit 0 ;;

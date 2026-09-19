@@ -240,7 +240,17 @@ pub(super) fn run_hook_session_end(
     standard_output: &mut dyn Write,
     standard_error: &mut dyn Write,
 ) -> u8 {
-    maybe_capture_session_summary(standard_input, standard_error);
+    // Read the payload once: the marker release and the summary capture both
+    // need it, and a `dyn Read` cannot be read twice.
+    let payload = read_json_stdin_fail_open(standard_input);
+    release_iron_law_marker(
+        payload
+            .as_ref()
+            .and_then(|document| document.get("session_id"))
+            .and_then(JsonDocument::as_str)
+            .unwrap_or_default(),
+    );
+    maybe_capture_session_summary_from_payload(payload.as_ref(), standard_error);
     run_hook_lifecycle("session-end", standard_output, standard_error)
 }
 
@@ -254,6 +264,9 @@ pub(crate) fn run_bridge_session_end(
     standard_error: &mut dyn Write,
 ) {
     maybe_capture_session_summary_with_id(claude_home, session_id, standard_error);
+    // The bridge passes the session id directly, so release here too rather
+    // than depending on any adapter to do it.
+    release_iron_law_marker(session_id);
     run_session_end_learning(standard_error);
 }
 
@@ -318,8 +331,24 @@ pub(super) fn maybe_capture_session_summary_with_id(
 /// Best-effort by contract: every failure path returns without writing and
 /// without changing the caller's exit code. The SessionEnd prunes and learning
 /// cycle are the load-bearing work; this capture is additive.
+/// Test-facing stdin wrapper. Production SessionEnd parses its payload once and
+/// calls [`maybe_capture_session_summary_from_payload`] directly.
+#[cfg(test)]
 pub(super) fn maybe_capture_session_summary(
     standard_input: &mut dyn Read,
+    standard_error: &mut dyn Write,
+) {
+    let payload = read_json_stdin_fail_open(standard_input);
+    maybe_capture_session_summary_from_payload(payload.as_ref(), standard_error);
+}
+
+/// Capture the session summary from an already-parsed hook payload.
+///
+/// Split from the stdin form so SessionEnd can read its payload once: the same
+/// document feeds the marker release and this capture, and a `dyn Read` cannot
+/// be read twice.
+pub(super) fn maybe_capture_session_summary_from_payload(
+    payload: Option<&JsonDocument>,
     standard_error: &mut dyn Write,
 ) {
     if std::env::var(SESSION_CAPTURE_ENV_VAR)
@@ -329,10 +358,7 @@ pub(super) fn maybe_capture_session_summary(
         return;
     }
 
-    // The session id arrives on stdin (the harness writes the hook payload then
-    let stdin_payload = read_json_stdin_fail_open(standard_input);
-    let session_id = stdin_payload
-        .as_ref()
+    let session_id = payload
         .and_then(|payload| payload.get("session_id"))
         .and_then(JsonDocument::as_str)
         .unwrap_or_default();

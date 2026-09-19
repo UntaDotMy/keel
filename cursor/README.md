@@ -114,20 +114,20 @@ Full catalog organized by domain: Security & Review, API & Backend, Infrastructu
 
 | Cursor Hook Event | Bridge Subcommand | Behavior |
 |---|---|---|
-| `preToolUse` (Read/Grep) | — | Marks Iron Law satisfied, allows |
+| `preToolUse` (Read/Grep) | (none) | Passes through; Read/Grep do not clear the gate |
 | `preToolUse` (Write/Edit/Delete/...) | `pre-tool-use` (after gate satisfied) | **Blocks** with `permission: "deny"` until the model has read first; then records gate state |
-| `preToolUse` (Shell) | `rewrite` | Reroutes noisy commands via `updated_input.command` |
+| `preToolUse` (any shell tool) | `rewrite` | Reroutes noisy commands via `updated_input.command` |
 | `preToolUse` (1st per session) | `session-start` | Bootstrap + workspace digest + MCP self-heal (marker-guarded) |
 | `postToolUse` (Shell) | `observe` | Observation capture (fire-and-forget) |
 | `preCompact` | `pre-compact` | Pre-compaction learning checkpoint |
-| `stop` | `post-compact` | Turn-end checkpoint |
+| `stop` | (none) | Deliberately silent: it fires on every turn end, so running learning here would repeat per turn and risk a keep-going loop |
 | `sessionEnd` | `session-end` | Learning cycle + session capture + marker cleanup |
 
-The `preToolUse` matcher filters by tool **name** (regex): `Write|Edit|Delete|MultiEdit|ApplyPatch|Patch|Shell|Read|Grep`. Cursor tool names are capitalized (`Shell`, `Read`, `Write`, `Edit`, `Grep`, `Delete`, `Task`, `MCP:<name>`). Output contract: `{permission:"deny",user_message,agent_message}` to block, `{permission:"allow",updated_input:{command}}` to rewrite, `{}` to pass through.
+The `preToolUse` matcher filters by tool **name** (regex): `Write|Edit|Delete|StrReplace|MultiEdit|NotebookEdit|ApplyPatch|Patch|SearchReplace|Shell|Bash|PowerShell|Command|Terminal|Read|Grep`. Cursor tool names are capitalized (`Shell`, `Read`, `Write`, `Edit`, `Grep`, `Delete`, `Task`, `MCP:<name>`). Output contract: `{permission:"deny",user_message,agent_message}` to block, `{permission:"allow",updated_input:{command}}` to rewrite, `{}` to pass through.
 
 ### Iron Law enforcement
 
-The Cursor adapter enforces keel's Iron Law — **keel research before editing** (STRICT default) — using Cursor's native `preToolUse` `permission: "deny"` mechanism and `keel bridge pre-tool-use` (same Rust core as OpenCode/Codex/Pi/Claude). Edit-class tools are denied until the session has evidence of a keel research tool (`system_map` / `recall` / `context_brief` / `skill_*` / `code_search`, or matching `keel …` CLI). Plain Read/Grep does **not** clear the gate. Satisfaction is tracked at the shared path `~/.claude/state/iron-law-satisfied/<sanitized-session>`, cleaned on `sessionEnd`.
+The Cursor adapter enforces keel's Iron Law, **keel research before editing** (STRICT default), using Cursor's native `preToolUse` `permission: "deny"` mechanism and `keel bridge pre-tool-use` (same Rust core as OpenCode/Codex/Pi/Claude). Edit-class tools are denied until the session has evidence of a keel research tool (`system_map` / `recall` / `context_brief` / `skill_*` / `code_search`, or matching `keel …` CLI). Plain Read/Grep does **not** clear the gate. Satisfaction is tracked at the shared path `<keel-home>/state/iron-law-satisfied/<sanitized-session>` (`~/.keel` preferred, `~/.claude` legacy fallback), cleaned on `sessionEnd`.
 
 ## Differences from Other Adapters
 
@@ -138,7 +138,7 @@ The Cursor adapter enforces keel's Iron Law — **keel research before editing**
 | Iron Law enforcement | throws from `tool.execute.before` | `PreToolUse` `permissionDecision:"deny"` | `tool_call` `{block:true}` | `preToolUse` `permission:"deny"` |
 | Context injection | `chat.message` → output.parts | `UserPromptSubmit`/`SessionStart` stdout | `input`/`message_start` + AGENTS.md | `.cursorrules` static + `session-start` |
 | Observation recording | `tool.execute.after` | `PostToolUse` | `tool_execution_end` | `postToolUse` |
-| Learning checkpoints | `experimental.session.compacting` | `PreCompact`/`PostCompact` | `session_compact` | `preCompact`/`stop` |
+| Learning checkpoints | `experimental.session.compacting` | `PreCompact`/`PostCompact` | `session_compact` | `preCompact`/`sessionEnd` |
 | Session-end | `session.deleted` | `SessionEnd` | `session_shutdown` | `sessionEnd` |
 | Marker dir | `opencode-*` | `codex-*` | `pi-*` | `cursor-*` |
 | Runtime dep | Bun | Node/tsx + keel binary | Node + keel binary | bash + jq + keel binary |

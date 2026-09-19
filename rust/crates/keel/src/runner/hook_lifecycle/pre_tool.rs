@@ -449,6 +449,23 @@ pub(super) fn iron_law_marker_present(claude_home: &Path, session_id: &str) -> b
         || iron_law_legacy_path(claude_home, session_id).exists()
 }
 
+/// Release the Iron Law marker for a finished session.
+///
+/// Every bridge adapter clears its own marker at session end, and the native
+/// hook path has to do the same. Without it a key that outlives its session
+/// stays satisfied, so the next session to reuse that key never sees the gate.
+pub(crate) fn release_iron_law_marker(session_id: &str) {
+    let Ok(claude_home) = crate::runtime::resolve_claude_home("") else {
+        return;
+    };
+    for path in [
+        iron_law_satisfied_path(&claude_home, session_id),
+        iron_law_legacy_path(&claude_home, session_id),
+    ] {
+        let _ = fs::remove_file(path);
+    }
+}
+
 const KEEL_RESEARCH_TOOL_NAMES: &[&str] = &[
     "brief_get",
     "brief_list",

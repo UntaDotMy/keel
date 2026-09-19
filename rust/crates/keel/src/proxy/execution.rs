@@ -225,7 +225,7 @@ impl HostCapabilities {
             },
             // OMP is wired at its own `~/.omp/agent` tree through the same
             // `keel-pi.ts` extension seam as Pi, so it shares Pi's proven surface.
-            "zcode" | "antigravity" | "grok" | "opencode" | "pi" | "omp" | "commandcode" => Self {
+            "antigravity" | "opencode" | "pi" | "omp" | "commandcode" | "grok" | "zcode" => Self {
                 host: normalized,
                 protocol: "mcp/2026-07-28".to_string(),
                 request_interception: true,

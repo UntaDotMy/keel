@@ -275,6 +275,21 @@ function denyOutput(reason) {
     }
   });
 }
+// Runs `keel hook <event>`, the native hook router rather than a bridge subcommand.
+function runHookStop(payload, timeoutMs = 5e3) {
+  try {
+    const result = execFileSync(BRIDGE_BIN, ["hook", "stop"], {
+      timeout: timeoutMs,
+      input: JSON.stringify(payload),
+      stdio: ["pipe", "pipe", "pipe"],
+      encoding: "utf-8",
+      windowsHide: true
+    });
+    return result ?? "";
+  } catch {
+    return "";
+  }
+}
 function runBridge(subcommand, args, timeoutMs = 5e3) {
   try {
     const result = execFileSync(BRIDGE_BIN, ["bridge", subcommand, ...args], {
@@ -440,7 +455,25 @@ function handlePostCompact(input) {
     cwd
   ]);
 }
-function handleStop(_input) {
+function handleStop(input) {
+  const { sessionID, cwd } = resolveSessionContext(input);
+  const stopHookActive = input.stop_hook_active === true || Number(input.execution_num ?? 1) > 1;
+  const output = runHookStop({ session_id: sessionID, cwd, stop_hook_active: stopHookActive });
+  if (!output.trim()) return "";
+  try {
+    const decision = JSON.parse(output);
+    if (decision.decision === "block") {
+      return JSON.stringify({
+        decision: "block",
+        reason: decision.reason || "Keel closeout checks are incomplete."
+      });
+    }
+  } catch {
+    return JSON.stringify({
+      decision: "block",
+      reason: "Keel could not evaluate closeout. Run `keel doctor` and retry."
+    });
+  }
   return "";
 }
 function handleSessionEnd(input) {
@@ -490,6 +523,10 @@ function main() {
         break;
       case "PostToolUse":
         handlePreToolUse(input, false);
+        break;
+      case "PostToolUseFailure":
+        // The event name is authoritative here; Codex does not have to set `failed`.
+        handlePreToolUse({ ...input, failed: true }, false);
         break;
       case "PreCompact":
         contextText = handlePreCompact(input);

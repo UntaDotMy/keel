@@ -42,7 +42,7 @@ Every hook body is wrapped in try/catch. A bridge timeout or error silently degr
 
 ### Session-start deduplication
 
-The first `chat.message` per session calls `bridge session-start` and caches via an on-disk marker at `~/.claude/state/opencode-session-started/<sessionID>`. Subsequent `chat.message` calls for the same session skip the startup injection. Markers are cleaned on `session.deleted`.
+The first `chat.message` per session calls `bridge session-start` and caches via an on-disk marker at `<keel-home>/state/opencode-session-started/<sessionID>` (`~/.keel` preferred, `~/.claude` legacy fallback). Subsequent `chat.message` calls for the same session skip the startup injection. Markers are cleaned on `session.deleted`.
 
 ### Session-end on deletion, not idle
 

@@ -3,10 +3,10 @@
   "_extensionFile": "keel-pi.ts",
   "_extensionEvents": [
     "session_start",
-    "input",
-    "message_start",
+    "before_agent_start",
     "tool_call",
     "tool_execution_end",
+    "session_before_compact",
     "session_compact",
     "session_shutdown"
   ],
@@ -21,7 +21,7 @@
     },
     "UserPromptSubmit": {
       "description": "Restates the iron law research-first rules on every prompt and injects a short context brief (skill routing decision + pointers).",
-      "deliveredBy": "keel-pi.ts on 'input' and 'message_start' (role=user)",
+      "deliveredBy": "keel-pi.ts on 'before_agent_start'",
       "keelCommand": "keel bridge user-prompt --session <id> --cwd <dir> --prompt <text>",
       "mcpEquivalent": "skill_route / context_brief (tool call)",
       "manualTrigger": "The AGENTS.md file loaded at startup serves the same purpose — the iron law is always present in context.",
@@ -45,7 +45,7 @@
     },
     "PreCompact": {
       "description": "Learning checkpoint before the working window is rewritten. `keel bridge pre-compact` runs the idempotent learning cycle only (no context); the post-compaction context runs on the actual compaction event via the PostCompact entry below.",
-      "deliveredBy": "keel-pi.ts on 'session_compact' (runs pre-compact then post-compact)",
+      "deliveredBy": "keel-pi.ts on 'session_before_compact' (pre-compact) and 'session_compact' (post-compact)",
       "keelCommand": "keel bridge pre-compact --session <id> --cwd <dir>",
       "mcpEquivalent": "system_map_refresh (tool call)",
       "manualTrigger": "Before compaction, run: keel memory scope resolve --create-missing --refresh-system-map",
@@ -77,7 +77,7 @@
     },
     "PostToolBatch": {
       "description": "Injects a reviewer-on-close reminder before the next model turn (enforcement gate).",
-      "deliveredBy": "(folded into the 'tool_execution_end' observation + the next 'input' context brief)",
+      "deliveredBy": "(folded into the 'tool_execution_end' observation + the next 'before_agent_start' context brief)",
       "keelCommand": "keel review pre-commit --format compact",
       "mcpEquivalent": "cli (tool call with review pre-commit)",
       "manualTrigger": "Before finishing a code change, run: keel review pre-commit --format compact",

@@ -916,6 +916,8 @@ fn merge_zcode_config(path: &Path, binary: &Path) -> Result<String, String> {
             ("PreToolUse", "pre-tool-use"),
             ("PostToolUse", "post-tool-use"),
             ("PostToolUseFailure", "post-tool-use-failure"),
+            ("PreCompact", "pre-compact"),
+            ("PostCompact", "post-compact"),
             ("Stop", "stop"),
         ] {
             upsert_zcode_hook(events, event, binary, subcommand)?;
