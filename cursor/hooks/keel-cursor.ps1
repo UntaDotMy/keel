@@ -48,6 +48,22 @@ if ($Payload.tool_input) {
 $Cwd = if ($Payload.cwd) { $Payload.cwd } else { $PWD.Path }
 $SessionId = if ($Payload.conversation_id) { $Payload.conversation_id } else { "default" }
 
+# Iron Law + session-start markers, shared with Rust (`iron-law-satisfied`).
+# Mirrors cursor/hooks/keel-cursor.sh: sessionEnd releases the markers so the
+# next conversation starts unsatisfied. Without this the Windows adapter leaves
+# the marker behind and the gate never fires again for this host.
+$SessionKey = ($SessionId.ToLower() -replace '[^a-z0-9]+', '-').Trim('-')
+if ([string]::IsNullOrWhiteSpace($SessionKey)) { $SessionKey = "workspace" }
+$KeelStateRoot = if (-not [string]::IsNullOrWhiteSpace($env:KEEL_HOME)) {
+    Join-Path $env:KEEL_HOME "state"
+} elseif (Test-Path (Join-Path $env:USERPROFILE ".keel")) {
+    Join-Path $env:USERPROFILE ".keel\state"
+} else {
+    Join-Path $env:USERPROFILE ".claude\state"
+}
+$MarkerPath = Join-Path $KeelStateRoot "iron-law-satisfied\$SessionKey"
+$StartedMarkerPath = Join-Path $KeelStateRoot "cursor-session-started\$SessionKey"
+
 # Handle lifecycle events
 switch ($HookEvent) {
     "preCompact" {
@@ -61,6 +77,7 @@ switch ($HookEvent) {
     }
     "sessionEnd" {
         & $KeelBin bridge session-end --session $SessionId --cwd $Cwd 2>$null | Out-Null
+        Remove-Item -Force -ErrorAction SilentlyContinue $MarkerPath, $StartedMarkerPath
         Write-Output "{}"
         exit 0
     }

@@ -32,9 +32,10 @@ pub(crate) use hosts::managed_host_agents_block;
 #[cfg(test)]
 pub(crate) use hosts::{antigravity_hooks_payload, grok_hooks_payload};
 pub(crate) use hosts::{
-    grok_config_home, grok_hooks_are_effective, maybe_wire_agents_gateway, maybe_wire_antigravity,
-    maybe_wire_codex, maybe_wire_commandcode, maybe_wire_cowork, maybe_wire_cursor,
-    maybe_wire_grok, maybe_wire_omp, maybe_wire_opencode, maybe_wire_pi, maybe_wire_zcode,
+    grok_config_home, grok_hooks_are_effective, is_keel_muse_hook, maybe_wire_agents_gateway,
+    maybe_wire_antigravity, maybe_wire_codex, maybe_wire_commandcode, maybe_wire_cowork,
+    maybe_wire_cursor, maybe_wire_grok, maybe_wire_muse, maybe_wire_omp, maybe_wire_opencode,
+    maybe_wire_pi, maybe_wire_zcode, MUSE_HOOK_EVENTS,
 };
 pub use path::ensure_keel_home_on_path;
 pub(crate) use sync::backup_file_before_managed_overwrite;
@@ -166,6 +167,8 @@ pub struct InstallSummary {
     pub omp_wiring: Option<String>,
     /// ZCode native MCP, hooks, instructions, and gateway skill.
     pub zcode_wiring: Option<String>,
+    /// Muse Code user settings: lifecycle hooks plus the keel MCP server.
+    pub muse_wiring: Option<String>,
     /// Google Antigravity global plugin and always-on instructions.
     pub antigravity_wiring: Option<String>,
     /// Human-readable outcome of migrating keel-owned data out of a legacy
@@ -361,6 +364,7 @@ pub fn install_from_paths(
     let zcode_wiring = maybe_wire_zcode(repository_root, claude_home, detected.zcode);
     let antigravity_wiring =
         maybe_wire_antigravity(repository_root, claude_home, detected.antigravity);
+    let muse_wiring = maybe_wire_muse(claude_home, detected.muse);
     let removed_legacy_duplicates = cleanup_identical_legacy_data(claude_home, &engagement_home);
     if removed_legacy_duplicates > 0 {
         let report = migration_report.get_or_insert_with(String::new);
@@ -395,6 +399,7 @@ pub fn install_from_paths(
         omp_wiring,
         zcode_wiring,
         antigravity_wiring,
+        muse_wiring,
         migration_report,
         path_wiring,
     })

@@ -623,6 +623,132 @@ fn quoted_literals(text: &str) -> BTreeSet<String> {
     found
 }
 
+/// Tool-name vocabulary parsed from a list literal, bounded by `marker` and
+/// `terminator` so only the entries themselves are collected.
+fn tool_vocabulary(source: &str, marker: &str, terminator: &str) -> BTreeSet<String> {
+    let start = source
+        .find(marker)
+        .unwrap_or_else(|| panic!("locate `{marker}`"));
+    let body = &source[start..];
+    let end = body
+        .find(terminator)
+        .unwrap_or_else(|| panic!("locate the terminator for `{marker}`"));
+    quoted_literals(&body[..end])
+}
+
+fn rust_tool_vocabulary(repo_root: &Path, name: &str) -> BTreeSet<String> {
+    let source = fs::read_to_string(repo_root.join("rust/crates/keel/src/runner/tool_names.rs"))
+        .expect("read runner/tool_names.rs");
+    tool_vocabulary(&source, &format!("pub const {name}: &[&str] = &["), "];")
+}
+
+fn shared_ts_tool_vocabulary(repo_root: &Path, name: &str) -> BTreeSet<String> {
+    let source = fs::read_to_string(repo_root.join("_shared/ts/bridge-core.ts"))
+        .expect("read shared TypeScript bridge core");
+    tool_vocabulary(&source, &format!("const {name} = new Set(["), "]);")
+}
+
+fn bundled_codex_tool_vocabulary(repo_root: &Path, name: &str) -> BTreeSet<String> {
+    let source = fs::read_to_string(repo_root.join("codex/keel-codex.js"))
+        .expect("read the bundled Codex adapter");
+    tool_vocabulary(&source, &format!("var {name} = new Set(["), "]);")
+}
+
+/// Lowercase alphanumerics only, matching `normalize_tool_name`.
+fn normalized_tool_key(tool_name: &str) -> String {
+    tool_name
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .map(|character| character.to_ascii_lowercase())
+        .collect()
+}
+
+/// Every supported host's tool names must classify, and all three copies of the
+/// vocabulary must stay identical.
+///
+/// why: classification is a string comparison against a list, so a host whose
+/// names are absent skips the Iron Law gate and the `keel run` rewrite with no
+/// error at all: the call simply reads as clean. Command Code shipped with
+/// `edit_file`/`write_file`/`shell_command` in no list, so its gate was inert
+/// while the docs claimed it enforced. Drift between the Rust source of truth,
+/// the shared TypeScript mirror, and the hand-maintained Codex bundle is the
+/// same hole arriving by a different route.
+#[test]
+fn host_tool_vocabulary_is_complete_and_in_parity() {
+    let repo_root = repository_root();
+    for name in ["EDIT_CLASS_TOOL_NAMES", "SHELL_TOOL_NAMES"] {
+        let rust = rust_tool_vocabulary(&repo_root, name);
+        assert!(!rust.is_empty(), "{name} parsed empty out of tool_names.rs");
+        assert_eq!(
+            rust,
+            shared_ts_tool_vocabulary(&repo_root, name),
+            "_shared/ts/bridge-core.ts {name} must mirror the Rust source of truth"
+        );
+        assert_eq!(
+            rust,
+            bundled_codex_tool_vocabulary(&repo_root, name),
+            "codex/keel-codex.js {name} must mirror the Rust source of truth"
+        );
+    }
+
+    let edit = rust_tool_vocabulary(&repo_root, "EDIT_CLASS_TOOL_NAMES");
+    for tool in [
+        // Claude Code.
+        "Edit",
+        "Write",
+        "MultiEdit",
+        "NotebookEdit",
+        // Codex.
+        "apply_patch",
+        // Cursor.
+        "StrReplace",
+        "SearchReplace",
+        "Delete",
+        "Patch",
+        // Grok.
+        "search_replace",
+        // Antigravity.
+        "write_to_file",
+        "replace_file_content",
+        "multi_replace_file_content",
+        // Command Code.
+        "edit_file",
+        "write_file",
+        // OpenCode / Pi / OMP.
+        "edit",
+        "write",
+    ] {
+        assert!(
+            edit.contains(&normalized_tool_key(tool)),
+            "edit-class vocabulary is missing `{tool}`; that host silently skips the Iron Law gate"
+        );
+    }
+
+    let shell = rust_tool_vocabulary(&repo_root, "SHELL_TOOL_NAMES");
+    for tool in [
+        // Claude Code / OpenCode / Pi / OMP.
+        "Bash",
+        // Windows shells.
+        "PowerShell",
+        "pwsh",
+        "cmd",
+        // Command Code.
+        "shell_command",
+        // Cursor.
+        "Shell",
+        "Command",
+        "Terminal",
+        // Claude-compatible and host-neutral.
+        "run_command",
+        "run_terminal_command",
+    ] {
+        assert!(
+            shell.contains(&normalized_tool_key(tool)),
+            "shell vocabulary is missing `{tool}`; that host silently skips the shell gate"
+        );
+    }
+}
+
 /// Every adapter's Iron Law gate-clearing list must equal the Rust one, and every
 /// adapter must refuse compound commands.
 ///

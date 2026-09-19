@@ -209,6 +209,10 @@ pub struct CompletenessScan {
     pub sibling_count: usize,
     pub repository_head: String,
     pub diff_fingerprint: String,
+    /// True when the scan's retrieval hit its own cap, so the recorded hits are
+    /// not provably exhaustive. Coverage of the changed set is still proven, so
+    /// this is reported rather than treated as "no scan".
+    pub truncated: bool,
 }
 
 /// Marker filename key for a workspace display path.
@@ -221,6 +225,7 @@ pub fn record_completeness_gate_clear_for(
     queries: &[String],
     changed: &[String],
     sibling_count: usize,
+    truncated: bool,
 ) {
     let Ok(claude_home) = resolve_claude_home("") else {
         return;
@@ -240,6 +245,7 @@ pub fn record_completeness_gate_clear_for(
         "sibling_count": sibling_count,
         "repository_head": repository_head,
         "diff_fingerprint": diff_fingerprint,
+        "truncated": truncated,
     });
     let _ = fs::write(dir.join(format!("{key}.scanned")), payload.to_string());
 }
@@ -276,6 +282,10 @@ pub fn completeness_marker_record(
             .unwrap_or(0) as usize,
         repository_head: repository_head.to_string(),
         diff_fingerprint: diff_fingerprint.to_string(),
+        truncated: parsed
+            .get("truncated")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
     })
 }
 

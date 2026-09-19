@@ -182,23 +182,78 @@ export function clearIronLawMarker(sessionID: string): void {
   clearMarker(legacyIronLawMarkerDirectory(), sessionID, true);
 }
 
-const EDIT_CLASS_TOOL_NAMES: Record<string, true> = {
-  edit: true, write: true, multiedit: true, multi_edit: true,
-  notebookedit: true, notebook_edit: true, apply_patch: true, applypatch: true,
-  str_replace: true, strreplace: true, search_replace: true, searchreplace: true,
-  patch: true,
-};
-const SHELL_TOOL_NAMES: Record<string, true> = {
-  bash: true, shell: true, sh: true, zsh: true, fish: true,
-  powershell: true, pwsh: true, cmd: true,
-};
+/**
+ * Normalize a host tool name for classification.
+ *
+ * Collapses case and separators so `StrReplace`, `str_replace`, and `edit_file`
+ * compare equal. Mirrors `normalize_tool_name` in tool_names.rs; a name missing
+ * from the lists below silently skips the Iron Law gate on that host.
+ */
+function normalizeToolName(toolName: string): string {
+  return (toolName ?? "").toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+/** File-mutating tools. Mirrors `EDIT_CLASS_TOOL_NAMES` in tool_names.rs. */
+const EDIT_CLASS_TOOL_NAMES = new Set([
+  // Claude Code, OpenCode, Pi, OMP, and the Claude-compatible hosts.
+  "edit",
+  "write",
+  "multiedit",
+  "notebookedit",
+  // Codex.
+  "applypatch",
+  // Cursor.
+  "delete",
+  "strreplace",
+  "patch",
+  "searchreplace",
+  // Antigravity.
+  "writetofile",
+  "replacefilecontent",
+  "multireplacefilecontent",
+  // Command Code.
+  "editfile",
+  "writefile",
+  // Widely used file-tool aliases.
+  "createfile",
+  "deletefile",
+  "strreplaceeditor",
+  "multieditfile",
+]);
+
+/**
+ * Tools that carry a shell command string. Mirrors `SHELL_TOOL_NAMES` in
+ * tool_names.rs, which is wider than the rewritable set: the gate only needs to
+ * know the call is shell work, while `keel bridge rewrite` declines any name
+ * whose shell it cannot name.
+ */
+const SHELL_TOOL_NAMES = new Set([
+  "bash",
+  "shell",
+  "sh",
+  "zsh",
+  "fish",
+  "powershell",
+  "pwsh",
+  "cmd",
+  "shellcommand",
+  "command",
+  "terminal",
+  "runcommand",
+  "runterminalcommand",
+  "execcommand",
+  "localshell",
+  "unifiedexec",
+]);
 
 export function isEditClassTool(toolName: string): boolean {
-  return EDIT_CLASS_TOOL_NAMES[toolName.toLowerCase()] === true;
+  const normalized = normalizeToolName(toolName);
+  return normalized.length > 0 && EDIT_CLASS_TOOL_NAMES.has(normalized);
 }
 
 export function isShellTool(toolName: string): boolean {
-  return SHELL_TOOL_NAMES[toolName.toLowerCase()] === true;
+  const normalized = normalizeToolName(toolName);
+  return normalized.length > 0 && SHELL_TOOL_NAMES.has(normalized);
 }
 
 export function isKeelResearchTool(toolName: string): boolean {

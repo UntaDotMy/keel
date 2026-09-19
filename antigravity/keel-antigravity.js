@@ -4,7 +4,7 @@
 // Keel Antigravity hook adapter translates payloads to bridge commands and gate results.
 
 import { execFileSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -52,6 +52,60 @@ function parseGate(output) {
 
 function sessionId(input) {
   return String(input.conversationId ?? "antigravity");
+}
+
+// This adapter ships standalone (no _shared/ts copy), so the helpers below
+// mirror _shared/ts/bridge-core.ts. Keep them in step.
+function keelStateRoot() {
+  const home = homedir();
+  const envHome = process.env.KEEL_HOME || process.env.CLAUDE_TARGET_OVERRIDE;
+  if (envHome && envHome.trim()) return join(envHome.trim(), "state");
+  const neutralHome = join(home, ".keel", "state");
+  try {
+    if (existsSync(neutralHome)) return neutralHome;
+    const legacyHome = join(home, ".claude", "state");
+    if (existsSync(legacyHome)) return legacyHome;
+  } catch {
+    // fall through to the neutral default
+  }
+  return neutralHome;
+}
+
+/** Match Rust `sanitize_memory_key`: lowercase alnum, other runs become `-`. */
+function sanitizeSessionKey(value) {
+  const trimmed = String(value ?? "").trim() || "default";
+  const collapsed = trimmed
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return collapsed || "workspace";
+}
+
+// Release the Iron Law marker at session end. Every other adapter clears it, and
+// without it the marker outlives the conversation and pre-satisfies the next one.
+function clearIronLawMarker(session) {
+  const key = sanitizeSessionKey(session);
+  for (const dir of [
+    join(keelStateRoot(), "iron-law-satisfied"),
+    join(homedir(), ".claude", "state", "iron-law-satisfied"),
+  ]) {
+    try {
+      rmSync(join(dir, key), { force: true });
+    } catch {
+      // best-effort, matching the shared bridge-core clear
+    }
+  }
+}
+
+/** End-of-session bookkeeping shared by both stop paths. */
+function endSession(input) {
+  runBridge("session-end", [
+    "--session",
+    sessionId(input),
+    "--cwd",
+    cwd(input),
+  ]);
+  clearIronLawMarker(sessionId(input));
 }
 
 function cwd(input) {
@@ -160,12 +214,7 @@ function handleStop(input) {
       input.terminationReason !== "model_stop") ||
     input.fullyIdle === false
   ) {
-    runBridge("session-end", [
-      "--session",
-      sessionId(input),
-      "--cwd",
-      cwd(input),
-    ]);
+    endSession(input);
     return { decision: "allow" };
   }
   const executionNum = Number(input.executionNum ?? 1);
@@ -198,12 +247,7 @@ function handleStop(input) {
       };
     }
   }
-  runBridge("session-end", [
-    "--session",
-    sessionId(input),
-    "--cwd",
-    cwd(input),
-  ]);
+  endSession(input);
   return { decision: "allow" };
 }
 

@@ -940,11 +940,17 @@ pub(crate) fn completeness_check_gate(
             status: GateStatus::Pass,
             blocking: true,
             details: Some({
-                let siblings = completeness_marker_record_for_workspace(&workspace)
-                    .map(|record| record.sibling_count)
-                    .unwrap_or(0);
+                let record = completeness_marker_record_for_workspace(&workspace);
+                let siblings = record.as_ref().map(|scan| scan.sibling_count).unwrap_or(0);
+                // Retrieval depth is reported, never silent: this gate verifies
+                // coverage of the changed set, not the reach of a fuzzy index.
+                let depth = if record.as_ref().is_some_and(|scan| scan.truncated) {
+                    " (retrieval hit its cap, so the reported hits may not be exhaustive)"
+                } else {
+                    ""
+                };
                 format!(
-                    "{} source file(s) changed; sibling scan is current ({} sibling(s) reported)",
+                    "{} source file(s) changed; sibling scan is current ({} sibling(s) reported){depth}",
                     touched.len(),
                     siblings
                 )

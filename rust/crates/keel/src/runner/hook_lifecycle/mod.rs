@@ -32,6 +32,7 @@ mod session_start;
 mod settings;
 mod state;
 
+pub(crate) use crate::runner::tool_names::is_edit_class_tool;
 pub use dispatch::run_hook_command;
 #[cfg(test)]
 pub use dispatch::run_hook_command_with_stdin;
@@ -82,6 +83,7 @@ use settings::{
     is_help_argument, render_hook_help, run_hook_diagnose, run_hook_install, run_hook_instructions,
     run_hook_list, run_hook_uninstall,
 };
+pub(crate) use state::effective_tool_name;
 use state::{
     claude_hook_event_names, hook_session_id, hook_str, hook_tool_name, increment_counter_file,
     increment_counter_file_below_limit, read_json_stdin_fail_open, read_stdin_text,
@@ -91,7 +93,6 @@ use state::{
     RAW_OUTPUT_DEFAULT_RETENTION_DAYS, REVIEW_GATE_ENV_VAR, REVIEW_GATE_MAX_BLOCKS_ENV_VAR,
     SESSION_CAPTURE_ENV_VAR, TIMINGS_DEFAULT_RETENTION_DAYS,
 };
-pub(crate) use state::{effective_tool_name, is_edit_class_tool};
 
 #[cfg(test)]
 mod tests;

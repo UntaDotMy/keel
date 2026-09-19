@@ -99,36 +99,56 @@ function clearIronLawMarker(sessionID) {
   clearMarker(ironLawMarkerDirectory(), sessionID, true);
   clearMarker(legacyIronLawMarkerDirectory(), sessionID, true);
 }
-var EDIT_CLASS_TOOL_NAMES = {
-  edit: true,
-  write: true,
-  multiedit: true,
-  multi_edit: true,
-  notebookedit: true,
-  notebook_edit: true,
-  apply_patch: true,
-  applypatch: true,
-  str_replace: true,
-  strreplace: true,
-  search_replace: true,
-  searchreplace: true,
-  patch: true
-};
-var SHELL_TOOL_NAMES = {
-  bash: true,
-  shell: true,
-  sh: true,
-  zsh: true,
-  fish: true,
-  powershell: true,
-  pwsh: true,
-  cmd: true
-};
+// Normalized (lowercase, separators removed) so `StrReplace`, `str_replace`, and
+// `edit_file` classify together. Hand-maintained copy of bridge-core.ts.
+function normalizeToolName(toolName) {
+  return (toolName || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+var EDIT_CLASS_TOOL_NAMES = new Set([
+  "edit",
+  "write",
+  "multiedit",
+  "notebookedit",
+  "applypatch",
+  "delete",
+  "strreplace",
+  "patch",
+  "searchreplace",
+  "writetofile",
+  "replacefilecontent",
+  "multireplacefilecontent",
+  "editfile",
+  "writefile",
+  "createfile",
+  "deletefile",
+  "strreplaceeditor",
+  "multieditfile"
+]);
+var SHELL_TOOL_NAMES = new Set([
+  "bash",
+  "shell",
+  "sh",
+  "zsh",
+  "fish",
+  "powershell",
+  "pwsh",
+  "cmd",
+  "shellcommand",
+  "command",
+  "terminal",
+  "runcommand",
+  "runterminalcommand",
+  "execcommand",
+  "localshell",
+  "unifiedexec"
+]);
 function isEditClassTool(toolName) {
-  return EDIT_CLASS_TOOL_NAMES[toolName.toLowerCase()] === true;
+  var normalized = normalizeToolName(toolName);
+  return normalized.length > 0 && EDIT_CLASS_TOOL_NAMES.has(normalized);
 }
 function isShellTool(toolName) {
-  return SHELL_TOOL_NAMES[toolName.toLowerCase()] === true;
+  var normalized = normalizeToolName(toolName);
+  return normalized.length > 0 && SHELL_TOOL_NAMES.has(normalized);
 }
 var KEEL_RESEARCH_SUBCOMMANDS = [
   "system-map",

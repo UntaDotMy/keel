@@ -155,7 +155,7 @@ After installing, Codex will prompt you to review and trust the new hooks. Open 
 
 ### Iron Law enforcement
 
-The Codex adapter enforces keel's Iron Law — **read before editing** — using Codex's native `PreToolUse` deny mechanism (the same enforcement the OpenCode adapter delivers via `tool.execute.before` throwing). On the first edit-class tool call in a fresh session, the hook returns `permissionDecision: "deny"` with a reason until the model has used a reading tool (Read/Glob/Grep) or a keel reading command (`keel system-map`, `keel recall`, `keel doctor`, `keel code-search`). Once satisfied, the gate stays open for the rest of the session. Per-session satisfaction is tracked via an on-disk marker at `~/.claude/state/codex-iron-law-satisfied/<sessionID>`, cleared on `SessionEnd`.
+The Codex adapter enforces keel's Iron Law (**read before editing**) using Codex's native `PreToolUse` deny mechanism (the same enforcement the OpenCode adapter delivers via `tool.execute.before` throwing). On the first edit-class tool call in a fresh session, the hook returns `permissionDecision: "deny"` with a reason until the model has used a reading tool (Read/Glob/Grep) or a keel reading command (`keel system-map`, `keel recall`, `keel doctor`, `keel code-search`). Once satisfied, the gate stays open for the rest of the session. Per-session satisfaction is tracked via an on-disk marker at `<keel-home>/state/iron-law-satisfied/<sanitized-session>`, the single marker directory every adapter reads and writes, cleared on `SessionEnd`.
 
 ## Design
 
@@ -222,7 +222,7 @@ Codex natively supports custom agents located in `~/.codex/agents/*.toml` or plu
 | Plugin format | TypeScript module exports | hooks.json + script files |
 | Event model | Named hooks with typed I/O | JSON stdin → stdout per invocation |
 | Iron Law enforcement | throws from `tool.execute.before` | `PreToolUse` returns `permissionDecision: "deny"` |
-| Iron Law marker dir | `opencode-iron-law-satisfied` | `codex-iron-law-satisfied` |
+| Iron Law marker dir | `iron-law-satisfied` (shared) | `iron-law-satisfied` (shared) |
 | Compaction hook | `experimental.session.compacting` (awaited) | `PreCompact` (synchronous) |
 | Session-end trigger | `session.deleted` event | `SessionEnd` event |
 | Session-start marker dir | `opencode-session-started` | `codex-session-started` |

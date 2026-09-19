@@ -22,6 +22,7 @@ pub struct DetectedPlatforms {
     pub omp: bool,
     pub zcode: bool,
     pub antigravity: bool,
+    pub muse: bool,
 }
 
 pub struct PlatformDetector {
@@ -56,6 +57,8 @@ impl PlatformDetector {
                 || self.has_config_dir(".gemini/antigravity-cli")
                 || self.has_binary("antigravity")
                 || self.has_binary("agy"),
+            // Muse Code: XDG config root ~/.config/muse, or the muse binary.
+            muse: self.has_config_dir(".config/muse") || self.has_binary("muse"),
         }
     }
 

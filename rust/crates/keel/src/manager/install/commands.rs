@@ -169,6 +169,9 @@ pub fn write_install_summary(summary: &InstallSummary, output: &mut dyn Write) {
     if let Some(status) = &summary.antigravity_wiring {
         let _ = writeln!(output, "  Antigravity wiring: {status}");
     }
+    if let Some(status) = &summary.muse_wiring {
+        let _ = writeln!(output, "  Muse Code wiring: {status}");
+    }
     if let Some(migration) = &summary.migration_report {
         let _ = writeln!(output, "  Legacy migration: {migration}");
     }
@@ -282,6 +285,53 @@ pub(crate) fn remove_deprecated_config_keys(claude_home: &Path) -> Result<(), St
         write_text(&config_file, &updated_text)?;
     }
     Ok(())
+}
+
+/// Remove keel's lifecycle hooks and MCP server from Muse settings.
+///
+/// Everything else in the file is preserved: keel owns only its own matcher
+/// groups and the `keel` server entry. Returns the number of entries removed.
+fn remove_muse_managed_entries(path: &Path) -> usize {
+    let original = crate::runtime::read_text_if_exists(path).unwrap_or_default();
+    if original.trim().is_empty() {
+        return 0;
+    }
+    let Ok(mut document) = serde_json::from_str::<serde_json::Value>(
+        original.strip_prefix('\u{feff}').unwrap_or(&original),
+    ) else {
+        return 0;
+    };
+    let mut removed = 0usize;
+    if let Some(hooks) = document
+        .get_mut("hooks")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        for (event, subcommand) in crate::manager::install::MUSE_HOOK_EVENTS {
+            let Some(entries) = hooks
+                .get_mut(*event)
+                .and_then(serde_json::Value::as_array_mut)
+            else {
+                continue;
+            };
+            let before = entries.len();
+            entries.retain(|entry| !crate::manager::install::is_keel_muse_hook(entry, subcommand));
+            removed += before - entries.len();
+        }
+    }
+    if let Some(servers) = document
+        .get_mut("mcp_servers")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        if servers.remove("keel").is_some() {
+            removed += 1;
+        }
+    }
+    if removed > 0 {
+        if let Ok(rendered) = serde_json::to_string_pretty(&document) {
+            let _ = crate::runtime::write_text(path, &rendered);
+        }
+    }
+    removed
 }
 
 fn remove_zcode_managed_entries(path: &Path) -> usize {
@@ -551,6 +601,8 @@ pub(crate) fn remove_wired_adapters(claude_home: &Path) -> usize {
     removed += remove_zcode_managed_entries(&zcode_root.join("cli").join("config.json"));
     removed += remove_codex_managed_agents_md(&zcode_root.join("AGENTS.md"));
     removed += remove_gateway_skill(&zcode_root.join("skills"));
+    removed +=
+        remove_muse_managed_entries(&home.join(".config").join("muse").join("settings.json"));
 
     for antigravity in [
         home.join(".gemini")

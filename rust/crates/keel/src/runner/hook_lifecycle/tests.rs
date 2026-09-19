@@ -4932,6 +4932,7 @@ fn completeness_gate_nudges_when_edits_have_no_sibling_scan() {
         &[],
         &[],
         0,
+        false,
     );
     let mut out2 = Vec::new();
     let mut err2 = Vec::new();

@@ -533,9 +533,12 @@ pub(super) fn is_web_research_tool_name(tool_name: &str) -> bool {
         || lower.contains("context7")
 }
 
-/// Shell tools that may carry a `keel ...` research command. Delegates to
-/// `shell_rewrite` so the gate and the rewriter read one list, guaranteeing every
-/// admitted name has a shell mapping in `rewrite_shell_for_tool`.
+/// Shell tools keel may rewrite into `keel run --`.
+///
+/// Deliberately narrower than [`is_host_shell_tool_name`]: the gate reads the
+/// canonical vocabulary (every host's shell names) while the rewriter only
+/// accepts names whose shell keel knows, so a host tool like Cursor's `Command`
+/// stays gated without the rewrite ever guessing its shell.
 pub(super) fn is_shell_tool_name(tool_name: &str) -> bool {
     crate::runner::shell_rewrite::is_shell_tool_name(tool_name)
 }
@@ -598,9 +601,7 @@ pub(crate) fn is_keel_research_command(command: &str) -> bool {
 }
 
 pub(crate) fn is_host_shell_tool_name(tool_name: &str) -> bool {
-    is_shell_tool_name(tool_name)
-        || tool_name.eq_ignore_ascii_case("run_terminal_command")
-        || tool_name.eq_ignore_ascii_case("run_command")
+    crate::runner::tool_names::is_shell_tool_name(tool_name)
 }
 
 /// True when this tool call is evidence that clears the iron-law gate under `mode`.

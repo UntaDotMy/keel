@@ -81,8 +81,21 @@ function markSessionStarted(ctx: ModContext | undefined, sessionId: string): voi
   }
 }
 
-/** Current session id derived from the workspace cwd (hook params expose none). */
+/** Session id captured from the `run_start` event (hook params expose none). */
+let hostSessionId = "";
+
+/**
+ * Session key for the Iron Law gate.
+ *
+ * Command Code does not put a session id on hook params, so prefer the id the
+ * `run_start` event carries and only fall back to a workspace key before the
+ * first run starts. That fallback is shared by every session in the workspace,
+ * so a marker written under it would pre-satisfy all later sessions and read
+ * exactly like a clean session while the gate stayed disabled.
+ */
 function sessionIdFor(cwd: string): string {
+  const hostKey = sanitizeSessionKey(hostSessionId);
+  if (hostKey && hostKey !== "workspace") return `cmdc-${hostKey}`;
   const key = sanitizeSessionKey(cwd);
   if (!key || key === "workspace") return "cmdc-session";
   return `cmdc-${key}`;
@@ -249,6 +262,14 @@ export default function keelCmdcMod(cmd: ModApi): void {
   };
 
   cmd.hooks(mod);
+
+  // Session identity: `run_start` is the only seam that carries it, so capture
+  // it before the first tool call can need it.
+  cmd.on("run_start", ({ sessionId }) => {
+    if (typeof sessionId === "string" && sessionId.trim()) {
+      hostSessionId = sessionId.trim();
+    }
+  });
 
   // Compaction continuity: pre-compact learns before the window rewrite;
   // compaction_done stores the post-compact digest for the next run's re-inject.

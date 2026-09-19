@@ -970,6 +970,262 @@ pub(crate) fn maybe_wire_zcode(
     Some(status_parts.join("; "))
 }
 
+/// Muse Code lifecycle events mapped to keel hook subcommands.
+///
+/// Muse publishes Claude-compatible event names and Claude-compatible hook
+/// payload keys (`hook_event_name`, `session_id`, `tool_name`, `tool_use_id`),
+/// so the native `keel hook <event>` router already handles every one of these
+/// without a bespoke adapter. Only the events keel acts on are registered.
+pub(crate) const MUSE_HOOK_EVENTS: &[(&str, &str)] = &[
+    ("SessionStart", "session-start"),
+    ("UserPromptSubmit", "user-prompt-submit"),
+    ("PreToolUse", "pre-tool-use"),
+    ("PostToolUse", "post-tool-use"),
+    ("PostToolUseFailure", "post-tool-use-failure"),
+    ("PreCompact", "pre-compact"),
+    ("PostCompact", "post-compact"),
+    ("Stop", "stop"),
+    ("SessionEnd", "session-end"),
+];
+
+/// muse settings live under the XDG config root, not a dotted home directory.
+fn muse_settings_path(home: &Path) -> PathBuf {
+    home.join(".config").join("muse").join("settings.json")
+}
+
+/// One Muse matcher group carrying the keel hook for `subcommand`.
+///
+/// A Muse hook entry is a shell command string (`type: "command"`), not an
+/// argv pair, and Muse runs hooks with a scrubbed environment, so the binary has
+/// to be named by absolute shell-quoted path. The `matcher` key is omitted
+/// deliberately: it is optional in the documented shape, and an omitted matcher
+/// matches every tool.
+fn muse_hook_group(binary: &Path, subcommand: &str) -> serde_json::Value {
+    serde_json::json!({
+        "hooks": [{
+            "type": "command",
+            "command": crate::runner::shell_rewrite::bash_command_for_executable_args(
+                binary,
+                &format!("hook {subcommand}")
+            ),
+        }]
+    })
+}
+
+/// True when a matcher group is the keel entry for this exact event.
+pub(crate) fn is_keel_muse_hook(entry: &serde_json::Value, subcommand: &str) -> bool {
+    let needle = format!(" hook {subcommand}");
+    entry
+        .get("hooks")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|hooks| {
+            hooks.iter().any(|hook| {
+                hook.get("command")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|command| command.contains(&needle))
+            })
+        })
+}
+
+fn upsert_muse_hook(
+    events: &mut serde_json::Map<String, serde_json::Value>,
+    event: &str,
+    binary: &Path,
+    subcommand: &str,
+) -> Result<(), String> {
+    let value = events
+        .entry(event.to_string())
+        .or_insert_with(|| serde_json::json!([]));
+    let entries = value
+        .as_array_mut()
+        .ok_or_else(|| format!("hooks.{event} is not an array"))?;
+    let desired = muse_hook_group(binary, subcommand);
+    match entries
+        .iter_mut()
+        .find(|entry| is_keel_muse_hook(entry, subcommand))
+    {
+        Some(existing) => *existing = desired,
+        None => entries.push(desired),
+    }
+    Ok(())
+}
+
+/// Merge keel's hooks and MCP server into `~/.config/muse/settings.json`.
+///
+/// Muse validates this file at startup and fails every command when
+/// `schema_version` is missing or unrecognized, so the key is written first and
+/// a conflicting value is refused rather than overwritten. Every other key in
+/// the file is preserved: keel owns only its own hook entries and the `keel`
+/// MCP server entry.
+fn merge_muse_settings(path: &Path, binary: &Path) -> Result<String, String> {
+    let original = crate::runtime::read_text_if_exists(path).unwrap_or_default();
+    let mut document: serde_json::Value = if original.trim().is_empty() {
+        serde_json::json!({})
+    } else {
+        serde_json::from_str(original.strip_prefix('\u{feff}').unwrap_or(&original))
+            .map_err(|error| format!("parse {}: {error}", display_path(path)))?
+    };
+    let root = document
+        .as_object_mut()
+        .ok_or("root is not an object".to_string())?;
+    match root
+        .get("schema_version")
+        .and_then(serde_json::Value::as_u64)
+    {
+        Some(1) => {}
+        Some(other) => return Err(format!("schema_version {other} is unsupported")),
+        None => {
+            root.insert("schema_version".to_string(), serde_json::json!(1));
+        }
+    }
+
+    {
+        let hooks = json_object_child_mut(&mut document, "hooks")?;
+        for (event, subcommand) in MUSE_HOOK_EVENTS {
+            upsert_muse_hook(hooks, event, binary, subcommand)?;
+        }
+    }
+
+    {
+        let servers = json_object_child_mut(&mut document, "mcp_servers")?;
+        let keel_value = servers
+            .entry("keel".to_string())
+            .or_insert_with(|| serde_json::json!({}));
+        let keel = keel_value
+            .as_object_mut()
+            .ok_or("mcp_servers.keel is not an object")?;
+        keel.insert(
+            "transport".to_string(),
+            serde_json::Value::String("stdio".to_string()),
+        );
+        keel.insert(
+            "command".to_string(),
+            serde_json::Value::String(display_path(binary)),
+        );
+        keel.insert("args".to_string(), serde_json::json!(["mcp", "serve"]));
+        keel.insert("enabled".to_string(), serde_json::Value::Bool(true));
+        // A required server that fails to start aborts the whole Muse run, so
+        // keel must never be able to take the user's session down with it.
+        keel.insert(
+            "mode".to_string(),
+            serde_json::Value::String("optional".to_string()),
+        );
+    }
+
+    let rendered = serde_json::to_string_pretty(&document)
+        .map_err(|error| format!("serialize {}: {error}", display_path(path)))?;
+    if rendered == original.trim_end() {
+        return Ok("settings already current".to_string());
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("create {}: {error}", display_path(parent)))?;
+    }
+    write_text(path, &rendered)?;
+    Ok(format!("settings updated at {}", display_path(path)))
+}
+
+/// Wire Muse Code: hooks plus the keel MCP server in user settings.
+///
+/// Muse discovers `~/.agents/skills` natively, so the shared gateway skill is
+/// already visible and no host-local copy is needed.
+pub(crate) fn maybe_wire_muse(claude_home: &Path, detected: bool) -> Option<String> {
+    if !is_standard_home(claude_home) {
+        return None;
+    }
+    if !detected {
+        return Some("skipped (not detected)".to_string());
+    }
+    let home = match host_user_home(claude_home) {
+        Some(path) => path,
+        None => return Some("skipped (no home directory)".to_string()),
+    };
+    let binary = installed_executable_path(claude_home);
+    match merge_muse_settings(&muse_settings_path(&home), &binary) {
+        Ok(status) => Some(status),
+        Err(error) => Some(format!("settings skipped ({error})")),
+    }
+}
+
+/// Exercises the Muse settings merge next to the code it covers rather than in
+/// the shared test file, because the merge stays private to this module.
+///
+/// why: the `items_after_test_module` lint wants test modules last in the file;
+/// hosts.rs keeps other host-wiring functions after this one, and moving the
+/// tests away from their subject would cost more than it buys.
+#[cfg(test)]
+#[allow(clippy::items_after_test_module)]
+mod muse_wiring_tests {
+    use super::*;
+
+    fn read_settings(path: &Path) -> serde_json::Value {
+        serde_json::from_str(&std::fs::read_to_string(path).expect("read settings"))
+            .expect("parse settings")
+    }
+
+    #[test]
+    fn muse_settings_gain_schema_version_hooks_and_an_optional_mcp_server() {
+        let root = crate::test_support::unique_temp_dir("keel-muse-settings");
+        let path = root.join("settings.json");
+        // A pre-existing user key must survive the merge untouched.
+        std::fs::write(&path, r#"{"theme":"dark"}"#).expect("seed settings");
+        let binary = root.join("keel");
+
+        let status = merge_muse_settings(&path, &binary).expect("merge muse settings");
+        assert!(status.contains("settings updated"), "{status}");
+
+        let written = read_settings(&path);
+        // Muse fails every command at startup without this key.
+        assert_eq!(written["schema_version"].as_u64(), Some(1));
+        assert_eq!(written["theme"].as_str(), Some("dark"));
+        for (event, subcommand) in MUSE_HOOK_EVENTS {
+            let groups = written["hooks"][event]
+                .as_array()
+                .unwrap_or_else(|| panic!("{event} missing from the muse hooks block"));
+            assert!(
+                groups
+                    .iter()
+                    .any(|group| is_keel_muse_hook(group, subcommand)),
+                "{event} must carry the keel hook for {subcommand}"
+            );
+        }
+        assert_eq!(
+            written["mcp_servers"]["keel"]["transport"].as_str(),
+            Some("stdio")
+        );
+        assert_eq!(
+            written["mcp_servers"]["keel"]["command"].as_str(),
+            Some(display_path(&binary).as_str())
+        );
+        // A failed server must never abort the user's whole Muse run.
+        assert_eq!(
+            written["mcp_servers"]["keel"]["mode"].as_str(),
+            Some("optional")
+        );
+
+        merge_muse_settings(&path, &binary).expect("second merge");
+        let again = read_settings(&path);
+        for (event, _) in MUSE_HOOK_EVENTS {
+            assert_eq!(
+                again["hooks"][event].as_array().map(Vec::len),
+                Some(1),
+                "{event} must be updated in place, not duplicated"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn muse_settings_refuse_an_unsupported_schema_version() {
+        let root = crate::test_support::unique_temp_dir("keel-muse-schema");
+        let path = root.join("settings.json");
+        std::fs::write(&path, r#"{"schema_version":7}"#).expect("seed settings");
+        let error = merge_muse_settings(&path, &root.join("keel")).expect_err("must refuse");
+        assert!(error.contains("schema_version"), "{error}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
 const ANTIGRAVITY_ADAPTER_FILE: &str = "keel-antigravity.js";
 
 fn antigravity_hook_command(event: &str) -> String {
