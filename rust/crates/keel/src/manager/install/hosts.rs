@@ -1090,6 +1090,24 @@ fn muse_settings_path(home: &Path) -> PathBuf {
     home.join(".config").join("muse").join("settings.json")
 }
 
+/// Shell command for a Muse hook.
+///
+/// Muse's documented platforms are macOS and Linux (Windows through WSL2), where
+/// POSIX quoting is right. A Windows install still reads this file, and POSIX
+/// single quotes are literal characters under `cmd`, so Windows gets a
+/// double-quoted path instead, which both `cmd` and PowerShell accept.
+fn muse_hook_command(binary: &Path, subcommand: &str) -> String {
+    let path = display_path(binary);
+    if cfg!(windows) {
+        format!("\"{path}\" hook {subcommand}")
+    } else {
+        crate::runner::shell_rewrite::bash_command_for_executable_args(
+            binary,
+            &format!("hook {subcommand}"),
+        )
+    }
+}
+
 /// One Muse matcher group carrying the keel hook for `subcommand`.
 ///
 /// A Muse hook entry is a shell command string (`type: "command"`), not an
@@ -1101,10 +1119,7 @@ fn muse_hook_group(binary: &Path, subcommand: &str) -> serde_json::Value {
     serde_json::json!({
         "hooks": [{
             "type": "command",
-            "command": crate::runner::shell_rewrite::bash_command_for_executable_args(
-                binary,
-                &format!("hook {subcommand}")
-            ),
+            "command": muse_hook_command(binary, subcommand),
         }]
     })
 }
