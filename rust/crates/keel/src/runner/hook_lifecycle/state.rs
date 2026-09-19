@@ -88,28 +88,6 @@ pub(super) fn normalize_hook_input(mut input: JsonDocument) -> JsonDocument {
     input
 }
 
-pub(crate) fn is_edit_class_tool(tool_name: &str) -> bool {
-    let lower = tool_name.to_ascii_lowercase();
-    matches!(
-        lower.as_str(),
-        "edit"
-            | "write"
-            | "multiedit"
-            | "notebookedit"
-            | "apply_patch"
-            | "str_replace"
-            | "strreplace"
-            | "patch"
-            // Grok maps Claude Edit/Write/MultiEdit onto search_replace.
-            | "search_replace"
-            | "searchreplace"
-            // Google Antigravity edit-class tool names.
-            | "write_to_file"
-            | "replace_file_content"
-            | "multi_replace_file_content"
-    )
-}
-
 /// Read a hook string from Claude snake_case or Grok/Cursor camelCase.
 pub(super) fn hook_str<'a>(input: &'a JsonDocument, keys: &[&str]) -> &'a str {
     for key in keys {

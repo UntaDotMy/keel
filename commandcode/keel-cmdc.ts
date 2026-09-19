@@ -81,8 +81,62 @@ function markSessionStarted(ctx: ModContext | undefined, sessionId: string): voi
   }
 }
 
-/** Current session id derived from the workspace cwd (hook params expose none). */
+/** Run `keel hook stop`, the native closeout gate rather than a bridge subcommand. */
+function runHookStop(payload: unknown): string {
+  try {
+    const result = execFileSync(BRIDGE_BIN, ["hook", "stop"], {
+      timeout: 5000,
+      stdio: ["pipe", "pipe", "pipe"],
+      encoding: "utf-8",
+      windowsHide: true,
+      input: JSON.stringify(payload),
+    });
+    return result ?? "";
+  } catch {
+    return "";
+  }
+}
+
+/** Last user-visible text in the thread, used as the skill-routing prompt. */
+function lastUserText(messages: unknown): string {
+  if (!Array.isArray(messages)) return "";
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const entry = messages[index] as { role?: string; content?: unknown };
+    if (!entry || entry.role !== "user") continue;
+    if (typeof entry.content === "string" && entry.content.trim()) {
+      return entry.content;
+    }
+    if (Array.isArray(entry.content)) {
+      const text = entry.content
+        .map((part) =>
+          part && typeof part === "object" &&
+          typeof (part as { text?: unknown }).text === "string"
+            ? (part as { text: string }).text
+            : "",
+        )
+        .join(" ")
+        .trim();
+      if (text) return text;
+    }
+  }
+  return "";
+}
+
+/** Session id captured from the `run_start` event (hook params expose none). */
+let hostSessionId = "";
+
+/**
+ * Session key for the Iron Law gate.
+ *
+ * Command Code does not put a session id on hook params, so prefer the id the
+ * `run_start` event carries and only fall back to a workspace key before the
+ * first run starts. That fallback is shared by every session in the workspace,
+ * so a marker written under it would pre-satisfy all later sessions and read
+ * exactly like a clean session while the gate stayed disabled.
+ */
 function sessionIdFor(cwd: string): string {
+  const hostKey = sanitizeSessionKey(hostSessionId);
+  if (hostKey && hostKey !== "workspace") return `cmdc-${hostKey}`;
   const key = sanitizeSessionKey(cwd);
   if (!key || key === "workspace") return "cmdc-session";
   return `cmdc-${key}`;
@@ -107,6 +161,8 @@ export default function keelCmdcMod(cmd: ModApi): void {
   // Run-scoped post-compact context: populated by compaction_done (which has
   // no ctx/session seam) and consumed by transformContext on the next run.
   let postCompactContext = "";
+  // The per-prompt brief is worth one bridge call per session, not one per round.
+  let promptBriefFetched = false;
   // Full keel contract from `bridge session-start` (iron law, MCP pointers,
   // memory protocol). Injected via appendSystemPrompt; short fallback below.
   let sessionStartContract = "";
@@ -137,15 +193,26 @@ export default function keelCmdcMod(cmd: ModApi): void {
 
     // Per-run context: post-compact re-push (EPHEMERAL, never rewrites transcript)
     transformContext: async ({ messages, state }) => {
-      if (!postCompactContext) return messages;
+      // `transformContext` is the only per-run seam Command Code exposes for
+      // injecting context, so the per-prompt brief is fetched here, once.
+      let promptBrief = "";
+      if (!promptBriefFetched) {
+        promptBriefFetched = true;
+        const prompt = lastUserText(messages);
+        const args = ["--session", sessionIdFor(cmd.cwd), "--cwd", cmd.cwd];
+        if (prompt) args.push("--prompt", prompt);
+        promptBrief = runBridge("user-prompt", args, 5000);
+      }
+      if (!postCompactContext && !promptBrief) return messages;
       const restored = postCompactContext;
       postCompactContext = "";
+      const blocks = [promptBrief, restored].filter((block) => block !== "");
       const keelBlock: { role: "user"; content: string } = {
         role: "user",
-        content: `--- keel post-compaction context (re-injected; use this to resume the job) ---\n${restored}\n--- end keel post-compaction context ---`,
+        content: `--- keel context (injected; this is not user input) ---\n${blocks.join("\n\n")}\n--- end keel context ---`,
       };
       // Inject as the first user message after the system prompt so the model
-      // sees it at the top of the resumed window.
+      // sees it at the top of the window.
       const insertAt = Math.min(
         1,
         Array.isArray(messages) ? messages.length : 0,
@@ -240,6 +307,28 @@ export default function keelCmdcMod(cmd: ModApi): void {
       runBridge("observe", args, 2000, payload);
     },
 
+    // Closeout gate: `keel hook stop` can force the run onward, and `onStop` is
+    // the only Command Code seam that can. An unreadable decision is no opinion.
+    onStop: async () => {
+      const output = runHookStop({
+        session_id: sessionIdFor(cmd.cwd),
+        cwd: cmd.cwd,
+      });
+      if (!output.trim()) return undefined;
+      try {
+        const decision = JSON.parse(output) as { decision?: string; reason?: string };
+        if (decision.decision === "block") {
+          return {
+            continue: true,
+            reason: decision.reason || "Keel closeout checks are incomplete.",
+          };
+        }
+      } catch {
+        return undefined;
+      }
+      return undefined;
+    },
+
     // Session end: learning + marker cleanup
     onSessionEnd: async () => {
       const sessionId = sessionIdFor(cmd.cwd);
@@ -249,6 +338,14 @@ export default function keelCmdcMod(cmd: ModApi): void {
   };
 
   cmd.hooks(mod);
+
+  // Session identity: `run_start` is the only seam that carries it, so capture
+  // it before the first tool call can need it.
+  cmd.on("run_start", ({ sessionId }) => {
+    if (typeof sessionId === "string" && sessionId.trim()) {
+      hostSessionId = sessionId.trim();
+    }
+  });
 
   // Compaction continuity: pre-compact learns before the window rewrite;
   // compaction_done stores the post-compact digest for the next run's re-inject.

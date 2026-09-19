@@ -10,6 +10,7 @@ pub mod learning;
 pub mod observation;
 pub mod shell_rewrite;
 pub mod telemetry;
+pub mod tool_names;
 pub mod tool_timings;
 
 use std::cell::RefCell;

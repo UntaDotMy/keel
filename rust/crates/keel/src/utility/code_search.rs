@@ -278,7 +278,7 @@ fn run_code_search_siblings(
             &root,
             flags.string_value("claude-home"),
             query,
-            80,
+            SIBLING_RETRIEVAL_LIMIT,
         ) {
             Ok(results) => results,
             Err(error) => {
@@ -295,24 +295,25 @@ fn run_code_search_siblings(
                 "[{query}] {}:{}-{} ({}) {}",
                 hit.path, hit.start_line, hit.end_line, hit.reason, hit.snippet
             ));
-            if sibling_hits.len() >= 80 {
+            if sibling_hits.len() >= SIBLING_OUTPUT_LIMIT {
                 output_truncated = true;
                 break;
             }
         }
-        if sibling_hits.len() >= 80 {
+        if sibling_hits.len() >= SIBLING_OUTPUT_LIMIT {
             break;
         }
     }
     let complete = sibling_scan_complete(retrieval_truncated, output_truncated);
-    if complete {
-        crate::runner::hook_lifecycle::record_completeness_gate_clear_for(
-            &root,
-            &queries,
-            &changed,
-            sibling_hits.len(),
-        );
-    }
+    // Record the scan even when retrieval capped out: the gate verifies that a
+    // scan ran for this change, not that a fuzzy index enumerated every hit.
+    crate::runner::hook_lifecycle::record_completeness_gate_clear_for(
+        &root,
+        &queries,
+        &changed,
+        sibling_hits.len(),
+        !complete,
+    );
     if flags.bool_value("json") {
         let payload = serde_json::json!({
             "queries": queries,
@@ -336,7 +337,7 @@ fn run_code_search_siblings(
     if !complete {
         let _ = writeln!(
             standard_output,
-            "scan incomplete: result limits were reached; completeness marker was not written"
+            "scan incomplete: result limits were reached, so the recorded hits may not be exhaustive"
         );
     }
     if sibling_hits.is_empty() {
@@ -357,6 +358,22 @@ fn run_code_search_siblings(
 fn sibling_scan_complete(retrieval_truncated: bool, output_truncated: bool) -> bool {
     !retrieval_truncated && !output_truncated
 }
+
+/// Retrieval depth for one sibling query.
+///
+/// The scan exists to prove it saw every match, so the retrieval cap has to
+/// clear a real match set. At the previous cap of 80 the index returned the cap
+/// for any meaningful query in a large workspace, `retrieval_truncated` was set
+/// on every run, and `complete` became unreachable. That left the review gate's
+/// completeness check permanently unsatisfiable rather than merely strict. The
+/// scan is an occasional post-fix step, not a hot path, so a deeper retrieval is
+/// the right trade.
+const SIBLING_RETRIEVAL_LIMIT: usize = 400;
+
+/// Reported sibling hits are capped so the tool output stays readable. Hitting
+/// this cap also marks the scan incomplete, so the two limits stay independent:
+/// a scan can retrieve everything and still report truncation honestly.
+const SIBLING_OUTPUT_LIMIT: usize = 80;
 
 fn resolve_root(
     raw: &str,

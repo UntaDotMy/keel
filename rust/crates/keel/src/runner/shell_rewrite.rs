@@ -48,13 +48,18 @@ pub enum RewriteShell {
     PlatformDefault,
 }
 
-/// Host tool names that carry a shell command string.
+/// Host tool names whose command text keel may rewrite into `keel run --`.
 ///
-/// Single source of truth: the PreToolUse gate, `keel bridge rewrite`, and
-/// [`rewrite_shell_for_tool`] all read this list. One list is what stops the
-/// regression this const was introduced for: the gate admitted powershell,
-/// pwsh, and cmd while the rewriter assumed every one of them was bash, which
-/// corrupted the command it handed back.
+/// This is the *rewritable* subset of the canonical shell vocabulary, not the
+/// whole of it: a rewrite has to hand the command back in the syntax of the
+/// shell that will actually parse it, so a name only belongs here once its shell
+/// is known. Names that carry a shell command on some host but have no known
+/// shell (Cursor's `Command`/`Terminal`, the host-neutral `run_command`) stay
+/// gated through `crate::runner::tool_names` without being rewritten. The gate
+/// protects them and [`rewrite_shell_for_tool`] never has to guess.
+///
+/// Entries are stored in normalized (separator-free) form; see
+/// `crate::runner::tool_names::normalize_tool_name`.
 pub const SHELL_TOOL_NAMES: &[&str] = &[
     "bash",
     "shell",
@@ -64,21 +69,34 @@ pub const SHELL_TOOL_NAMES: &[&str] = &[
     "powershell",
     "pwsh",
     "cmd",
+    // Command Code's cross-platform shell tool; its shell is the platform's own.
+    "shellcommand",
 ];
 
 /// Whether `tool_name` is a shell tool whose command text keel may rewrite.
 pub fn is_shell_tool_name(tool_name: &str) -> bool {
-    SHELL_TOOL_NAMES.contains(&tool_name.trim().to_ascii_lowercase().as_str())
+    let normalized = super::tool_names::normalize_tool_name(tool_name);
+    !normalized.is_empty() && SHELL_TOOL_NAMES.contains(&normalized.as_str())
 }
 
-/// Map a host tool name to the shell its command text must stay valid in.
+/// Map a rewritable host tool name to the shell its command text must stay valid in.
 ///
 /// Every name in [`SHELL_TOOL_NAMES`] must map to the shell that actually parses
-/// it. An unknown name falls back to `Bash`, matching the historical default.
+/// it. `shell_command` is the one name whose shell is decided by the host
+/// platform rather than by the tool name: Command Code runs it through `sh` on
+/// Unix and `cmd.exe` on Windows, so the prefix has to follow the platform or
+/// the rewritten command is rejected by the shell that receives it.
 pub fn rewrite_shell_for_tool(tool_name: &str) -> RewriteShell {
-    match tool_name.trim().to_ascii_lowercase().as_str() {
+    match super::tool_names::normalize_tool_name(tool_name).as_str() {
         "powershell" | "pwsh" => RewriteShell::PowerShell,
         "cmd" => RewriteShell::Cmd,
+        "shellcommand" => {
+            if cfg!(windows) {
+                RewriteShell::Cmd
+            } else {
+                RewriteShell::Bash
+            }
+        }
         _ => RewriteShell::Bash,
     }
 }

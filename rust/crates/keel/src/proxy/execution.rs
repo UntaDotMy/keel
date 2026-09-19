@@ -108,6 +108,7 @@ impl HostCapabilities {
         "grok",
         "zcode",
         "antigravity",
+        "muse",
     ];
 
     /// No proven interception surface at all. Unknown names resolve here too;
@@ -198,9 +199,33 @@ impl HostCapabilities {
                 session_identity: true,
                 execution_receipt: true,
             },
+            // Muse Code's PreToolUse hook is documented to block a call before
+            // it runs, so the gate is proven; input rewriting is not, so unclaimed.
+            "muse" => Self {
+                host: normalized,
+                protocol: "mcp/2026-07-28".to_string(),
+                request_interception: true,
+                pre_tool_interception: true,
+                post_tool_interception: true,
+                context_rewrite: false,
+                mcp_transport: "stdio".to_string(),
+                mcp_2026_07_28_support: true,
+                skill_wiring: true,
+                memory_wiring: false,
+                known_bypasses: vec!["direct_terminal_execution".to_string()],
+                support_state: HostGovernanceState::PartiallyGoverned,
+
+                pre_tool_intercept: true,
+                post_tool_reduce: true,
+                permission_gate: true,
+                dynamic_tool_exposure: false,
+                context_injection_control: true,
+                session_identity: true,
+                execution_receipt: true,
+            },
             // OMP is wired at its own `~/.omp/agent` tree through the same
             // `keel-pi.ts` extension seam as Pi, so it shares Pi's proven surface.
-            "zcode" | "antigravity" | "grok" | "opencode" | "pi" | "omp" | "commandcode" => Self {
+            "antigravity" | "opencode" | "pi" | "omp" | "commandcode" | "grok" | "zcode" => Self {
                 host: normalized,
                 protocol: "mcp/2026-07-28".to_string(),
                 request_interception: true,

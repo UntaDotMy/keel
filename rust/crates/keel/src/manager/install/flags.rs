@@ -13,6 +13,7 @@ pub enum PlatformName {
     Omp,
     Zcode,
     Antigravity,
+    Muse,
 }
 
 impl PlatformName {
@@ -28,6 +29,7 @@ impl PlatformName {
             "omp" | "oh-my-pi" | "oh_my_pi" => Some(Self::Omp),
             "zcode" | "z-code" => Some(Self::Zcode),
             "antigravity" | "agy" | "gemini-antigravity" => Some(Self::Antigravity),
+            "muse" | "muse-code" | "musecode" => Some(Self::Muse),
             _ => None,
         }
     }
@@ -88,6 +90,9 @@ pub(crate) fn apply_overrides(
     if overrides.force.contains(&PlatformName::Antigravity) {
         detected.antigravity = true;
     }
+    if overrides.force.contains(&PlatformName::Muse) {
+        detected.muse = true;
+    }
     if overrides.skip.contains(&PlatformName::Opencode) {
         detected.opencode = false;
     }
@@ -117,6 +122,9 @@ pub(crate) fn apply_overrides(
     }
     if overrides.skip.contains(&PlatformName::Antigravity) {
         detected.antigravity = false;
+    }
+    if overrides.skip.contains(&PlatformName::Muse) {
+        detected.muse = false;
     }
     detected
 }

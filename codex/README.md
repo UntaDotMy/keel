@@ -142,34 +142,34 @@ After installing, Codex will prompt you to review and trust the new hooks. Open 
 
 | Codex Hook Event | Bridge Subcommand | Timing | Blocking? |
 |---|---|---|---|
-| `SessionStart` (1st per session) | `bridge session-start` — injects bootstrap + workspace digest + MCP self-heal | Before model sees message | Yes (500ms timeout) |
-| `UserPromptSubmit` (every) | `bridge user-prompt` — injects iron law + skill brief | Before model sees message | Yes (500ms timeout) |
-| `PreToolUse` (reading tool) | marks Iron Law satisfied, allows | Before tool runs | Never blocks |
-| `PreToolUse` (edit-class) | `bridge pre-tool-use` — Iron Law edit gate; `permissionDecision: "deny"` if gate not satisfied | Before tool runs | **Blocks** edits until the model has read first |
-| `PreToolUse` (Bash/shell) | `bridge pre-tool-use` gate + `bridge observe` + `bridge rewrite` — records observation, blocks unsafe shell actions, reroutes noisy commands via `updatedInput` | Before tool runs | Deny on an unevaluated gate; otherwise allow (with mutation) |
-| `PostToolUse` | `bridge observe` — records tool observation | After tool completes | Fire-and-forget (500ms timeout) |
-| `PreCompact` | `bridge pre-compact` (pre-compaction learning checkpoint) | During compaction | Yes (500ms timeout) |
-| `PostCompact` | `bridge post-compact` — post-compaction context + learning | After compaction | Fire-and-forget (500ms timeout) |
-| `Stop` | No bridge call — intentionally silent to avoid a per-turn learning/keep-going loop | On turn end | No |
-| `SessionEnd` | `bridge session-end` — learning cycle + session summary capture + marker cleanup | On session end | Fire-and-forget (500ms timeout) |
+| `SessionStart` (1st per session) | `bridge session-start`, injects bootstrap + workspace digest + MCP self-heal | Before model sees message | Yes (bounded timeout) |
+| `UserPromptSubmit` (every) | `bridge user-prompt`, injects iron law + skill brief | Before model sees message | Yes (bounded timeout) |
+| `PreToolUse` (reading tool) | passes through; Read/Grep do not clear the STRICT gate | Before tool runs | Never blocks |
+| `PreToolUse` (edit-class) | `bridge pre-tool-use`, Iron Law edit gate; `permissionDecision: "deny"` if gate not satisfied | Before tool runs | **Blocks** edits until the model has read first |
+| `PreToolUse` (Bash/shell) | `bridge pre-tool-use` gate + `bridge observe` + `bridge rewrite`, records observation, blocks unsafe shell actions, reroutes noisy commands via `updatedInput` | Before tool runs | Deny on an unevaluated gate; otherwise allow (with mutation) |
+| `PostToolUse` | `bridge observe`, records tool observation | After tool completes | Fire-and-forget (bounded timeout) |
+| `PreCompact` | `bridge pre-compact` (pre-compaction learning checkpoint) | During compaction | Yes (bounded timeout) |
+| `PostCompact` | `bridge post-compact`, post-compaction context + learning | After compaction | Fire-and-forget (bounded timeout) |
+| `Stop` | No bridge call, intentionally silent to avoid a per-turn learning/keep-going loop | On turn end | No |
+| `SessionEnd` | `bridge session-end`, learning cycle + session summary capture + marker cleanup | On session end | Fire-and-forget (bounded timeout) |
 
 ### Iron Law enforcement
 
-The Codex adapter enforces keel's Iron Law — **read before editing** — using Codex's native `PreToolUse` deny mechanism (the same enforcement the OpenCode adapter delivers via `tool.execute.before` throwing). On the first edit-class tool call in a fresh session, the hook returns `permissionDecision: "deny"` with a reason until the model has used a reading tool (Read/Glob/Grep) or a keel reading command (`keel system-map`, `keel recall`, `keel doctor`, `keel code-search`). Once satisfied, the gate stays open for the rest of the session. Per-session satisfaction is tracked via an on-disk marker at `~/.claude/state/codex-iron-law-satisfied/<sessionID>`, cleared on `SessionEnd`.
+The Codex adapter enforces keel's Iron Law (**read before editing**) using Codex's native `PreToolUse` deny mechanism (the same enforcement the OpenCode adapter delivers via `tool.execute.before` throwing). On the first edit-class tool call in a fresh session, the hook returns `permissionDecision: "deny"` with a reason until the model has used a reading tool (Read/Glob/Grep) or a keel reading command (`keel system-map`, `keel recall`, `keel doctor`, `keel code-search`). Once satisfied, the gate stays open for the rest of the session. Per-session satisfaction is tracked via an on-disk marker at `<keel-home>/state/iron-law-satisfied/<sanitized-session>`, the single marker directory every adapter reads and writes, cleared on `SessionEnd`.
 
 ## Design
 
 ### Feed-forward, never block
 
-Every hook body is wrapped in try/catch. A bridge timeout or error silently degrades to "no context injected" — the user's turn proceeds normally with no visible interruption. Errors are logged to stderr.
+Every hook body is wrapped in try/catch. A bridge timeout or error silently degrades to "no context injected", the user's turn proceeds normally with no visible interruption. Errors are logged to stderr.
 
 ### Session-start deduplication
 
-The first `SessionStart` per session calls `bridge session-start` and caches via an on-disk marker at `~/.claude/state/codex-session-started/<sessionID>`. Subsequent `SessionStart` calls for the same session skip the startup injection. Markers are cleaned on session end.
+The first `SessionStart` per session calls `bridge session-start` and caches via an on-disk marker at `<keel-home>/state/codex-session-started/<sessionID>` (`~/.keel` preferred, `~/.claude` legacy fallback). Subsequent `SessionStart` calls for the same session skip the startup injection. Markers are cleaned on session end.
 
-### 500ms hard timeout
+### Bounded bridge timeouts
 
-Every bridge call uses `execFileSync` with `timeout: 500` — Node.js built-in timeout that kills the subprocess. This guarantees the plugin never blocks a turn for more than half a second.
+Every bridge call uses `execFileSync` with an explicit timeout that kills the subprocess: 5000ms for the gate and lifecycle calls, 2000ms for observation payloads. A turn is never blocked indefinitely by a slow or missing keel binary.
 
 ### Binary resolution
 
@@ -222,7 +222,7 @@ Codex natively supports custom agents located in `~/.codex/agents/*.toml` or plu
 | Plugin format | TypeScript module exports | hooks.json + script files |
 | Event model | Named hooks with typed I/O | JSON stdin → stdout per invocation |
 | Iron Law enforcement | throws from `tool.execute.before` | `PreToolUse` returns `permissionDecision: "deny"` |
-| Iron Law marker dir | `opencode-iron-law-satisfied` | `codex-iron-law-satisfied` |
+| Iron Law marker dir | `iron-law-satisfied` (shared) | `iron-law-satisfied` (shared) |
 | Compaction hook | `experimental.session.compacting` (awaited) | `PreCompact` (synchronous) |
 | Session-end trigger | `session.deleted` event | `SessionEnd` event |
 | Session-start marker dir | `opencode-session-started` | `codex-session-started` |

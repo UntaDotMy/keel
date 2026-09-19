@@ -201,6 +201,10 @@ pub fn run_repair_command(
             crate::manager::install::maybe_wire_zcode(&repo_root, &claude_home, detected.zcode),
         ),
         (
+            "muse",
+            crate::manager::install::maybe_wire_muse(&claude_home, detected.muse),
+        ),
+        (
             "antigravity",
             crate::manager::install::maybe_wire_antigravity(
                 &repo_root,

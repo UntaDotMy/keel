@@ -1063,7 +1063,13 @@ pub(crate) fn report_bridge_host_wiring(
     // Cursor: .cursorrules + hooks.json + hook script + mcp.json keel entry.
     let cursor_rules = home.join(".cursorrules");
     let cursor_hooks = home.join(".cursor").join("hooks.json");
-    let cursor_script = home.join(".cursor").join("hooks").join("keel-cursor.sh");
+    // Windows runs the PowerShell adapter; the POSIX one is the default elsewhere.
+    let cursor_script_name = if cfg!(windows) {
+        "keel-cursor.ps1"
+    } else {
+        "keel-cursor.sh"
+    };
+    let cursor_script = home.join(".cursor").join("hooks").join(cursor_script_name);
     let cursor_mcp_json = home.join(".cursor").join("mcp.json");
     let cursor_mcp = if cursor_mcp_json.is_file() {
         fs::read_to_string(&cursor_mcp_json)

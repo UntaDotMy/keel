@@ -198,31 +198,27 @@ fn record_observation_with_outcome(input: &JsonDocument, failed: bool) -> std::i
 /// program+subcommand (`git commit`, `cargo test`) does.
 fn derive_signature(tool_name: &str, input: &JsonDocument) -> Option<(String, String)> {
     let tool_input = input.get("tool_input");
-    let tool_name_lower = tool_name.to_ascii_lowercase();
-    match tool_name_lower.as_str() {
-        "bash" | "run_terminal_command" => {
-            let command = tool_input
-                .and_then(|value| value.get("command"))
-                .and_then(JsonDocument::as_str)
-                .unwrap_or_default();
-            let scrubbed = scrub_secrets(command);
-            let signature = command_signature(&scrubbed)?;
-            Some((signature, truncate_detail(&scrubbed)))
-        }
-        "edit" | "write" | "multiedit" | "notebookedit" | "search_replace" => {
-            let path = tool_input
-                .and_then(|value| value.get("file_path"))
-                .and_then(JsonDocument::as_str)
-                .unwrap_or_default();
-            let extension = file_extension(path);
-            let signature = format!("edit:{extension}");
-            Some((signature, truncate_detail(path)))
-        }
-        // Read/Grep/Glob/etc. are navigation noise for behavioral learning:
-        // they recur constantly without expressing an intent worth distilling.
-        // Skipping them keeps the signal-to-noise high and the log small.
-        _ => None,
+    if crate::runner::tool_names::is_shell_tool_name(tool_name) {
+        let command = tool_input
+            .and_then(|value| value.get("command"))
+            .and_then(JsonDocument::as_str)
+            .unwrap_or_default();
+        let scrubbed = scrub_secrets(command);
+        let signature = command_signature(&scrubbed)?;
+        return Some((signature, truncate_detail(&scrubbed)));
     }
+    if crate::runner::tool_names::is_edit_class_tool(tool_name) {
+        let path = tool_input
+            .and_then(|value| value.get("file_path"))
+            .and_then(JsonDocument::as_str)
+            .unwrap_or_default();
+        let extension = file_extension(path);
+        let signature = format!("edit:{extension}");
+        return Some((signature, truncate_detail(path)));
+    }
+    // Read/Grep/Glob are navigation noise for behavioral learning: they recur
+    // constantly without expressing an intent, so skipping keeps signal high.
+    None
 }
 
 /// Extract `program` or `program subcommand` from a shell command line.

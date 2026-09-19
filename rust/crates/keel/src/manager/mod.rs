@@ -88,7 +88,7 @@ fn run_interactive_install(
     let _ = writeln!(standard_output, "1. Detected harness: {detected_harness}");
     let _ = writeln!(standard_output);
     let harness_choice = read_line_from_stdin(
-        "   Harness [claude/opencode/codex/pi/cursor/cowork/commandcode/grok/omp/zcode/antigravity] (Enter to accept): ",
+        "   Harness [claude/opencode/codex/pi/cursor/cowork/commandcode/grok/omp/zcode/antigravity/muse] (Enter to accept): ",
     );
     let harness = if harness_choice.trim().is_empty() {
         detected_harness
@@ -188,7 +188,7 @@ fn interactive_overrides(flag_set: &FlagSet, harness: &str) -> Result<InstallOve
     }
     let platform = PlatformName::parse(harness).ok_or_else(|| {
         format!(
-            "Unsupported harness {harness:?}. Choose claude, opencode, codex, pi, cursor, cowork, commandcode, grok, omp, zcode, or antigravity."
+            "Unsupported harness {harness:?}. Choose claude, opencode, codex, pi, cursor, cowork, commandcode, grok, omp, zcode, antigravity, or muse."
         )
     })?;
     overrides.skip.remove(&platform);
@@ -388,6 +388,7 @@ mod interactive_tests {
         for (name, expected) in [
             ("omp", PlatformName::Omp),
             ("zcode", PlatformName::Zcode),
+            ("muse", PlatformName::Muse),
             ("antigravity", PlatformName::Antigravity),
         ] {
             let overrides = interactive_overrides(&flags, name).unwrap();

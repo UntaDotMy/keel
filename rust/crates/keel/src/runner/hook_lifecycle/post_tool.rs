@@ -146,11 +146,7 @@ pub(super) fn run_post_tool_comment_lint(tool_name: &str, input: &JsonDocument) 
     if std::env::var("CLAUDE_SKILLS_COMMENT_LINT_GATE").as_deref() == Ok("off") {
         return None;
     }
-    let lower = tool_name.to_ascii_lowercase();
-    let is_edit = matches!(
-        lower.as_str(),
-        "edit" | "write" | "multiedit" | "search_replace" | "searchreplace"
-    );
+    let is_edit = crate::runner::tool_names::is_edit_class_tool(tool_name);
     let edited_path = if is_edit {
         input
             .get("tool_input")
@@ -210,11 +206,7 @@ pub(super) fn run_post_tool_graph_context(tool_name: &str, input: &JsonDocument)
     if std::env::var("CLAUDE_SKILLS_GRAPH_CONTEXT_GATE").as_deref() == Ok("off") {
         return None;
     }
-    let lower = tool_name.to_ascii_lowercase();
-    let is_edit = matches!(
-        lower.as_str(),
-        "edit" | "write" | "multiedit" | "search_replace" | "searchreplace"
-    );
+    let is_edit = crate::runner::tool_names::is_edit_class_tool(tool_name);
     let edited_path = if is_edit {
         input
             .get("tool_input")

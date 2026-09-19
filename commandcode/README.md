@@ -51,7 +51,7 @@ cmdc --mod ./commandcode/keel-cmdc.ts
 | keel capability | Command Code seam | `keel bridge` call |
 |---|---|---|
 | SessionStart context | `cmd.hooks({onSessionStart})` | `bridge session-start --session <id> --cwd <cwd>` (once per session) |
-| Per-prompt memory push | `cmd.hooks({transformContext})` (after compaction) | `bridge user-prompt --session --cwd --prompt` |
+| Per-prompt memory push | `cmd.hooks({transformContext})` | `bridge user-prompt --session --cwd --prompt` (fetched once per session, then re-injected with any post-compact digest) |
 | **Post-compact continuity** | `cmd.on('compaction_start')` + `cmd.on('compaction_done')` | `compaction_start` → `bridge pre-compact`; `compaction_done` → `bridge post-compact` (memory digest re-push) |
 | Iron Law gate | `cmd.hooks({beforeToolCall})` | `bridge pre-tool-use --session --cwd --tool <name>` (`KEEL_GATE_DENY` → block) |
 | `run_command` compaction wrapper | `cmd.hooks({beforeToolCall})` (shell tools) | `bridge rewrite --tool <name>` (stdin) → `KEEL_REWRITE <cmd>` |
@@ -76,7 +76,7 @@ The mod closes that gap the same way the Claude Code PreCompact/PostCompact hook
 
 - **No stdin JSON envelope.** Command Code's ModApi exposes typed hooks (`onSessionStart`, `beforeToolCall`, `afterToolCall`, `transformContext`, `onSessionEnd`) plus `cmd.on('compaction_start'|'compaction_done')`; the adapter is a TS mod, not a shell/JSON hook script.
 - **Compaction events are observed, not awaited.** `compaction_start`/`compaction_done` fire on the event bus; the mod stores the post-compact digest in its closure and re-injects it on the next `transformContext`. This mirrors OpenCode's `experimental.session.compacting` (awaited) and Pi's `session_compact`; the host provides the seam, keel fills it.
-- **Session identity.** Command Code does not expose a session id on hook params, so the mod derives one from the workspace cwd (`cmdc-<sanitized-cwd>`). The session-start marker is stored via `cmd.session.appendCustomEntry` so it survives compaction and resume.
+- **Session identity.** Command Code does not expose a session id on hook params, so the mod reads the id carried by the `run_start` event (`cmdc-<sanitized-session>`) and falls back to a workspace key only before the first run starts. That fallback is shared by every session in the workspace, so it must never become the durable identity: a marker written under it would pre-satisfy later sessions and the gate would never fire again. The session-start marker is stored via `cmd.session.appendCustomEntry` so it survives compaction and resume.
 - **No `run_command` MCP requirement.** The compaction wrapper works through `beforeToolCall` shell rewrites; the `run_command` MCP tool (registered via the keel MCP server) remains the direct-call compaction proxy.
 
 ## Uninstall

@@ -46,6 +46,18 @@
         ]
       }
     ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${PLUGIN_ROOT}/keel-codex.js\"",
+            "statusMessage": "Recording keel tool failure"
+          }
+        ]
+      }
+    ],
     "PreCompact": [
       {
         "hooks": [

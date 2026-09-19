@@ -99,36 +99,56 @@ function clearIronLawMarker(sessionID) {
   clearMarker(ironLawMarkerDirectory(), sessionID, true);
   clearMarker(legacyIronLawMarkerDirectory(), sessionID, true);
 }
-var EDIT_CLASS_TOOL_NAMES = {
-  edit: true,
-  write: true,
-  multiedit: true,
-  multi_edit: true,
-  notebookedit: true,
-  notebook_edit: true,
-  apply_patch: true,
-  applypatch: true,
-  str_replace: true,
-  strreplace: true,
-  search_replace: true,
-  searchreplace: true,
-  patch: true
-};
-var SHELL_TOOL_NAMES = {
-  bash: true,
-  shell: true,
-  sh: true,
-  zsh: true,
-  fish: true,
-  powershell: true,
-  pwsh: true,
-  cmd: true
-};
+// Normalized (lowercase, separators removed) so `StrReplace`, `str_replace`, and
+// `edit_file` classify together. Hand-maintained copy of bridge-core.ts.
+function normalizeToolName(toolName) {
+  return (toolName || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+var EDIT_CLASS_TOOL_NAMES = new Set([
+  "edit",
+  "write",
+  "multiedit",
+  "notebookedit",
+  "applypatch",
+  "delete",
+  "strreplace",
+  "patch",
+  "searchreplace",
+  "writetofile",
+  "replacefilecontent",
+  "multireplacefilecontent",
+  "editfile",
+  "writefile",
+  "createfile",
+  "deletefile",
+  "strreplaceeditor",
+  "multieditfile"
+]);
+var SHELL_TOOL_NAMES = new Set([
+  "bash",
+  "shell",
+  "sh",
+  "zsh",
+  "fish",
+  "powershell",
+  "pwsh",
+  "cmd",
+  "shellcommand",
+  "command",
+  "terminal",
+  "runcommand",
+  "runterminalcommand",
+  "execcommand",
+  "localshell",
+  "unifiedexec"
+]);
 function isEditClassTool(toolName) {
-  return EDIT_CLASS_TOOL_NAMES[toolName.toLowerCase()] === true;
+  var normalized = normalizeToolName(toolName);
+  return normalized.length > 0 && EDIT_CLASS_TOOL_NAMES.has(normalized);
 }
 function isShellTool(toolName) {
-  return SHELL_TOOL_NAMES[toolName.toLowerCase()] === true;
+  var normalized = normalizeToolName(toolName);
+  return normalized.length > 0 && SHELL_TOOL_NAMES.has(normalized);
 }
 var KEEL_RESEARCH_SUBCOMMANDS = [
   "system-map",
@@ -254,6 +274,21 @@ function denyOutput(reason) {
       permissionDecisionReason: reason
     }
   });
+}
+// Runs `keel hook <event>`, the native hook router rather than a bridge subcommand.
+function runHookStop(payload, timeoutMs = 5e3) {
+  try {
+    const result = execFileSync(BRIDGE_BIN, ["hook", "stop"], {
+      timeout: timeoutMs,
+      input: JSON.stringify(payload),
+      stdio: ["pipe", "pipe", "pipe"],
+      encoding: "utf-8",
+      windowsHide: true
+    });
+    return result ?? "";
+  } catch {
+    return "";
+  }
 }
 function runBridge(subcommand, args, timeoutMs = 5e3) {
   try {
@@ -420,7 +455,25 @@ function handlePostCompact(input) {
     cwd
   ]);
 }
-function handleStop(_input) {
+function handleStop(input) {
+  const { sessionID, cwd } = resolveSessionContext(input);
+  const stopHookActive = input.stop_hook_active === true || Number(input.execution_num ?? 1) > 1;
+  const output = runHookStop({ session_id: sessionID, cwd, stop_hook_active: stopHookActive });
+  if (!output.trim()) return "";
+  try {
+    const decision = JSON.parse(output);
+    if (decision.decision === "block") {
+      return JSON.stringify({
+        decision: "block",
+        reason: decision.reason || "Keel closeout checks are incomplete."
+      });
+    }
+  } catch {
+    return JSON.stringify({
+      decision: "block",
+      reason: "Keel could not evaluate closeout. Run `keel doctor` and retry."
+    });
+  }
   return "";
 }
 function handleSessionEnd(input) {
@@ -470,6 +523,10 @@ function main() {
         break;
       case "PostToolUse":
         handlePreToolUse(input, false);
+        break;
+      case "PostToolUseFailure":
+        // The event name is authoritative here; Codex does not have to set `failed`.
+        handlePreToolUse({ ...input, failed: true }, false);
         break;
       case "PreCompact":
         contextText = handlePreCompact(input);

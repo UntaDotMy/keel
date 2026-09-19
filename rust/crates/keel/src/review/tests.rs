@@ -654,7 +654,13 @@ fn completeness_scan_satisfies_after_marker() {
     assert!(!crate::runner::hook_lifecycle::completeness_scan_satisfies(
         &cwd, 1
     ));
-    crate::runner::hook_lifecycle::record_completeness_gate_clear_for(&workspace, &[], &[], 0);
+    crate::runner::hook_lifecycle::record_completeness_gate_clear_for(
+        &workspace,
+        &[],
+        &[],
+        0,
+        false,
+    );
     assert!(crate::runner::hook_lifecycle::completeness_scan_satisfies(
         &cwd, 0
     ));
@@ -711,6 +717,7 @@ fn completeness_cover_requires_recorded_changed_set() {
         &["auth shape".to_string()],
         &["src/auth.rs".to_string()],
         2,
+        false,
     );
     assert!(completeness_scan_covers_changed(
         &cwd,
@@ -723,12 +730,17 @@ fn completeness_cover_requires_recorded_changed_set() {
         &["auth shape".to_string()],
         &["src/auth.rs".to_string(), "src/db.rs".to_string()],
         2,
+        false,
     );
     assert!(completeness_scan_covers_changed(&cwd, &touched));
     let record = crate::runner::hook_lifecycle::completeness_marker_record_for_workspace(&cwd)
         .expect("scan record present");
     assert_eq!(record.sibling_count, 2);
     assert_eq!(record.queries, vec!["auth shape".to_string()]);
+    assert!(
+        !record.truncated,
+        "an exhaustively retrieved scan records depth"
+    );
     std::fs::write(workspace.join("src/lib.rs"), "pub fn value() -> u8 { 3 }\n")
         .expect("change previously scanned source");
     assert!(!completeness_scan_covers_changed(&cwd, &touched));
@@ -737,8 +749,17 @@ fn completeness_cover_requires_recorded_changed_set() {
         &["auth shape".to_string()],
         &touched,
         2,
+        true,
     );
     assert!(completeness_scan_covers_changed(&cwd, &touched));
+    // A capped retrieval is recorded, not hidden, and must not invalidate
+    // coverage: retrieval depth is not evidence about whether a scan ran.
+    let capped = crate::runner::hook_lifecycle::completeness_marker_record_for_workspace(&cwd)
+        .expect("scan record present");
+    assert!(
+        capped.truncated,
+        "a capped retrieval must be recorded as such"
+    );
     git_in(&workspace, &["add", "."]);
     git_in(&workspace, &["commit", "-q", "-m", "advance scanned head"]);
     assert!(!completeness_scan_covers_changed(&cwd, &touched));

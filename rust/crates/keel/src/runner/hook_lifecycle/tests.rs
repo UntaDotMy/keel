@@ -1306,6 +1306,47 @@ fn gate_messages_do_not_claim_a_nonexistent_hard_stop() {
     }
 }
 
+/// SessionEnd must release the marker, not only write it: every bridge adapter
+/// clears its own, so a key that outlives its session must not stay satisfied.
+#[test]
+fn iron_law_marker_is_released_at_session_end() {
+    let _guard = crate::test_support::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let claude_home = temp_brief_gate_home("iron-law-release");
+    let previous_home = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
+    let _home_precedence = crate::test_support::HomePrecedenceGuard::clear_keel_home();
+    std::env::set_var("CLAUDE_TARGET_OVERRIDE", &claude_home);
+
+    let session = "sess-iron-law-release";
+    let marker = claude_home
+        .join("state")
+        .join("iron-law-satisfied")
+        .join(session);
+    mark_iron_law_satisfied(session);
+    assert!(marker.is_file(), "research evidence must write the marker");
+
+    let payload = format!(r#"{{"session_id":"{session}"}}"#);
+    let mut stdin = payload.as_bytes();
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    assert_eq!(
+        run_hook_session_end(&mut stdin, &mut stdout, &mut stderr),
+        0
+    );
+    assert!(
+        !marker.exists(),
+        "SessionEnd must release the marker so the key cannot stay satisfied"
+    );
+
+    match previous_home {
+        Some(value) => std::env::set_var("CLAUDE_TARGET_OVERRIDE", value),
+        None => std::env::remove_var("CLAUDE_TARGET_OVERRIDE"),
+    }
+    let _ = std::fs::remove_dir_all(&claude_home);
+}
+
 #[test]
 fn iron_law_gate_denies_without_evidence_and_does_not_ack_on_deny() {
     // Evidence-based gate: deny does NOT write a satisfaction marker; only a
@@ -4932,6 +4973,7 @@ fn completeness_gate_nudges_when_edits_have_no_sibling_scan() {
         &[],
         &[],
         0,
+        false,
     );
     let mut out2 = Vec::new();
     let mut err2 = Vec::new();
