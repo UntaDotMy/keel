@@ -319,6 +319,14 @@ fn remove_muse_managed_entries(path: &Path) -> usize {
         }
     }
     if let Some(servers) = document
+        .get_mut("mcpServers")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        if servers.remove("keel").is_some() {
+            removed += 1;
+        }
+    }
+    if let Some(servers) = document
         .get_mut("mcp_servers")
         .and_then(serde_json::Value::as_object_mut)
     {

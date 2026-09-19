@@ -48,7 +48,7 @@ The goal is to keep the supported entry points explicit for both human operators
 | Grok CLI | Native host configuration; Grok also discovers shared Agent Skills | Claude-compatible hooks by default; native fallback when compatibility is disabled | Native TOML entry | Existing sessions must be restarted to load new configuration. Keel keeps exactly one effective hook source. |
 | Cursor | `.cursorrules` | Native hooks | Native JSON entry | Use `--with cursor` when its config directory is absent during installation. |
 | Command Code | Mod-provided instructions | Mod lifecycle events | Native JSON entry | The installed mod requires the bundled `_shared/ts/bridge-core.ts`; doctor verifies it. |
-| Muse Code | Shared gateway skill at `~/.agents/skills`; project `AGENTS.md` or `CLAUDE.md` discovery | Native event hooks in `~/.config/muse/settings.json` | Native `mcp_servers` entry, registered `optional` | macOS and Linux only, running on Windows through WSL2. Its PreToolUse hook can block a call; input rewriting is undocumented, so the compaction reroute is not claimed. |
+| Muse Code | Shared gateway skill at `~/.agents/skills`; project `AGENTS.md` or `CLAUDE.md` discovery | Native event hooks in `~/.config/muse/settings.json` | Native `mcpServers` entry, registered `optional` | macOS and Linux only, running on Windows through WSL2. Its PreToolUse hook can block a call; input rewriting is undocumented, so the compaction reroute is not claimed. |
 | Claude Desktop / Cowork | MCP tool descriptions only | Not available | Native Desktop config | Cowork exposes no lifecycle hook surface, so it cannot enforce the pre-edit gate. |
 
 ## MCP wire eras
