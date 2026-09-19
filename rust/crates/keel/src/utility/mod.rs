@@ -6,6 +6,7 @@
 pub mod anvil;
 pub mod architecture;
 pub mod calibration;
+pub mod classifier;
 pub mod code_graph;
 pub mod code_search;
 pub mod config_audit;
@@ -22,7 +23,9 @@ pub mod plan;
 pub mod recall;
 pub mod record_store;
 pub mod research_policy;
+pub mod semantic_fast;
 pub mod session;
+pub mod shell_ast;
 pub mod skill_eval;
 pub mod skill_lint;
 pub mod skill_match;

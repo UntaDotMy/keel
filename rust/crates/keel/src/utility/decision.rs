@@ -309,6 +309,150 @@ pub fn evaluate_conformal_confidence(
     calibrator.evaluate_prediction(confidence)
 }
 
+// K-Native-4: Closed-Loop Local Prior Self-Tuning & Quarantine
+// Online empirical success tracking and automated safety quarantine.
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SkillPrior {
+    pub skill_name: String,
+    pub alpha: f64,
+    pub beta: f64,
+    pub consecutive_failures: u32,
+    pub is_quarantined: bool,
+    pub updated_at_ms: u64,
+}
+
+impl SkillPrior {
+    pub fn new(name: &str) -> Self {
+        Self {
+            skill_name: name.to_string(),
+            alpha: 1.0,
+            beta: 1.0,
+            consecutive_failures: 0,
+            is_quarantined: false,
+            updated_at_ms: current_time_ms(),
+        }
+    }
+
+    pub fn success_rate(&self) -> f64 {
+        self.alpha / (self.alpha + self.beta)
+    }
+
+    pub fn record_outcome(&mut self, success: bool) {
+        self.alpha *= 0.98;
+        self.beta *= 0.98;
+
+        if success {
+            self.alpha += 1.0;
+            self.consecutive_failures = 0;
+            if self.is_quarantined && self.success_rate() >= 0.45 {
+                self.is_quarantined = false;
+            }
+        } else {
+            self.beta += 1.0;
+            self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+            let total = self.alpha + self.beta;
+            if self.consecutive_failures >= 3 || (total >= 5.0 && self.success_rate() < 0.35) {
+                self.is_quarantined = true;
+            }
+        }
+        self.updated_at_ms = current_time_ms();
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct PriorStore {
+    pub skills: BTreeMap<String, SkillPrior>,
+    pub updated_at_ms: u64,
+}
+
+fn priors_file(claude_home: &Path) -> PathBuf {
+    calibration_dir(claude_home).join("priors.json")
+}
+
+pub fn load_prior_store(claude_home: &Path) -> PriorStore {
+    // fallback: missing or unreadable priors file defaults to fresh empty store
+    fs::read_to_string(priors_file(claude_home))
+        .ok()
+        .and_then(|text| serde_json::from_str::<PriorStore>(&text).ok())
+        .unwrap_or_default()
+}
+
+pub fn save_prior_store(claude_home: &Path, store: &PriorStore) -> Result<(), String> {
+    let path = priors_file(claude_home);
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let text = serde_json::to_string_pretty(store).map_err(|e| format!("serialize priors: {e}"))?;
+    fs::write(&path, text).map_err(|e| format!("write priors: {e}"))
+}
+
+pub fn record_skill_prior_outcome(
+    claude_home: &Path,
+    skill_name: &str,
+    success: bool,
+) -> Result<SkillPrior, String> {
+    let mut store = load_prior_store(claude_home);
+    let entry = store
+        .skills
+        .entry(skill_name.to_string())
+        .or_insert_with(|| SkillPrior::new(skill_name));
+    entry.record_outcome(success);
+    let result = entry.clone();
+    store.updated_at_ms = current_time_ms();
+    save_prior_store(claude_home, &store)?;
+    Ok(result)
+}
+
+// K-Native-5: Conformal Candidate Set Evaluation
+// Finite-sample risk-bounded candidate set prediction.
+
+/// Result of evaluating candidate predictions through conformal risk set C(X).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ConformalSetResult {
+    pub alpha: f64,
+    pub threshold: f64,
+    pub candidates: Vec<(String, f64)>,
+    pub conformal_set: Vec<String>,
+    pub set_size: usize,
+    pub is_ambiguous: bool,
+    pub is_empty: bool,
+    pub requires_clarification: bool,
+}
+
+pub fn evaluate_conformal_candidate_set(
+    claude_home: &Path,
+    candidates: &[(String, f64)],
+    alpha: f64,
+) -> ConformalSetResult {
+    let calibrator = load_conformal_calibrator(claude_home, alpha);
+    let threshold = calibrator.quantile_threshold();
+
+    let mut in_set = Vec::new();
+    for (name, conf) in candidates {
+        let score = crate::utility::calibration::nonconformity_score(*conf, true);
+        if score <= threshold {
+            in_set.push(name.clone());
+        }
+    }
+
+    let set_size = in_set.len();
+    let is_ambiguous = set_size > 1;
+    let is_empty = set_size == 0;
+    let requires_clarification = is_ambiguous || is_empty;
+
+    ConformalSetResult {
+        alpha,
+        threshold,
+        candidates: candidates.to_vec(),
+        conformal_set: in_set,
+        set_size,
+        is_ambiguous,
+        is_empty,
+        requires_clarification,
+    }
+}
+
 // ============================================================================
 // J04: Review Gates as Typed Score Operations
 // ============================================================================
@@ -1230,14 +1374,32 @@ fn noul_novelty_layer(
                 "obfuscated",
             )
         } else {
-            (
-                0.20,
-                0.75,
-                ShellRiskCategory::Safe,
-                ShellRiskAction::Allow,
-                "No destructive markers detected".to_string(),
-                "default",
-            )
+            let ast = crate::utility::shell_ast::analyze_shell_ast(trimmed);
+            if ast.is_destructive {
+                noul_block_destructive(
+                    0.96,
+                    0.96,
+                    "Shell AST deconstruction detected destructive command",
+                    "ast_destructive",
+                )
+            } else if ast.is_obfuscated {
+                noul_escalate(
+                    format!(
+                        "Shell AST deconstruction detected obfuscation: {}",
+                        ast.reasons.join("; ")
+                    ),
+                    "ast_obfuscated",
+                )
+            } else {
+                (
+                    0.20,
+                    0.75,
+                    ShellRiskCategory::Safe,
+                    ShellRiskAction::Allow,
+                    "No destructive markers detected".to_string(),
+                    "default",
+                )
+            }
         };
     shell_noul_verdict(
         trimmed,
@@ -2006,8 +2168,10 @@ pub fn handle_decision_tool(arguments: &Value) -> Result<String, String> {
             if let Ok(entries) = fs::read_dir(calibration_dir(&home)) {
                 for entry in entries.flatten() {
                     let path = entry.path();
+                    let stem = path.file_stem().and_then(|s| s.to_str());
                     let is_record = path.extension().and_then(|ext| ext.to_str()) == Some("json")
-                        && path.file_stem().and_then(|stem| stem.to_str()) != Some("global");
+                        && stem != Some("global")
+                        && stem != Some("priors");
                     if !is_record {
                         continue;
                     }
@@ -2115,6 +2279,10 @@ pub fn handle_decision_tool(arguments: &Value) -> Result<String, String> {
                 "semantic_learning": {
                     "skills": semantic_skills,
                 },
+                "priors": {
+                    "total_tracked": load_prior_store(&home).skills.len(),
+                    "quarantined_skills": load_prior_store(&home).skills.values().filter(|p| p.is_quarantined).count(),
+                },
             });
             serde_json::to_string_pretty(&out)
                 .map_err(|e| format!("serialize calibration report: {e}"))
@@ -2150,7 +2318,100 @@ pub fn handle_decision_tool(arguments: &Value) -> Result<String, String> {
             serde_json::to_string_pretty(&out)
                 .map_err(|e| format!("serialize conformal evaluation: {e}"))
         }
-        unknown => Err(format!("Unknown decision action: '{unknown}'. Supported: score, noul, choice, calibrate, review-feedback, noul-feedback, calibration-report, conformal")),
+        "classify" => {
+            let input = arguments
+                .get("input")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "decision classify: 'input' argument required".to_string())?;
+            let classifier = crate::utility::classifier::MultiDimClassifier::new_default();
+            let multi_res = classifier.classify(input);
+            let semantic_engine = crate::utility::semantic_fast::SemanticCentroidEngine::new_builtins();
+            let semantic_matches = semantic_engine.match_query(input, 3);
+
+            let out = serde_json::json!({
+                "input": input,
+                "domain": {
+                    "label": multi_res.top_label_for("domain"),
+                    "confidence": multi_res.confidence_for("domain"),
+                },
+                "action": {
+                    "label": multi_res.top_label_for("action"),
+                    "confidence": multi_res.confidence_for("action"),
+                },
+                "blast_radius": {
+                    "label": multi_res.top_label_for("blast_radius"),
+                    "confidence": multi_res.confidence_for("blast_radius"),
+                },
+                "joint_confidence": multi_res.joint_confidence,
+                "execution_time_micros": multi_res.execution_time_micros,
+                "semantic_matches": semantic_matches,
+                "axes": multi_res.axes,
+            });
+            serde_json::to_string_pretty(&out)
+                .map_err(|e| format!("serialize classify result: {e}"))
+        }
+        "priors" => {
+            let home = crate::runtime::resolve_claude_home("")
+                .map_err(|e| format!("resolve home: {e}"))?;
+            let skill = arguments.get("skill").and_then(Value::as_str);
+            let outcome = arguments.get("outcome").and_then(Value::as_str);
+
+            if let (Some(s), Some(o)) = (skill, outcome) {
+                let success = matches!(
+                    o.to_ascii_lowercase().as_str(),
+                    "success" | "correct" | "true" | "pass"
+                );
+                let updated = record_skill_prior_outcome(&home, s, success)?;
+                let out = serde_json::json!({
+                    "action": "record",
+                    "skill": s,
+                    "updated_prior": updated,
+                });
+                serde_json::to_string_pretty(&out)
+                    .map_err(|e| format!("serialize prior update: {e}"))
+            } else {
+                let store = load_prior_store(&home);
+                let out = serde_json::json!({
+                    "action": "list",
+                    "total_skills": store.skills.len(),
+                    "priors": store.skills,
+                    "updated_at_ms": store.updated_at_ms,
+                });
+                serde_json::to_string_pretty(&out)
+                    .map_err(|e| format!("serialize prior store: {e}"))
+            }
+        }
+        "conformal-set" => {
+            let home = crate::runtime::resolve_claude_home("")
+                .map_err(|e| format!("resolve home: {e}"))?;
+            let alpha = arguments
+                .get("alpha")
+                .and_then(Value::as_f64)
+                .unwrap_or(crate::utility::calibration::DEFAULT_CONFORMAL_ALPHA);
+            let mut candidates = Vec::new();
+            if let Some(arr) = arguments.get("candidates").and_then(Value::as_array) {
+                for item in arr {
+                    if let Some(pair) = item.as_array() {
+                        if pair.len() >= 2 {
+                            if let (Some(name), Some(score)) = (pair[0].as_str(), pair[1].as_f64()) {
+                                candidates.push((name.to_string(), score));
+                            }
+                        }
+                    } else if let Some(obj) = item.as_object() {
+                        if let (Some(name), Some(score)) = (
+                            obj.get("name").and_then(Value::as_str),
+                            obj.get("confidence").or_else(|| obj.get("score")).and_then(Value::as_f64),
+                        ) {
+                            candidates.push((name.to_string(), score));
+                        }
+                    }
+                }
+            }
+            let res = evaluate_conformal_candidate_set(&home, &candidates, alpha);
+            serde_json::to_string_pretty(&res)
+                .map_err(|e| format!("serialize conformal set result: {e}"))
+        }
+        unknown => Err(format!("Unknown decision action: '{unknown}'. Supported: score, noul, choice, calibrate, review-feedback, noul-feedback, calibration-report, conformal, classify, priors, conformal-set")),
     }
 }
 
@@ -2163,16 +2424,19 @@ pub fn run_decision_command(
         let _ = writeln!(
             standard_output,
             "Usage: keel decision <action> [options]\n\n\
-             Jev-inspired typed decision operations:\n  \
-               score               Score review findings or plan readiness against rubrics\n  \
-               noul                Evaluate shell command danger probability and risk action\n  \
-               choice              Evaluate skill composition choice for multi-domain prompt\n  \
-               calibrate           Get or update calibrated confidence for skill routing\n  \
-               conformal           Evaluate conformal risk control and (1 - alpha) error coverage\n  \
-               cache-stats         Show decision-cache hit/miss counters (routing + gates)\n  \
-               review-feedback     Record review accuracy outcome and inspect calibration error\n  \
-               noul-feedback       Record a human allow/deny verdict on a shell command\n  \
-               calibration-report  Show calibration health across routing, review, composition, shell, conformal"
+              Jev-inspired typed decision operations:\n  \
+                score               Score review findings or plan readiness against rubrics\n  \
+                noul                Evaluate shell command danger probability and risk action\n  \
+                choice              Evaluate skill composition choice for multi-domain prompt\n  \
+                calibrate           Get or update calibrated confidence for skill routing\n  \
+                conformal           Evaluate conformal risk control and (1 - alpha) error coverage\n  \
+                classify            Multi-dimensional zero-shot classification and semantic matching\n  \
+                priors              Inspect or record closed-loop skill priors and quarantine state\n  \
+                conformal-set       Evaluate conformal candidate prediction set C(X) and ambiguity\n  \
+                cache-stats         Show decision-cache hit/miss counters (routing + gates)\n  \
+                review-feedback     Record review accuracy outcome and inspect calibration error\n  \
+                noul-feedback       Record a human allow/deny verdict on a shell command\n  \
+                calibration-report  Show calibration health across routing, review, composition, shell, conformal"
         );
         return 0;
     }
@@ -2203,6 +2467,17 @@ pub fn run_decision_command(
             flag_set.string_flag("alpha", "0.05");
             flag_set.bool_flag("record", false);
             flag_set.bool_flag("was-correct", false);
+        }
+        "classify" => {
+            flag_set.string_flag("input", "");
+        }
+        "priors" => {
+            flag_set.string_flag("skill", "");
+            flag_set.string_flag("outcome", "");
+        }
+        "conformal-set" => {
+            flag_set.string_flag("candidates", "");
+            flag_set.string_flag("alpha", "0.05");
         }
         "cache-stats" => {}
         "review-feedback" => {
@@ -2364,6 +2639,46 @@ pub fn run_decision_command(
                 payload["was_correct"] = serde_json::json!(flag_set.bool_value("was-correct"));
             }
             payload
+        }
+        "classify" => {
+            let input = flag_set.string_value("input");
+            serde_json::json!({
+                "action": "classify",
+                "input": input,
+            })
+        }
+        "priors" => {
+            let skill = flag_set.string_value("skill");
+            let outcome = flag_set.string_value("outcome");
+            let mut payload = serde_json::json!({ "action": "priors" });
+            if !skill.is_empty() {
+                payload["skill"] = serde_json::json!(skill);
+            }
+            if !outcome.is_empty() {
+                payload["outcome"] = serde_json::json!(outcome);
+            }
+            payload
+        }
+        "conformal-set" => {
+            let cand_str = flag_set.string_value("candidates");
+            let alpha = flag_set
+                .string_value("alpha")
+                .parse::<f64>()
+                .unwrap_or(crate::utility::calibration::DEFAULT_CONFORMAL_ALPHA);
+            let mut list = Vec::new();
+            for item in cand_str.split(',') {
+                let parts: Vec<&str> = item.split(':').collect();
+                if parts.len() == 2 {
+                    if let Ok(s) = parts[1].trim().parse::<f64>() {
+                        list.push(serde_json::json!([parts[0].trim(), s]));
+                    }
+                }
+            }
+            serde_json::json!({
+                "action": "conformal-set",
+                "candidates": list,
+                "alpha": alpha,
+            })
         }
         other => {
             let _ = writeln!(
@@ -3218,6 +3533,83 @@ mod tests {
             Some(value) => std::env::set_var("KEEL_HOME", value),
             None => std::env::remove_var("KEEL_HOME"),
         }
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn test_classify_and_conformal_set_and_priors_actions() {
+        let home = std::env::temp_dir().join(format!(
+            "keel-decision-test-native-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::create_dir_all(&home);
+
+        // 1. Test decision classify (pure in-memory)
+        let classifier = crate::utility::classifier::MultiDimClassifier::new_default();
+        let class_res =
+            classifier.classify("Refactor the Flutter widget tree and reorganize layout");
+        assert_eq!(class_res.top_label_for("domain"), Some("flutter_dart"));
+        assert_eq!(class_res.top_label_for("action"), Some("refactor"));
+        assert_eq!(
+            class_res.top_label_for("blast_radius"),
+            Some("workspace_edit")
+        );
+
+        let semantic_engine = crate::utility::semantic_fast::SemanticCentroidEngine::new_builtins();
+        let matches = semantic_engine
+            .match_query("Refactor the Flutter widget tree and reorganize layout", 3);
+        assert!(!matches.is_empty());
+
+        // 2. Test decision priors recording and quarantine using direct path
+        let p1 = record_skill_prior_outcome(&home, "test-failing-skill", false)
+            .expect("record prior fail 1");
+        assert_eq!(p1.consecutive_failures, 1);
+        assert!(!p1.is_quarantined);
+
+        let _ = record_skill_prior_outcome(&home, "test-failing-skill", false);
+        let p3 = record_skill_prior_outcome(&home, "test-failing-skill", false)
+            .expect("record prior fail 3");
+        assert_eq!(p3.consecutive_failures, 3);
+        assert!(p3.is_quarantined);
+
+        // 3. Test decision conformal-set candidate ambiguity
+        for _ in 0..100 {
+            record_conformal_outcome(&home, 0.95, true).expect("record conformal");
+        }
+
+        // Multiple high-confidence candidates -> conformal set size > 1 -> ambiguous!
+        let candidates_amb = vec![("skill-a".to_string(), 0.96), ("skill-b".to_string(), 0.97)];
+        let set_amb = evaluate_conformal_candidate_set(&home, &candidates_amb, 0.05);
+        assert!(set_amb.is_ambiguous);
+        assert!(set_amb.requires_clarification);
+        assert_eq!(set_amb.set_size, 2);
+
+        // Single high-confidence candidate -> confident singleton!
+        let candidates_sin = vec![("skill-a".to_string(), 0.97), ("skill-b".to_string(), 0.20)];
+        let set_sin = evaluate_conformal_candidate_set(&home, &candidates_sin, 0.05);
+        assert!(!set_sin.is_ambiguous);
+        assert!(!set_sin.requires_clarification);
+        assert_eq!(set_sin.conformal_set, vec!["skill-a".to_string()]);
+
+        // 4. Test CLI invocations for classify
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let status = run_decision_command(
+            &[
+                "classify".to_string(),
+                "--input".to_string(),
+                "Fix Rust borrow checker error".to_string(),
+            ],
+            &mut stdout,
+            &mut stderr,
+        );
+        assert_eq!(status, 0);
+        let out_str = String::from_utf8_lossy(&stdout);
+        assert!(out_str.contains("rust"));
+
         let _ = std::fs::remove_dir_all(&home);
     }
 }
