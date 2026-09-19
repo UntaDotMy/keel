@@ -570,10 +570,12 @@ pub fn match_skill_for_prompt_with_details(
     if corpus.terms.is_empty() {
         return None;
     }
+    let prior_store = crate::utility::decision::load_prior_store(claude_home);
     for entry in &mut corpus.catalog {
         entry.use_count = crate::utility::skill_usage::skill_use_count(claude_home, &entry.name);
         entry.historical_success =
             crate::utility::skill_usage::skill_success_rate(claude_home, &entry.name);
+        entry.is_quarantined = prior_store.is_quarantined(&entry.name);
     }
     let resolved = resolve_skill_selection(prompt, &corpus.terms, &corpus.catalog);
     // Fail closed on a dangling name: never hand the agent a skill that is not
@@ -785,11 +787,86 @@ pub fn resolve_skill_selection(
     // though the prompt clearly calls for them. Only route to a curated skill
     // that is actually installed, so a trimmed install never points at a
     // missing skill.
-    let curated = curated_skill_for_prompt(prompt)?;
-    if skills.iter().any(|skill| skill.name == curated) {
-        return decision_for_named_skill(curated, skills, catalog, "curated operation trigger");
+    if let Some(curated) = curated_skill_for_prompt(prompt) {
+        if skills.iter().any(|skill| skill.name == curated) {
+            return decision_for_named_skill(curated, skills, catalog, "curated operation trigger");
+        }
+        return None;
     }
-    None
+    // K-Native-3: Sub-word semantic centroid match when lexical BM25 is silent.
+    // Resolves conceptual and synonym-based developer intents with 0 tokens and <0.5ms offline.
+    select_semantic_centroid_skill(prompt, skills, catalog)
+}
+
+fn select_semantic_centroid_skill(
+    prompt: &str,
+    skills: &[SkillTerms],
+    catalog: &[SkillCatalogEntry],
+) -> Option<SkillSelectionDecision> {
+    if prompt.trim().is_empty() || skills.is_empty() || catalog.is_empty() {
+        return None;
+    }
+    use crate::utility::semantic_fast::{SemanticCentroidEngine, SemanticTarget};
+    let mut targets = Vec::with_capacity(catalog.len());
+    for entry in catalog {
+        if entry.is_quarantined || is_learned_skill(&entry.name) {
+            continue;
+        }
+        let desc = format!("{} {}", entry.description, entry.when_to_use);
+        let cap_refs: Vec<&str> = entry.capabilities.iter().map(|s| s.as_str()).collect();
+        targets.push(SemanticTarget::new(&entry.name, &desc, &cap_refs));
+    }
+    if targets.is_empty() {
+        return None;
+    }
+    // Fallback is for conceptual queries (>= 4 words) where BM25 lacks rare IDF tokens.
+    // Short prompts (<= 3 words) stay silent to avoid inflating prompt context.
+    if prompt.split_whitespace().count() <= 3 {
+        return None;
+    }
+    let engine = SemanticCentroidEngine::new(targets);
+    let matches = engine.match_query(prompt, 3);
+    let best = matches.first()?;
+    // Must be at least 0.10 similarity to trigger semantic fallback
+    if best.similarity < 0.10 {
+        return None;
+    }
+    let runner_up_sim = matches.get(1).map(|m| m.similarity).unwrap_or(0.0);
+    // Distinctiveness margin: best must be noticeably ahead of runner-up if runner-up is strong
+    if runner_up_sim > 0.08 && (best.similarity - runner_up_sim) < 0.02 {
+        return None;
+    }
+    validate_skill_dependencies(&best.identifier, catalog).ok()?;
+    let (index, skill) = skills
+        .iter()
+        .enumerate()
+        .find(|(_, s)| s.name == best.identifier)?;
+    let metadata = selection_metadata(index, skill, catalog);
+    let activation_budget = skill_activation_budget_tokens();
+    let candidates: Vec<(usize, &SkillTerms)> = skills
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| !is_learned_skill(&item.name))
+        .collect();
+    let confidence = if runner_up_sim > 0.0 {
+        ((best.similarity - runner_up_sim) / best.similarity.max(1e-6)).clamp(0.0, 1.0) as f64
+    } else {
+        best.confidence
+    };
+    Some(SkillSelectionDecision {
+        name: best.identifier.clone(),
+        relevance: (best.similarity * 10.0) as f64,
+        utility: (best.similarity * 10.0) as f64
+            * (1.0 + SUCCESS_WEIGHT * (metadata.historical_success - 0.5)),
+        confidence: confidence.max(0.65), // semantic fallback clears J03 confidence gate
+        estimated_tokens: metadata.activation_cost_tokens.max(1),
+        activation_budget_tokens: activation_budget,
+        redundancy: candidate_redundancy(index, &candidates),
+        task_criticality: metadata.task_criticality.clamp(0.0, 1.0),
+        historical_success: metadata.historical_success.clamp(0.0, 1.0),
+        reason: "semantic centroid match with high cosine similarity (no lexical BM25 match)"
+            .to_string(),
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -814,7 +891,20 @@ fn select_cost_aware_skill(
     let candidates: Vec<(usize, &SkillTerms)> = skills
         .iter()
         .enumerate()
-        .filter(|(_, skill)| !is_learned_skill(&skill.name))
+        .filter(|(_, skill)| {
+            if is_learned_skill(&skill.name) {
+                return false;
+            }
+            if catalog
+                .iter()
+                .any(|c| c.name == skill.name && c.is_quarantined)
+            {
+                let prompt_lower = prompt.to_ascii_lowercase();
+                let skill_lower = skill.name.to_ascii_lowercase();
+                return prompt_lower.contains(&skill_lower);
+            }
+            true
+        })
         .collect();
     if candidates.is_empty() {
         return None;
@@ -1806,6 +1896,9 @@ pub struct SkillCatalogEntry {
     /// Smoothed success rate from optional outcome counters.
     #[serde(default = "default_historical_success")]
     pub historical_success: f64,
+    /// Closed-loop quarantine status from Bayesian prior tracking (K-Native-4).
+    #[serde(default)]
+    pub is_quarantined: bool,
 }
 
 impl SkillCatalogEntry {
@@ -2305,6 +2398,7 @@ fn parse_skill_catalog_entry(file: &SkillFileMetadata) -> Option<SkillCatalogCac
         .unwrap_or_else(|| default_task_criticality(&file.name))
         .clamp(0.0, 1.0),
         historical_success: DEFAULT_SKILL_HISTORICAL_SUCCESS,
+        is_quarantined: false,
     };
     Some(SkillCatalogCacheEntry {
         name: file.name.clone(),
@@ -3915,5 +4009,96 @@ mod tests {
         assert_eq!(compose_precision, 0.0);
         assert_eq!(reconcile_composition_outcomes(&home), 0);
         let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn test_quarantined_skill_is_filtered_from_general_routing() {
+        let home = home_with_skills(
+            "quarantine-test",
+            &[
+                (
+                    "flaky-auditor",
+                    "specialized audit checking routines and diagnostics",
+                ),
+                (
+                    "stable-helper",
+                    "general maintenance utilities and cleanup helpers",
+                ),
+            ],
+        );
+
+        // First verify it matches normally
+        let match_normal = match_skill_for_prompt_with_details(&home, "perform audit checking");
+        assert!(match_normal.is_some(), "should match before quarantine");
+
+        // Now quarantine the skill in PriorStore
+        let mut store = crate::utility::decision::load_prior_store(&home);
+        store
+            .skills
+            .entry("flaky-auditor".to_string())
+            .or_default()
+            .is_quarantined = true;
+        crate::utility::decision::save_prior_store(&home, &store).expect("save priors");
+        clear_skill_routing_cache();
+
+        // General prompt matching description must now be ignored (quarantined)
+        let match_quarantined =
+            match_skill_for_prompt_with_details(&home, "perform audit checking");
+        assert!(
+            match_quarantined.is_none(),
+            "quarantined skill must be excluded from general routing"
+        );
+
+        // But explicit mention by name still allows it
+        let match_explicit =
+            match_skill_for_prompt_with_details(&home, "use flaky-auditor to check");
+        assert!(
+            match_explicit.is_some(),
+            "explicit skill name mention should bypass quarantine"
+        );
+
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn test_semantic_centroid_fallback_routing() {
+        let terms = vec![SkillTerms {
+            name: "flutter-build-responsive-layout".to_string(),
+            all_tokens: ["flutter", "adaptive", "mediaquery"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+            name_tokens: ["flutter", "responsive", "layout"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        }];
+        let catalog = vec![
+            SkillCatalogEntry {
+                name: "flutter-build-responsive-layout".to_string(),
+                description: "Build responsive adaptive layouts across screen sizes using constraints and flexbox".to_string(),
+                when_to_use: "Use when designing flexible mobile and desktop user interfaces".to_string(),
+                use_count: 0,
+                related_skills: Vec::new(),
+                capabilities: vec!["ui".to_string(), "layout".to_string()],
+                version: "1.0.0".to_string(),
+                dependencies: Vec::new(),
+                activation_cost_tokens: 10,
+                task_criticality: 0.5,
+                historical_success: 0.8,
+                is_quarantined: false,
+            },
+        ];
+
+        // Prompt with semantic overlap but no distinctive rare tokens for BM25
+        let prompt = "How do I make the UI stretch flexibly across different monitor resolutions?";
+        let decision = resolve_skill_selection(prompt, &terms, &catalog);
+        assert!(
+            decision.is_some(),
+            "semantic centroid fallback should match conceptual prompt"
+        );
+        let matched = decision.unwrap();
+        assert_eq!(matched.name, "flutter-build-responsive-layout");
+        assert!(matched.reason.contains("semantic centroid match"));
     }
 }
