@@ -964,6 +964,7 @@ mod tests {
             activation_cost_tokens: 7,
             task_criticality: 0.5,
             historical_success: 0.5,
+            is_quarantined: false,
         }];
         let costs = benchmark_resource_costs(&skills_dir, &catalog);
         assert_eq!(costs.len(), 1);

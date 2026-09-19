@@ -44,6 +44,18 @@ pub(crate) fn user_prompt_submit_context(prompt_text: &str) -> String {
         }
     }
 
+    if !prompt_text.trim().is_empty() {
+        let classifier = crate::utility::classifier::MultiDimClassifier::new_default();
+        let res = classifier.classify(prompt_text);
+        let blast = res.top_label_for("blast_radius").unwrap_or("");
+        if (blast == "destructive" || blast == "global_env")
+            && res.confidence_for("blast_radius").unwrap_or(0.0) >= 0.45
+        {
+            let warning = "HIGH BLAST-RADIUS OPERATION DETECTED: This request involves broad or destructive changes across files or environments. Anvil compile and dry-run are strictly enforced before any file mutations.";
+            body = format!("{warning}\n\n{body}");
+        }
+    }
+
     // Absolute lead: hard enforcement strip (must be first bytes of context).
     if body.is_empty() {
         USER_PROMPT_ENFORCEMENT_STRIP.to_string()

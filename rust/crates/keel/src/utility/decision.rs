@@ -360,10 +360,33 @@ impl SkillPrior {
     }
 }
 
+impl Default for SkillPrior {
+    fn default() -> Self {
+        Self::new("default")
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct PriorStore {
     pub skills: BTreeMap<String, SkillPrior>,
     pub updated_at_ms: u64,
+}
+
+impl PriorStore {
+    pub fn is_quarantined(&self, skill_name: &str) -> bool {
+        self.skills
+            .get(skill_name)
+            .map(|p| p.is_quarantined)
+            .unwrap_or(false)
+    }
+
+    pub fn quarantined_skills(&self) -> Vec<String> {
+        self.skills
+            .iter()
+            .filter(|(_, p)| p.is_quarantined)
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
 }
 
 fn priors_file(claude_home: &Path) -> PathBuf {
@@ -1336,71 +1359,70 @@ fn noul_novelty_layer(
     // Tuple-per-branch, single shared constructor below. Quoted destructive
     // text in a single stage is data, not action.
     let single_stage = !normalized.contains([';', '|', '&', '\n']);
-    let (probability, confidence, category, action, reason, family) =
-        if single_stage && has_echo_only_prefix(normalized) && !has_substitution {
-            noul_allow("Output-only command with no execution sink", "echo")
-        } else if has_substitution {
-            // Dynamic execution hides the payload from static verdicts: escalate.
-            noul_escalate(
-                "Command substitution hides the executed payload — human review required"
-                    .to_string(),
-                "substitution",
-            )
-        } else if is_pipe_to_shell(normalized) {
+    let (probability, confidence, category, action, reason, family) = if single_stage
+        && has_echo_only_prefix(normalized)
+        && !has_substitution
+    {
+        noul_allow("Output-only command with no execution sink", "echo")
+    } else if has_substitution {
+        // Dynamic execution hides the payload from static verdicts: escalate.
+        noul_escalate(
+            "Command substitution hides the executed payload — human review required".to_string(),
+            "substitution",
+        )
+    } else if is_pipe_to_shell(normalized) {
+        noul_block_destructive(
+            0.85,
+            0.85,
+            "Pipes remote or decoded content into a shell",
+            "pipe",
+        )
+    } else if normalized.replace(' ', "").contains(":(){") {
+        // Fork-bomb signature unmodeled by the canonical tokenizer (J06).
+        noul_block_destructive(0.95, 0.95, "Shell fork bomb", "fork")
+    } else if let Some(verb) = NOVEL_DESTRUCTIVE_VERBS
+        .iter()
+        .find(|verb| normalized.contains(**verb))
+    {
+        noul_escalate(
+            format!(
+                "Unrecognized potentially-destructive pattern '{verb}' — human review required"
+            ),
+            "novel",
+        )
+    } else {
+        let ast = crate::utility::shell_ast::analyze_shell_ast(trimmed);
+        if ast.is_destructive {
             noul_block_destructive(
-                0.85,
-                0.85,
-                "Pipes remote or decoded content into a shell",
-                "pipe",
+                0.96,
+                0.96,
+                "Shell AST deconstruction detected destructive command",
+                "ast_destructive",
             )
-        } else if normalized.replace(' ', "").contains(":(){") {
-            // Fork-bomb signature unmodeled by the canonical tokenizer (J06).
-            noul_block_destructive(0.95, 0.95, "Shell fork bomb", "fork")
-        } else if let Some(verb) = NOVEL_DESTRUCTIVE_VERBS
-            .iter()
-            .find(|verb| normalized.contains(**verb))
-        {
+        } else if ast.is_obfuscated || has_evasion {
             noul_escalate(
-                format!(
-                    "Unrecognized potentially-destructive pattern '{verb}' — human review required"
-                ),
-                "novel",
-            )
-        } else if has_evasion {
-            // Evasion markers with no recognized pattern are novel by definition.
-            noul_escalate(
-                "Obfuscated shell text with no recognized safe pattern — human review required"
-                    .to_string(),
-                "obfuscated",
-            )
-        } else {
-            let ast = crate::utility::shell_ast::analyze_shell_ast(trimmed);
-            if ast.is_destructive {
-                noul_block_destructive(
-                    0.96,
-                    0.96,
-                    "Shell AST deconstruction detected destructive command",
-                    "ast_destructive",
-                )
-            } else if ast.is_obfuscated {
-                noul_escalate(
+                if ast.is_obfuscated {
                     format!(
                         "Shell AST deconstruction detected obfuscation: {}",
                         ast.reasons.join("; ")
-                    ),
-                    "ast_obfuscated",
-                )
-            } else {
-                (
-                    0.20,
-                    0.75,
-                    ShellRiskCategory::Safe,
-                    ShellRiskAction::Allow,
-                    "No destructive markers detected".to_string(),
-                    "default",
-                )
-            }
-        };
+                    )
+                } else {
+                    "Obfuscated shell text with no recognized safe pattern — human review required"
+                        .to_string()
+                },
+                "obfuscated",
+            )
+        } else {
+            (
+                0.20,
+                0.75,
+                ShellRiskCategory::Safe,
+                ShellRiskAction::Allow,
+                "No destructive markers detected".to_string(),
+                "default",
+            )
+        }
+    };
     shell_noul_verdict(
         trimmed,
         probability,
@@ -1509,6 +1531,7 @@ pub fn record_skill_session_outcome(
 ) -> Result<(), String> {
     crate::utility::skill_usage::record_skill_outcome(claude_home, skill_name, was_helpful);
     record_and_save_skill_calibration(claude_home, skill_name, predicted_confidence, was_helpful)?;
+    record_skill_prior_outcome(claude_home, skill_name, was_helpful)?;
     Ok(())
 }
 

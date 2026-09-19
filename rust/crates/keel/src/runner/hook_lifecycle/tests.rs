@@ -665,6 +665,17 @@ fn user_prompt_context_stays_within_per_turn_token_budget() {
 }
 
 #[test]
+fn user_prompt_submit_injects_high_blast_radius_warning() {
+    let context = user_prompt_submit_context(
+        "drop all database tables, truncate records, and delete production buckets",
+    );
+    assert!(
+        context.contains("HIGH BLAST-RADIUS OPERATION DETECTED"),
+        "High blast radius request must trigger governance warning, got: {context}"
+    );
+}
+
+#[test]
 fn mcp_pointer_fires_for_repo_structure_questions() {
     // The skill matcher stays silent on these prompts (no distinctive
     // domain token), so this targeted pointer is the only thing that nudges
