@@ -104,6 +104,119 @@ pub fn hierarchical_blend(
     }
 }
 
+/// Default significance / error level for Conformal Risk Control (CRC): 5% miscoverage.
+pub const DEFAULT_CONFORMAL_ALPHA: f64 = 0.05;
+
+/// Nonconformity score for a binary prediction: s = 1 - p(y).
+/// If outcome is true (e.g. action was safe / skill was helpful), s = 1.0 - confidence.
+/// If outcome is false (e.g. action was harmful / skill was wrong), s = confidence.
+pub fn nonconformity_score(confidence: f64, outcome: bool) -> f64 {
+    let conf = confidence.clamp(0.0, 1.0);
+    if outcome {
+        1.0 - conf
+    } else {
+        conf
+    }
+}
+
+/// Compute the empirical (1 - alpha) quantile from nonconformity scores per
+/// Angelopoulos & Bates (2021/2024).
+///
+/// Mathematical guarantee: with n calibration samples, the probability of
+/// miscoverage on a fresh test point is at most alpha:
+///   P(s_test > q_hat) <= alpha.
+///
+/// When n is too small to provide the exact guarantee (ceil((n+1)*(1-alpha)) > n),
+/// this returns 1.0 (conservative: escalate borderline predictions).
+pub fn conformal_quantile(scores: &[f64], alpha: f64) -> f64 {
+    if scores.is_empty() {
+        return 1.0;
+    }
+    let alpha_clamped = alpha.clamp(0.001, 0.999);
+    let mut sorted = scores.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+    let n = sorted.len();
+    let rank = ((n as f64 + 1.0) * (1.0 - alpha_clamped)).ceil() as usize;
+    if rank > n {
+        // Sample size insufficient for strict distribution-free guarantee:
+        // fall back to conservative ceiling.
+        1.0
+    } else if rank == 0 {
+        sorted[0]
+    } else {
+        sorted[rank - 1]
+    }
+}
+
+/// Check if a test prediction's nonconformity exceeds the conformal quantile threshold.
+/// Returns true if the prediction is nonconformant (unsafe / anomalous / below guarantee).
+pub fn is_nonconformant(nonconformity: f64, quantile_threshold: f64) -> bool {
+    nonconformity > quantile_threshold
+}
+
+/// Conformal p-value for a test nonconformity score against historical scores.
+/// p = (1 + sum(s_i >= s_test)) / (n + 1).
+pub fn conformal_p_value(scores: &[f64], test_score: f64) -> f64 {
+    if scores.is_empty() {
+        return 1.0;
+    }
+    let count_greater_or_equal = scores.iter().filter(|&&s| s >= test_score).count();
+    (1.0 + count_greater_or_equal as f64) / (scores.len() as f64 + 1.0)
+}
+
+/// Evaluation result from a Conformal Calibrator.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ConformalEvaluation {
+    pub nonconformity_score: f64,
+    pub quantile_threshold: f64,
+    pub satisfies_guarantee: bool,
+    pub p_value: f64,
+}
+
+/// Stateful Conformal Risk Control calibrator.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ConformalCalibrator {
+    pub alpha: f64,
+    pub nonconformity_scores: Vec<f64>,
+}
+
+impl ConformalCalibrator {
+    pub fn new(alpha: f64) -> Self {
+        Self {
+            alpha: alpha.clamp(0.001, 0.999),
+            nonconformity_scores: Vec::new(),
+        }
+    }
+
+    pub fn record(&mut self, confidence: f64, outcome: bool) {
+        let score = nonconformity_score(confidence, outcome);
+        self.nonconformity_scores.push(score);
+    }
+
+    pub fn quantile_threshold(&self) -> f64 {
+        conformal_quantile(&self.nonconformity_scores, self.alpha)
+    }
+
+    pub fn evaluate_prediction(&self, confidence: f64) -> ConformalEvaluation {
+        // Hypothesizing positive outcome (e.g. action is safe / correct)
+        let s_test = nonconformity_score(confidence, true);
+        let q_hat = self.quantile_threshold();
+        let satisfies = !is_nonconformant(s_test, q_hat);
+        let p_val = conformal_p_value(&self.nonconformity_scores, s_test);
+        ConformalEvaluation {
+            nonconformity_score: s_test,
+            quantile_threshold: q_hat,
+            satisfies_guarantee: satisfies,
+            p_value: p_val,
+        }
+    }
+
+    pub fn sample_count(&self) -> usize {
+        self.nonconformity_scores.len()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -183,5 +296,67 @@ mod tests {
         );
         assert_eq!(est.total_samples, 1000);
         assert!(!est.prior_dominated);
+    }
+
+    #[test]
+    fn conformal_nonconformity_score_vectors() {
+        assert_eq!(nonconformity_score(1.0, true), 0.0);
+        assert_eq!(nonconformity_score(0.0, false), 0.0);
+        assert_eq!(nonconformity_score(1.0, false), 1.0);
+        assert_eq!(nonconformity_score(0.0, true), 1.0);
+        assert!((nonconformity_score(0.8, true) - 0.2).abs() < 1e-12);
+        assert!((nonconformity_score(0.8, false) - 0.8).abs() < 1e-12);
+    }
+
+    #[test]
+    fn conformal_quantile_boundary_and_coverage() {
+        assert_eq!(conformal_quantile(&[], 0.05), 1.0);
+
+        // Small sample (n=5): ceil((5+1)*0.95) = ceil(5.7) = 6 > 5 -> returns 1.0 (conservative fallback)
+        let small = vec![0.1, 0.2, 0.3, 0.4, 0.5];
+        assert_eq!(conformal_quantile(&small, 0.05), 1.0);
+
+        // With 100 samples uniformly spaced in [0.01, 1.00]
+        let mut scores = Vec::new();
+        for i in 1..=100 {
+            scores.push(i as f64 / 100.0);
+        }
+        // alpha = 0.10: rank = ceil(101 * 0.90) = 91. sorted[90] = 0.91
+        let q_90 = conformal_quantile(&scores, 0.10);
+        assert!((q_90 - 0.91).abs() < 1e-12, "got {q_90}");
+
+        // alpha = 0.05: rank = ceil(101 * 0.95) = 96. sorted[95] = 0.96
+        let q_95 = conformal_quantile(&scores, 0.05);
+        assert!((q_95 - 0.96).abs() < 1e-12, "got {q_95}");
+    }
+
+    #[test]
+    fn conformal_calibrator_stateful_evaluation() {
+        let mut calibrator = ConformalCalibrator::new(0.05);
+        assert_eq!(calibrator.sample_count(), 0);
+        assert_eq!(calibrator.quantile_threshold(), 1.0);
+
+        // Record 100 actions: 96 high-confidence safe actions (confidence 0.95, outcome true -> score 0.05)
+        for _ in 0..96 {
+            calibrator.record(0.95, true);
+        }
+        // Record 4 mistakes (confidence 0.95, outcome false -> score 0.95)
+        for _ in 0..4 {
+            calibrator.record(0.95, false);
+        }
+
+        assert_eq!(calibrator.sample_count(), 100);
+        let q_hat = calibrator.quantile_threshold();
+        // rank = ceil(101 * 0.95) = 96. sorted[95] is 0.05 because 96 items are 0.05.
+        assert!((q_hat - 0.05).abs() < 1e-12, "q_hat was {q_hat}");
+
+        // A high confidence test (0.96) has score 0.04 <= 0.05 -> satisfies guarantee
+        let eval_good = calibrator.evaluate_prediction(0.96);
+        assert!(eval_good.satisfies_guarantee);
+        assert!(eval_good.nonconformity_score <= q_hat);
+
+        // A lower confidence test (0.80) has score 0.20 > 0.05 -> violates 95% guarantee -> nonconformant
+        let eval_borderline = calibrator.evaluate_prediction(0.80);
+        assert!(!eval_borderline.satisfies_guarantee);
     }
 }

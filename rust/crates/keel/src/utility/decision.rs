@@ -260,6 +260,55 @@ fn record_global_calibration_outcome(claude_home: &Path, was_correct: bool) {
     }
 }
 
+// Conformal Risk Control (CRC) Storage & Evaluation:
+// distribution-free statistical risk guarantees with finite-sample coverage.
+
+fn conformal_history_file(claude_home: &Path) -> PathBuf {
+    state_directory(claude_home).join("conformal-history.json")
+}
+
+pub fn load_conformal_calibrator(
+    claude_home: &Path,
+    alpha: f64,
+) -> crate::utility::calibration::ConformalCalibrator {
+    let mut calibrator = crate::utility::calibration::ConformalCalibrator::new(alpha);
+    if let Ok(text) = fs::read_to_string(conformal_history_file(claude_home)) {
+        if let Ok(scores) = serde_json::from_str::<Vec<f64>>(&text) {
+            calibrator.nonconformity_scores = scores;
+        }
+    }
+    calibrator
+}
+
+pub fn record_conformal_outcome(
+    claude_home: &Path,
+    confidence: f64,
+    was_correct: bool,
+) -> Result<(), String> {
+    let mut calibrator = load_conformal_calibrator(
+        claude_home,
+        crate::utility::calibration::DEFAULT_CONFORMAL_ALPHA,
+    );
+    calibrator.record(confidence, was_correct);
+    if let Some(parent) = conformal_history_file(claude_home).parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let text = serde_json::to_string_pretty(&calibrator.nonconformity_scores)
+        .map_err(|e| format!("serialize conformal scores: {e}"))?;
+    fs::write(conformal_history_file(claude_home), text)
+        .map_err(|e| format!("write conformal history: {e}"))?;
+    Ok(())
+}
+
+pub fn evaluate_conformal_confidence(
+    claude_home: &Path,
+    confidence: f64,
+    alpha: f64,
+) -> crate::utility::calibration::ConformalEvaluation {
+    let calibrator = load_conformal_calibrator(claude_home, alpha);
+    calibrator.evaluate_prediction(confidence)
+}
+
 // ============================================================================
 // J04: Review Gates as Typed Score Operations
 // ============================================================================
@@ -797,6 +846,343 @@ const NOVEL_DESTRUCTIVE_VERBS: &[&str] = &[
     "setenforce",
 ];
 
+/// Cloud, container, and database destructive command rules (closing Jev Noul gaps).
+pub fn detect_cloud_and_container_destructive(
+    command: &str,
+) -> Option<(&'static str, f64, ShellRiskAction, &'static str)> {
+    let lower = command.to_ascii_lowercase();
+    let norm = lower.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    // 1. AWS CLI destructive operations
+    if norm.starts_with("aws ") || norm.contains(" aws ") {
+        if norm.contains("s3 rm")
+            && (norm.contains("--recursive") || norm.contains(" -r ") || norm.ends_with(" -r"))
+        {
+            return Some((
+                "Cloud storage recursive bucket/prefix deletion (AWS S3)",
+                0.95,
+                ShellRiskAction::Block,
+                "cloud",
+            ));
+        }
+        if norm.contains("s3 rb ") || norm.contains("s3api delete-bucket") {
+            return Some((
+                "Cloud storage bucket deletion (AWS S3)",
+                0.95,
+                ShellRiskAction::Block,
+                "cloud",
+            ));
+        }
+        if norm.contains("rds delete-db-instance") || norm.contains("rds delete-db-cluster") {
+            return Some((
+                "Cloud relational database instance deletion (AWS RDS)",
+                0.98,
+                ShellRiskAction::Block,
+                "cloud",
+            ));
+        }
+        if norm.contains("dynamodb delete-table") {
+            return Some((
+                "Cloud NoSQL database table deletion (AWS DynamoDB)",
+                0.98,
+                ShellRiskAction::Block,
+                "cloud",
+            ));
+        }
+        if norm.contains("ec2 terminate-instances") {
+            return Some((
+                "Cloud virtual machine instance termination (AWS EC2)",
+                0.95,
+                ShellRiskAction::Block,
+                "cloud",
+            ));
+        }
+        if norm.contains("cloudformation delete-stack") {
+            return Some((
+                "Cloud infrastructure stack deletion (AWS CloudFormation)",
+                0.90,
+                ShellRiskAction::Block,
+                "cloud",
+            ));
+        }
+    }
+
+    // 2. GCP CLI destructive operations
+    if norm.starts_with("gcloud ")
+        || norm.starts_with("gsutil ")
+        || norm.contains(" gcloud ")
+        || norm.contains(" gsutil ")
+    {
+        if (norm.contains("storage rm") || norm.contains("gsutil rm"))
+            && (norm.contains("-r") || norm.contains("--recursive"))
+        {
+            return Some((
+                "Cloud storage recursive bucket/object deletion (Google Cloud Storage)",
+                0.95,
+                ShellRiskAction::Block,
+                "cloud",
+            ));
+        }
+        if norm.contains("sql instances delete") {
+            return Some((
+                "Cloud SQL database instance deletion (GCP Cloud SQL)",
+                0.98,
+                ShellRiskAction::Block,
+                "cloud",
+            ));
+        }
+        if norm.contains("compute instances delete") {
+            return Some((
+                "Cloud compute instance deletion (GCP Compute Engine)",
+                0.95,
+                ShellRiskAction::Block,
+                "cloud",
+            ));
+        }
+        if norm.contains("projects delete") {
+            return Some((
+                "Google Cloud project deletion (irreversible catastrophic action)",
+                0.99,
+                ShellRiskAction::Block,
+                "cloud",
+            ));
+        }
+        if norm.contains("container clusters delete") {
+            return Some((
+                "GKE Kubernetes cluster deletion (Google Cloud)",
+                0.95,
+                ShellRiskAction::Block,
+                "cloud",
+            ));
+        }
+    }
+
+    // 3. Azure CLI destructive operations
+    if norm.starts_with("az ") || norm.contains(" az ") {
+        if norm.contains("group delete") {
+            return Some((
+                "Azure resource group deletion (deletes all resources in group)",
+                0.98,
+                ShellRiskAction::Block,
+                "cloud",
+            ));
+        }
+        if norm.contains("vm delete") {
+            return Some((
+                "Azure virtual machine deletion",
+                0.95,
+                ShellRiskAction::Block,
+                "cloud",
+            ));
+        }
+        if norm.contains("aks delete") {
+            return Some((
+                "Azure Kubernetes Service cluster deletion",
+                0.95,
+                ShellRiskAction::Block,
+                "cloud",
+            ));
+        }
+        if norm.contains("storage blob delete-batch") {
+            return Some((
+                "Azure batch blob storage deletion",
+                0.95,
+                ShellRiskAction::Block,
+                "cloud",
+            ));
+        }
+    }
+
+    // 4. Kubernetes / Container / IaC destruction
+    if norm.starts_with("kubectl ")
+        || norm.starts_with("oc ")
+        || norm.contains(" kubectl ")
+        || norm.contains(" oc ")
+    {
+        if norm.contains("delete namespace") || norm.contains("delete ns ") {
+            return Some((
+                "Kubernetes namespace deletion (destroys all contained workloads)",
+                0.95,
+                ShellRiskAction::Block,
+                "cloud",
+            ));
+        }
+        if norm.contains("delete ")
+            && (norm.contains("--all")
+                || norm.contains(" pv ")
+                || norm.contains(" pvc ")
+                || norm.contains(" all "))
+        {
+            return Some((
+                "Kubernetes mass resource or persistent storage volume deletion",
+                0.95,
+                ShellRiskAction::Block,
+                "cloud",
+            ));
+        }
+        if norm.contains("drain ") && norm.contains("--force") {
+            return Some((
+                "Kubernetes cluster node forced drain",
+                0.85,
+                ShellRiskAction::Warn,
+                "cloud",
+            ));
+        }
+    }
+
+    if (norm.starts_with("terraform ")
+        || norm.starts_with("tofu ")
+        || norm.contains(" terraform ")
+        || norm.contains(" tofu "))
+        && (norm.contains("destroy") || norm.contains("-destroy"))
+    {
+        return Some((
+            "Infrastructure as Code complete environment destruction (Terraform/OpenTofu)",
+            0.98,
+            ShellRiskAction::Block,
+            "cloud",
+        ));
+    }
+
+    if norm.starts_with("docker ")
+        || norm.starts_with("podman ")
+        || norm.contains(" docker ")
+        || norm.contains(" podman ")
+    {
+        if (norm.contains("system prune") && norm.contains("--volumes"))
+            || norm.contains("volume rm")
+            || norm.contains("volume prune")
+        {
+            return Some((
+                "Container engine mass cleanup destroying persistent volumes",
+                0.95,
+                ShellRiskAction::Block,
+                "cloud",
+            ));
+        }
+        if norm.contains("system prune") {
+            return Some((
+                "Container engine mass cleanup",
+                0.85,
+                ShellRiskAction::Warn,
+                "cloud",
+            ));
+        }
+        if (norm.contains(" rm ") || norm.contains(" rmi "))
+            && (norm.contains("-f")
+                || norm.contains("--force")
+                || norm.contains("-a")
+                || norm.contains("--all"))
+        {
+            return Some((
+                "Container engine forced or mass resource removal",
+                0.80,
+                ShellRiskAction::Warn,
+                "cloud",
+            ));
+        }
+    }
+
+    // 5. Database CLI table/database drops and direct DDL drops
+    if (norm.starts_with("psql ")
+        || norm.starts_with("mysql ")
+        || norm.starts_with("sqlite3 ")
+        || norm.starts_with("drop database")
+        || norm.starts_with("drop schema")
+        || norm.starts_with("truncate table")
+        || norm.contains(" psql ")
+        || norm.contains(" mysql ")
+        || norm.contains(" sqlite3 "))
+        && (norm.contains("drop table")
+            || norm.contains("drop database")
+            || norm.contains("drop schema")
+            || norm.contains("truncate table"))
+    {
+        return Some((
+            "Direct database table, schema, or database drop/truncate",
+            0.98,
+            ShellRiskAction::Block,
+            "cloud",
+        ));
+    }
+
+    None
+}
+
+/// Interpreter inline script execution rules (detecting dynamic execution bypasses).
+pub fn detect_interpreter_inline_script(
+    command: &str,
+) -> Option<(&'static str, f64, ShellRiskAction, &'static str)> {
+    let lower = command.to_ascii_lowercase();
+
+    let is_python_eval = lower.contains("python -c ")
+        || lower.contains("python3 -c ")
+        || lower.contains("python.exe -c ")
+        || lower.contains("python3.exe -c ");
+    let is_node_eval = lower.contains("node -e ")
+        || lower.contains("node.exe -e ")
+        || lower.contains("nodejs -e ");
+    let is_ruby_eval = lower.contains("ruby -e ");
+    let is_perl_eval = lower.contains("perl -e ");
+    let is_php_eval = lower.contains("php -r ");
+
+    if is_python_eval || is_node_eval || is_ruby_eval || is_perl_eval || is_php_eval {
+        // Explicitly destructive filesystem APIs
+        if lower.contains("shutil.rmtree")
+            || lower.contains("os.remove")
+            || lower.contains("os.unlink")
+            || lower.contains("fs.rmsync")
+            || lower.contains("fs.unlinksync")
+            || lower.contains("rimraf")
+            || lower.contains("fileutils.rm_rf")
+            || lower.contains("pathlib.path.unlink")
+        {
+            return Some((
+                "Inline script executing destructive filesystem deletion APIs",
+                0.95,
+                ShellRiskAction::Block,
+                "script",
+            ));
+        }
+
+        // Dynamic process spawners inside inline script
+        if lower.contains("subprocess.run")
+            || lower.contains("subprocess.popen")
+            || lower.contains("subprocess.call")
+            || lower.contains("os.system")
+            || lower.contains("child_process.exec")
+            || lower.contains("exec(")
+            || lower.contains("eval(")
+        {
+            return Some((
+                "Inline script executing dynamic nested subshells or process spawns — human review required",
+                0.80,
+                ShellRiskAction::Warn,
+                "script",
+            ));
+        }
+
+        // Harmless informational queries
+        if lower.contains("--version")
+            || lower.contains("sys.version")
+            || lower.contains("version_info")
+            || lower.contains("process.version")
+        {
+            return None;
+        }
+
+        // Arbitrary inline scripts hide intent from static analysis
+        return Some((
+            "Dynamic inline script execution hides intent from static analysis — human review required",
+            0.65,
+            ShellRiskAction::Warn,
+            "script",
+        ));
+    }
+
+    None
+}
+
 fn noul_novelty_layer(
     trimmed: &str,
     normalized: &str,
@@ -893,6 +1279,47 @@ pub fn evaluate_shell_command_noul(command: &str) -> ShellNoulDecision {
     {
         return noul_decision_from_canonical(trimmed, &finding, has_evasion);
     }
+
+    // Cloud, container, and database destructive checks (Jev gap closure)
+    if let Some((reason, prob, action, family)) = detect_cloud_and_container_destructive(trimmed)
+        .or_else(|| detect_cloud_and_container_destructive(&normalized))
+    {
+        let category = if action == ShellRiskAction::Block {
+            ShellRiskCategory::Destructive
+        } else {
+            ShellRiskCategory::Risky
+        };
+        return shell_noul_verdict(
+            trimmed,
+            prob,
+            0.95,
+            category,
+            action,
+            reason.to_string(),
+            family,
+        );
+    }
+
+    // Interpreter inline script detection (dynamic script execution bypass prevention)
+    if let Some((reason, prob, action, family)) = detect_interpreter_inline_script(trimmed)
+        .or_else(|| detect_interpreter_inline_script(&normalized))
+    {
+        let category = if action == ShellRiskAction::Block {
+            ShellRiskCategory::Destructive
+        } else {
+            ShellRiskCategory::Risky
+        };
+        return shell_noul_verdict(
+            trimmed,
+            prob,
+            0.90,
+            category,
+            action,
+            reason.to_string(),
+            family,
+        );
+    }
+
     noul_novelty_layer(trimmed, &normalized, has_substitution, has_evasion)
 }
 
@@ -921,6 +1348,138 @@ pub fn record_skill_session_outcome(
     crate::utility::skill_usage::record_skill_outcome(claude_home, skill_name, was_helpful);
     record_and_save_skill_calibration(claude_home, skill_name, predicted_confidence, was_helpful)?;
     Ok(())
+}
+
+// Semantic Feature Representation Learning via Online SGD:
+// incremental prompt token weights trained online from session outcomes.
+
+pub const SEMANTIC_FEATURE_DIM: usize = 256;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SemanticWeightsRecord {
+    pub skill_name: String,
+    pub weights: Vec<f64>,
+    pub bias: f64,
+    pub updates_count: usize,
+    pub updated_at_ms: u64,
+}
+
+impl SemanticWeightsRecord {
+    pub fn new(skill_name: &str) -> Self {
+        Self {
+            skill_name: skill_name.to_string(),
+            weights: vec![0.0; SEMANTIC_FEATURE_DIM],
+            bias: 0.0,
+            updates_count: 0,
+            updated_at_ms: current_time_ms(),
+        }
+    }
+
+    /// Predict probability using logistic sigmoid: sigma(w^T x + b).
+    pub fn predict(&self, features: &[usize]) -> f64 {
+        if features.is_empty() || self.updates_count == 0 {
+            return 0.5;
+        }
+        let mut z = self.bias;
+        for &idx in features {
+            if idx < self.weights.len() {
+                z += self.weights[idx];
+            }
+        }
+        1.0 / (1.0 + (-z.clamp(-20.0, 20.0)).exp())
+    }
+
+    /// Online SGD update with prediction error and L2 weight decay.
+    pub fn update(&mut self, features: &[usize], was_helpful: bool) {
+        let y = if was_helpful { 1.0 } else { 0.0 };
+        let p = self.predict(features);
+        let error = y - p;
+        let eta = 0.10; // learning rate
+        let lambda = 0.001; // L2 weight decay
+
+        self.bias += eta * error;
+        for &idx in features {
+            if idx < self.weights.len() {
+                self.weights[idx] += eta * error - lambda * self.weights[idx];
+            }
+        }
+        self.updates_count = self.updates_count.saturating_add(1);
+        self.updated_at_ms = current_time_ms();
+    }
+}
+
+pub fn extract_prompt_features(prompt: &str) -> Vec<usize> {
+    let mut features = Vec::new();
+    for word in prompt.split(|c: char| !c.is_alphanumeric() && c != '-' && c != '_') {
+        let clean = word.trim().to_ascii_lowercase();
+        if clean.len() >= 3 {
+            // Hash token to [0..SEMANTIC_FEATURE_DIM) using FNV-1a
+            let mut h: u64 = 0xcbf29ce484222325;
+            for b in clean.bytes() {
+                h ^= b as u64;
+                h = h.wrapping_mul(0x100000001b3);
+            }
+            let idx = (h as usize) % SEMANTIC_FEATURE_DIM;
+            if !features.contains(&idx) {
+                features.push(idx);
+            }
+        }
+    }
+    features
+}
+
+fn semantic_weights_dir(claude_home: &Path) -> PathBuf {
+    state_directory(claude_home).join("skill-semantic")
+}
+
+pub fn load_semantic_weights(claude_home: &Path, skill_name: &str) -> SemanticWeightsRecord {
+    let file = semantic_weights_dir(claude_home).join(format!("{}.json", sanitize_key(skill_name)));
+    if let Ok(text) = fs::read_to_string(file) {
+        if let Ok(rec) = serde_json::from_str::<SemanticWeightsRecord>(&text) {
+            return rec;
+        }
+    }
+    SemanticWeightsRecord::new(skill_name)
+}
+
+pub fn save_semantic_weights(
+    claude_home: &Path,
+    record: &SemanticWeightsRecord,
+) -> Result<(), String> {
+    let dir = semantic_weights_dir(claude_home);
+    let _ = fs::create_dir_all(&dir);
+    let file = dir.join(format!("{}.json", sanitize_key(&record.skill_name)));
+    let text = serde_json::to_string_pretty(record)
+        .map_err(|e| format!("serialize semantic weights: {e}"))?;
+    fs::write(file, text).map_err(|e| format!("save semantic weights: {e}"))?;
+    Ok(())
+}
+
+pub fn record_skill_semantic_learning(
+    claude_home: &Path,
+    skill_name: &str,
+    prompt: &str,
+    was_helpful: bool,
+) -> Result<(), String> {
+    let mut record = load_semantic_weights(claude_home, skill_name);
+    let features = extract_prompt_features(prompt);
+    record.update(&features, was_helpful);
+    save_semantic_weights(claude_home, &record)?;
+    Ok(())
+}
+
+pub fn predict_semantic_skill_confidence(
+    claude_home: &Path,
+    skill_name: &str,
+    prompt: &str,
+) -> Option<f64> {
+    let record = load_semantic_weights(claude_home, skill_name);
+    if record.updates_count >= 5 {
+        let features = extract_prompt_features(prompt);
+        Some(record.predict(&features))
+    } else {
+        None
+    }
 }
 
 // ============================================================================
@@ -1237,7 +1796,7 @@ pub fn handle_decision_tool(arguments: &Value) -> Result<String, String> {
         .get("action")
         .and_then(Value::as_str)
         .ok_or_else(|| {
-            "decision: 'action' is required (score, noul, choice, calibrate, review-feedback, noul-feedback, calibration-report)"
+            "decision: 'action' is required (score, noul, choice, calibrate, review-feedback, noul-feedback, calibration-report, conformal)"
                 .to_string()
         })?;
 
@@ -1501,6 +2060,33 @@ pub fn handle_decision_tool(arguments: &Value) -> Result<String, String> {
                     })
                 })
                 .collect();
+            let conformal_cal = load_conformal_calibrator(
+                &home,
+                crate::utility::calibration::DEFAULT_CONFORMAL_ALPHA,
+            );
+            let mut semantic_skills = Vec::new();
+            if let Ok(entries) = fs::read_dir(semantic_weights_dir(&home)) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    let is_record = path.extension().and_then(|ext| ext.to_str()) == Some("json");
+                    if !is_record {
+                        continue;
+                    }
+                    if let Ok(text) = fs::read_to_string(&path) {
+                        if let Ok(rec) = serde_json::from_str::<SemanticWeightsRecord>(&text) {
+                            semantic_skills.push(serde_json::json!({
+                                "skill": rec.skill_name,
+                                "updates_count": rec.updates_count,
+                            }));
+                        }
+                    }
+                }
+            }
+            semantic_skills.sort_by(|left, right| {
+                left.get("skill")
+                    .and_then(Value::as_str)
+                    .cmp(&right.get("skill").and_then(Value::as_str))
+            });
             let out = serde_json::json!({
                 "routing": {
                     "skills": skills,
@@ -1520,11 +2106,51 @@ pub fn handle_decision_tool(arguments: &Value) -> Result<String, String> {
                     "compose_precision": compose_precision,
                 },
                 "shell_families": families,
+                "conformal": {
+                    "sample_size": conformal_cal.nonconformity_scores.len(),
+                    "alpha": conformal_cal.alpha,
+                    "nominal_coverage": 1.0 - conformal_cal.alpha,
+                    "threshold": conformal_cal.quantile_threshold(),
+                },
+                "semantic_learning": {
+                    "skills": semantic_skills,
+                },
             });
             serde_json::to_string_pretty(&out)
                 .map_err(|e| format!("serialize calibration report: {e}"))
         }
-        unknown => Err(format!("Unknown decision action: '{unknown}'. Supported: score, noul, choice, calibrate, review-feedback, noul-feedback, calibration-report")),
+        "conformal" => {
+            let home = crate::runtime::resolve_claude_home("")
+                .map_err(|e| format!("resolve home: {e}"))?;
+            let alpha = arguments
+                .get("alpha")
+                .and_then(Value::as_f64)
+                .unwrap_or(crate::utility::calibration::DEFAULT_CONFORMAL_ALPHA);
+            let confidence = arguments
+                .get("confidence")
+                .and_then(Value::as_f64)
+                .unwrap_or(0.70);
+
+            if let Some(was_correct) = arguments.get("was_correct").and_then(Value::as_bool) {
+                record_conformal_outcome(&home, confidence, was_correct)?;
+            }
+
+            let calibrator = load_conformal_calibrator(&home, alpha);
+            let eval = calibrator.evaluate_prediction(confidence);
+            let out = serde_json::json!({
+                "alpha": calibrator.alpha,
+                "target_coverage": 1.0 - calibrator.alpha,
+                "confidence": confidence,
+                "nonconformity_score": eval.nonconformity_score,
+                "threshold": eval.quantile_threshold,
+                "satisfies_guarantee": eval.satisfies_guarantee,
+                "p_value": eval.p_value,
+                "sample_size": calibrator.nonconformity_scores.len(),
+            });
+            serde_json::to_string_pretty(&out)
+                .map_err(|e| format!("serialize conformal evaluation: {e}"))
+        }
+        unknown => Err(format!("Unknown decision action: '{unknown}'. Supported: score, noul, choice, calibrate, review-feedback, noul-feedback, calibration-report, conformal")),
     }
 }
 
@@ -1538,14 +2164,15 @@ pub fn run_decision_command(
             standard_output,
             "Usage: keel decision <action> [options]\n\n\
              Jev-inspired typed decision operations:\n  \
-               score            Score review findings or plan readiness against rubrics\n  \
-               noul             Evaluate shell command danger probability and risk action\n  \
-               choice           Evaluate skill composition choice for multi-domain prompt\n  \
-              calibrate        Get or update calibrated confidence for skill routing\n  \
-              cache-stats      Show decision-cache hit/miss counters (routing + gates)\n  \
-              review-feedback  Record review accuracy outcome and inspect calibration error\n  \
-              noul-feedback    Record a human allow/deny verdict on a shell command\n  \
-              calibration-report  Show calibration health across routing, review, composition, shell"
+               score               Score review findings or plan readiness against rubrics\n  \
+               noul                Evaluate shell command danger probability and risk action\n  \
+               choice              Evaluate skill composition choice for multi-domain prompt\n  \
+               calibrate           Get or update calibrated confidence for skill routing\n  \
+               conformal           Evaluate conformal risk control and (1 - alpha) error coverage\n  \
+               cache-stats         Show decision-cache hit/miss counters (routing + gates)\n  \
+               review-feedback     Record review accuracy outcome and inspect calibration error\n  \
+               noul-feedback       Record a human allow/deny verdict on a shell command\n  \
+               calibration-report  Show calibration health across routing, review, composition, shell, conformal"
         );
         return 0;
     }
@@ -1569,6 +2196,12 @@ pub fn run_decision_command(
         "calibrate" => {
             flag_set.string_flag("skill", "");
             flag_set.string_flag("confidence", "0.7");
+            flag_set.bool_flag("was-correct", false);
+        }
+        "conformal" => {
+            flag_set.string_flag("confidence", "0.7");
+            flag_set.string_flag("alpha", "0.05");
+            flag_set.bool_flag("record", false);
             flag_set.bool_flag("was-correct", false);
         }
         "cache-stats" => {}
@@ -1712,6 +2345,25 @@ pub fn run_decision_command(
         }
         "calibration-report" => {
             serde_json::json!({ "action": "calibration-report" })
+        }
+        "conformal" => {
+            let conf = flag_set
+                .string_value("confidence")
+                .parse::<f64>()
+                .unwrap_or(0.7);
+            let alpha = flag_set
+                .string_value("alpha")
+                .parse::<f64>()
+                .unwrap_or(crate::utility::calibration::DEFAULT_CONFORMAL_ALPHA);
+            let mut payload = serde_json::json!({
+                "action": "conformal",
+                "confidence": conf,
+                "alpha": alpha,
+            });
+            if flag_set.bool_value("record") {
+                payload["was_correct"] = serde_json::json!(flag_set.bool_value("was-correct"));
+            }
+            payload
         }
         other => {
             let _ = writeln!(
@@ -2301,6 +2953,267 @@ mod tests {
             .expect("pipe family");
         assert_eq!(pipe["samples"], serde_json::json!(3));
         assert_eq!(pipe["agreement_rate"], serde_json::json!(2.0 / 3.0));
+        assert!(report.get("conformal").is_some());
+        assert!(report.get("semantic_learning").is_some());
+        match prior_home {
+            Some(value) => std::env::set_var("KEEL_HOME", value),
+            None => std::env::remove_var("KEEL_HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn test_noul_cloud_and_container_destructive() {
+        let blocked = [
+            "aws s3 rm s3://my-bucket --recursive",
+            "gcloud sql instances delete prod-db",
+            "az group delete -n resource-grp --yes",
+            "kubectl delete namespace prod",
+            "terraform destroy -auto-approve",
+            "docker system prune -a --volumes -f",
+            "docker volume rm my-vol",
+            "DROP DATABASE users;",
+        ];
+
+        for cmd in blocked {
+            let dec = evaluate_shell_command_noul(cmd);
+            assert_eq!(
+                dec.action,
+                ShellRiskAction::Block,
+                "Command '{cmd}' should be blocked by cloud/container guard"
+            );
+            assert!(
+                dec.probability >= 0.90,
+                "Command '{cmd}' should have high danger prob"
+            );
+            assert_eq!(dec.category, ShellRiskCategory::Destructive);
+        }
+
+        let warned = ["docker system prune -a", "podman rm -a -f"];
+
+        for cmd in warned {
+            let dec = evaluate_shell_command_noul(cmd);
+            assert_eq!(
+                dec.action,
+                ShellRiskAction::Warn,
+                "Command '{cmd}' should warn for mass cleanup or forced removal"
+            );
+            assert!(dec.probability >= 0.80);
+        }
+
+        let safe = [
+            "aws s3 ls",
+            "gcloud compute instances list",
+            "kubectl get pods -A",
+            "docker ps -a",
+            "terraform plan",
+        ];
+
+        for cmd in safe {
+            let dec = evaluate_shell_command_noul(cmd);
+            assert_ne!(
+                dec.action,
+                ShellRiskAction::Block,
+                "Command '{cmd}' should not be blocked"
+            );
+        }
+    }
+
+    #[test]
+    fn test_noul_interpreter_script_safety() {
+        let destructive_scripts = [
+            "python -c \"import os, shutil; shutil.rmtree('/data')\"",
+            "node -e \"const fs = require('fs'); fs.rmSync('/data', {recursive: true})\"",
+            "python3 -c \"import os; os.unlink('/etc/hosts')\"",
+        ];
+
+        for cmd in destructive_scripts {
+            let dec = evaluate_shell_command_noul(cmd);
+            assert_eq!(
+                dec.action,
+                ShellRiskAction::Block,
+                "Command '{cmd}' should be blocked due to destructive filesystem APIs"
+            );
+            assert!(dec.probability >= 0.90);
+        }
+
+        let dynamic_scripts = [
+            "python -c \"import subprocess; subprocess.run(['ls', '-la'])\"",
+            "node -e \"const cp = require('child_process'); cp.exec('whoami')\"",
+        ];
+
+        for cmd in dynamic_scripts {
+            let dec = evaluate_shell_command_noul(cmd);
+            assert_eq!(
+                dec.action,
+                ShellRiskAction::Warn,
+                "Command '{cmd}' should warn for dynamic process spawn"
+            );
+            assert!(dec.probability >= 0.75);
+        }
+
+        let innocuous_scripts = [
+            "python -c \"print('hello world')\"",
+            "node -e \"console.log(1+1)\"",
+        ];
+
+        for cmd in innocuous_scripts {
+            let dec = evaluate_shell_command_noul(cmd);
+            assert_eq!(
+                dec.action,
+                ShellRiskAction::Warn,
+                "Arbitrary inline script '{cmd}' should warn to prevent intent masking"
+            );
+            assert_eq!(dec.probability, 0.65);
+        }
+
+        let version_checks = ["python --version", "node -v"];
+
+        for cmd in version_checks {
+            let dec = evaluate_shell_command_noul(cmd);
+            assert_ne!(
+                dec.action,
+                ShellRiskAction::Block,
+                "Command '{cmd}' should not be blocked"
+            );
+        }
+    }
+
+    #[test]
+    fn test_semantic_feature_learning_online_sgd() {
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let prior_home = std::env::var("KEEL_HOME").ok(); // fallback: KEEL_HOME may be unset in test environment
+        let home = std::env::temp_dir().join(format!("keel-sgd-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::env::set_var("KEEL_HOME", &home);
+
+        let skill = "deploy-k8s";
+        let target_prompt = "deploy microservice container to kubernetes cluster";
+        let unrelated_prompt = "bake chocolate chip cookies in oven";
+
+        // Initial prediction with <5 samples is None
+        assert!(predict_semantic_skill_confidence(&home, skill, target_prompt).is_none());
+
+        // Train 6 positive updates on target prompt keywords
+        for _ in 0..6 {
+            record_skill_semantic_learning(&home, skill, target_prompt, true)
+                .expect("record learning");
+        }
+
+        // Train 6 negative updates on unrelated prompt
+        for _ in 0..6 {
+            record_skill_semantic_learning(&home, skill, unrelated_prompt, false)
+                .expect("record learning");
+        }
+
+        let target_pred = predict_semantic_skill_confidence(&home, skill, target_prompt)
+            .expect("should have predictions after 12 updates");
+        let unrelated_pred = predict_semantic_skill_confidence(&home, skill, unrelated_prompt)
+            .expect("should have predictions after 12 updates");
+
+        assert!(
+            target_pred > unrelated_pred,
+            "Target prompt confidence ({target_pred:.3}) should exceed unrelated ({unrelated_pred:.3})"
+        );
+        assert!(
+            target_pred > 0.60,
+            "Target prompt confidence should be high ({target_pred:.3})"
+        );
+        assert!(
+            unrelated_pred < 0.45,
+            "Unrelated prompt confidence should be low ({unrelated_pred:.3})"
+        );
+
+        match prior_home {
+            Some(value) => std::env::set_var("KEEL_HOME", value),
+            None => std::env::remove_var("KEEL_HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn test_conformal_decision_action_and_cli() {
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let prior_home = std::env::var("KEEL_HOME").ok(); // fallback: KEEL_HOME may be unset in test environment
+        let home = std::env::temp_dir().join(format!("keel-conformal-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::env::set_var("KEEL_HOME", &home);
+
+        // Initial conformal check with empty history: threshold is 1.0, satisfies_guarantee is true
+        let out = handle_decision_tool(&serde_json::json!({
+            "action": "conformal",
+            "confidence": 0.85,
+            "alpha": 0.05,
+        }))
+        .expect("conformal call ok");
+        let val: Value = serde_json::from_str(&out).expect("json parse");
+        assert_eq!(val["sample_size"], serde_json::json!(0));
+        assert_eq!(val["threshold"], serde_json::json!(1.0));
+        assert_eq!(val["satisfies_guarantee"], serde_json::json!(true));
+
+        // Record 100 outcomes: 96 safe (confidence 0.95, correct=true -> score 0.05),
+        // 4 errors (confidence 0.95, correct=false -> score 0.95).
+        for _ in 0..96 {
+            handle_decision_tool(&serde_json::json!({
+                "action": "conformal",
+                "confidence": 0.95,
+                "was_correct": true,
+            }))
+            .expect("record ok");
+        }
+        for _ in 0..4 {
+            handle_decision_tool(&serde_json::json!({
+                "action": "conformal",
+                "confidence": 0.95,
+                "was_correct": false,
+            }))
+            .expect("record ok");
+        }
+
+        // Test with safe test prediction (confidence 0.95 -> nonconformity 0.05)
+        let eval_safe = handle_decision_tool(&serde_json::json!({
+            "action": "conformal",
+            "confidence": 0.95,
+            "alpha": 0.05,
+        }))
+        .expect("eval safe");
+        let val_safe: Value = serde_json::from_str(&eval_safe).expect("json parse");
+        assert_eq!(val_safe["sample_size"], serde_json::json!(100));
+        let thresh = val_safe["threshold"].as_f64().expect("f64 threshold");
+        assert!((thresh - 0.05).abs() < 1e-6);
+        assert_eq!(val_safe["satisfies_guarantee"], serde_json::json!(true));
+
+        // Test with low confidence prediction (confidence 0.40 -> nonconformity 0.60)
+        let eval_risky = handle_decision_tool(&serde_json::json!({
+            "action": "conformal",
+            "confidence": 0.40,
+            "alpha": 0.05,
+        }))
+        .expect("eval risky");
+        let val_risky: Value = serde_json::from_str(&eval_risky).expect("json parse");
+        assert_eq!(val_risky["satisfies_guarantee"], serde_json::json!(false));
+
+        // Test CLI run_decision_command with conformal
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let status = run_decision_command(
+            &[
+                "conformal".to_string(),
+                "--confidence".to_string(),
+                "0.90".to_string(),
+            ],
+            &mut stdout,
+            &mut stderr,
+        );
+        assert_eq!(status, 0);
+        let cli_out = String::from_utf8_lossy(&stdout);
+        assert!(cli_out.contains("sample_size"));
+        assert!(cli_out.contains("threshold"));
+
         match prior_home {
             Some(value) => std::env::set_var("KEEL_HOME", value),
             None => std::env::remove_var("KEEL_HOME"),
