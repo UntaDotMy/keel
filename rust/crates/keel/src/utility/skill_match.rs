@@ -86,7 +86,7 @@ pub fn skill_routing_cache_stats() -> SkillRoutingCacheStats {
 }
 
 /// Test and maintenance hook: drop every cached routing decision.
-#[allow(dead_code)]
+#[allow(dead_code)] // test and maintenance hook used in unit tests
 pub(crate) fn clear_skill_routing_cache() {
     if let Ok(mut cache) = SKILL_ROUTING_CACHE.lock() {
         cache.entries.clear();

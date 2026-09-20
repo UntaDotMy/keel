@@ -108,7 +108,7 @@ pub enum PreToolGateDecision {
         continue_anyway: bool,
     },
 }
-#[allow(dead_code)]
+#[allow(dead_code)] // schema/API surface retained for gate decisions and testing
 impl PreToolGateDecision {
     pub(crate) const DEFAULT_CONFIDENCE: f64 = 0.7;
 
@@ -192,7 +192,7 @@ impl PreToolGateDecision {
     }
 
     /// Creates a Warn decision.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // constructor retained for warning gate decisions
     pub(crate) fn warn(message: &'static str, confidence: f64, continue_anyway: bool) -> Self {
         PreToolGateDecision::Warn {
             message,
@@ -292,7 +292,7 @@ impl DecisionCache {
             .insert(key, entry);
     }
     /// Clear all entries for a session.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // session cleanup hook for gate cache
     fn clear_session(&mut self, session_id: &str) {
         for entries in self.entries.values_mut() {
             entries.retain(|(sess, _): &(String, String), _: &mut CacheEntry| -> bool {
@@ -910,7 +910,7 @@ pub(crate) fn markdown_only_edit_path(path: &str, tool_name: &str) -> bool {
 }
 /// Iron Law gate name constant - kept for API completeness even though iron_law
 /// gate doesn't use the cache (state can change between calls).
-#[allow(dead_code)]
+#[allow(dead_code)] // gate identifier retained for API completeness
 pub(crate) const GATE_NAME_IRON_LAW: &str = "iron_law";
 pub(crate) const GATE_NAME_PLAN: &str = "plan";
 pub(crate) const GATE_NAME_ANVIL: &str = "anvil";
@@ -1063,7 +1063,7 @@ pub(crate) fn fold_gate_decisions(
 }
 /// Backward-compat wrapper: converts GateDecision to Option<&'static str>.
 /// New code should use pre_tool_gate_decision_with_markdown_context directly.
-#[allow(dead_code)]
+#[allow(dead_code)] // backward-compat wrapper for external callers
 pub(crate) fn pre_tool_gate_decision(
     session_id: &str,
     tool_name: &str,
