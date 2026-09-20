@@ -33,14 +33,14 @@ The goal is to prevent noisy raw command output from entering the harness contex
 
 Text reminders are ignoreable. **Settlement is a tool deny**, not hope:
 
-- **Default `KEEL_IRON_LAW_GATE=strict`:** these tools are **denied** until the session used a **keel research tool** (`system_map` / `recall` / `context_brief` / `skill_*` / `code_search` or matching CLI):
+- **Default `KEEL_IRON_LAW_GATE=verified`:** these tools are **denied** until the session ran **fresh external research**: a WebSearch/WebFetch/context7 lookup, or a fresh `keel memory research-cache` record/reward (reuse):
   - edit-class (`Edit` / `Write` / `MultiEdit` / `apply_patch` / …)
-  - **shell** (`Bash` / …) unless the command is itself a keel research command
+  - **shell** (`Bash` / …) unless the command is itself a keel research or research-cache command
   - **Agent / Task** fan-out
 - **Still allowed** while blocked: `Read` / `Grep` / `Glob`, and shell `keel doctor` / `keel memory …` / etc.
-- Plain `Read` alone does **not** clear STRICT mode.
+- Plain `Read`, `recall`, `system_map`, and the other keel research tools do **not** clear VERIFIED mode; they are internal state, not external verification.
 - Marker: `~/.claude/state/iron-law-satisfied/<session>` — written only when research is observed (PostToolUse/observe), never on deny.
-- Modes: unset/`strict` → strict; `balanced` → keel **or** host Read/Grep; `off` → disabled.
+- Modes: unset/`verified` → fresh external research required; `strict` → any keel research tool; `balanced` → keel **or** host Read/Grep; `off` → disabled.
 - **UserPromptSubmit** also **pushes** a bounded workspace map/brief dump every turn so the agent has keel data without choosing to call tools, plus an `ENFORCED THIS TURN` strip naming the deny.
 
 ## Transparent Rewrite Handling

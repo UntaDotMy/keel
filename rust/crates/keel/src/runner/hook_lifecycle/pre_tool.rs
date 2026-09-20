@@ -32,11 +32,14 @@ pub(super) const IRON_LAW_GATE_DENIAL_VERIFIED: &str =
         1. WebSearch for the current official docs/behavior\n\
         2. WebFetch the authoritative source page\n\
         3. The context7 MCP for up-to-date library docs\n\
+        4. `keel memory research-cache record|reward` when a fresh matching finding \
+        already answers the problem (reuse instead of repeat browsing)\n\
         Recall/memory/keel reads do NOT clear VERIFIED — they are internal state, \
-        not verification. Read/Grep/Glob stay allowed. Set KEEL_IRON_LAW_GATE=strict, \
+        not verification. This is the default law; set KEEL_IRON_LAW_GATE=strict, \
         =balanced, or =off to relax.";
 
-/// Iron-law edit-gate mode. Default is **Strict** (keel tool required).
+/// Iron-law edit-gate mode. Default is **Verified**: a fresh external web lookup
+/// is required before editing, and a fresh research-cache entry counts as reuse.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 
 pub(crate) enum IronLawGateMode {
@@ -65,7 +68,7 @@ pub(super) fn iron_law_gate_mode() -> IronLawGateMode {
         Some("balanced") | Some("balance") | Some("any") => IronLawGateMode::Balanced,
         Some("verified") | Some("verify") | Some("web") => IronLawGateMode::Verified,
         Some("strict") | Some("on") | Some("true") => IronLawGateMode::Strict,
-        _ => IronLawGateMode::Strict,
+        _ => IronLawGateMode::Verified,
     }
 }
 
@@ -539,6 +542,13 @@ pub(super) fn is_web_research_tool_name(tool_name: &str) -> bool {
         || lower.contains("context7")
 }
 
+/// True when a shell command records or rewards a research-cache entry. That is
+/// the agent-attested reuse path VERIFIED accepts in place of a repeat lookup.
+pub(super) fn command_is_research_cache_evidence(command: &str) -> bool {
+    let lower = command.to_ascii_lowercase();
+    lower.contains("research-cache") && (lower.contains(" record") || lower.contains(" reward"))
+}
+
 /// Shell tools keel may rewrite into `keel run --`.
 ///
 /// Deliberately narrower than [`is_host_shell_tool_name`]: the gate reads the
@@ -639,10 +649,15 @@ pub(crate) fn tool_satisfies_iron_law(
     if mode == IronLawGateMode::Off {
         return false;
     }
-    // Verified mode: only a fresh external research tool clears the gate. keel
+    // Verified mode: only a fresh external research tool clears the gate, except
+    // that a fresh research-cache record/reward counts as researched reuse. keel
     // research tools, recall, and host reads are internal state, not verification.
     if mode == IronLawGateMode::Verified {
-        return is_web_research_tool_name(tool_name);
+        if is_web_research_tool_name(tool_name) {
+            return true;
+        }
+        return is_host_shell_tool_name(tool_name)
+            && command.is_some_and(command_is_research_cache_evidence);
     }
     if is_keel_research_tool_name(tool_name) {
         return true;

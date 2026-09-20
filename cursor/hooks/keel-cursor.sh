@@ -220,7 +220,7 @@ if is_edit_class_tool "$TOOL_NAME"; then
   case "$GATE" in
     KEEL_GATE_DENY*)
       REASON=$(printf '%s' "$GATE" | sed '1d')
-      [ -z "$REASON" ] && REASON="IRON LAW ENFORCED (STRICT): Use a keel tool first (MCP system_map, recall, context_brief, skill_route, or keel doctor / code-search). Plain Read does not clear the gate."
+      [ -z "$REASON" ] && REASON="IRON LAW ENFORCED (VERIFIED default): do a fresh web search (WebSearch/WebFetch/context7) or record/reuse a research-cache entry first; recall and memory alone do not clear the gate. Plain Read does not clear the gate."
       "$JQ_BIN" -n --arg msg "$REASON" '{
         "permission": "deny",
         "user_message": $msg,
@@ -235,7 +235,7 @@ if is_edit_class_tool "$TOOL_NAME"; then
   # marker, so a Delete (or any tool name the Rust core does not recognize) is
   # not silently allowed to run before research.
   if [ ! -f "$MARKER" ]; then
-    REASON="IRON LAW ENFORCED (STRICT): Use a keel tool first (MCP system_map, recall, context_brief, skill_route, or keel doctor / code-search). Plain Read does not clear the gate."
+    REASON="IRON LAW ENFORCED (VERIFIED default): do a fresh web search (WebSearch/WebFetch/context7) or record/reuse a research-cache entry first; recall and memory alone do not clear the gate. Plain Read does not clear the gate."
     "$JQ_BIN" -n --arg msg "$REASON" '{
       "permission": "deny",
       "user_message": $msg,

@@ -1273,7 +1273,7 @@ fn iron_law_research_command_rejects_bypass_and_non_research_surfaces() {
 }
 
 #[test]
-fn session_has_research_tool_counts_webfetch_and_stays_silent_otherwise() {
+fn research_evidence_counts_web_lookups_and_ignores_recall() {
     let dir = std::env::temp_dir().join(format!("keel-research-{}", now_ms()));
     let timings = dir.join("state").join("tool-timings");
     std::fs::create_dir_all(&timings).unwrap();
@@ -1283,14 +1283,53 @@ fn session_has_research_tool_counts_webfetch_and_stays_silent_otherwise() {
         "recorded_at_ms": now_ms(), "tool_name": "WebFetch", "session_id": "sess-r", "cwd": "x",
     });
     std::fs::write(timings.join(format!("{date}.jsonl")), format!("{row}\n")).unwrap();
-    assert!(session_has_research_tool(&dir, "sess-r"));
-    // A session whose only row is an edit did no research.
+    assert!(latest_research_evidence_ms(&dir, "sess-r").is_some());
+    // `recall` is internal state, not external research evidence.
     let row2 = serde_json::json!({
-        "recorded_at_ms": now_ms(), "tool_name": "Edit", "session_id": "sess-e", "cwd": "x",
+        "recorded_at_ms": now_ms(), "tool_name": "mcp__keel__recall", "session_id": "sess-e", "cwd": "x",
     });
     std::fs::write(timings.join(format!("{date}.jsonl")), format!("{row2}\n")).unwrap();
-    assert!(!session_has_research_tool(&dir, "sess-e"));
+    assert!(latest_research_evidence_ms(&dir, "sess-e").is_none());
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn research_evidence_is_required_per_problem_not_per_session() {
+    const WS: &str = "D:/Nasri/Project/research-law";
+    let claude_home = temp_brief_gate_home("research-law-per-problem");
+    let timings = claude_home.join("state").join("tool-timings");
+    std::fs::create_dir_all(&timings).expect("create timings dir");
+    let date = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let session_id = "sess-research-law";
+    std::fs::write(
+        timings.join(format!("{date}.jsonl")),
+        format!(
+            "{{\"session_id\":\"{session_id}\",\"tool_name\":\"WebSearch\",\"recorded_at_ms\":1000,\"cwd\":\"{WS}\"}}\n"
+        ),
+    )
+    .expect("seed web research row");
+
+    // No brief yet: the session-start boundary applies and the lookup covers it.
+    assert!(
+        research_evidence_is_current(&claude_home, session_id, WS, Some(1000)),
+        "a web lookup after the problem boundary covers the current problem"
+    );
+
+    // A new problem writes a new brief; the earlier lookup is now stale for it.
+    let brief = crate::utility::working_brief::create_brief(
+        "wb-research-law".into(),
+        "a new problem".into(),
+        Vec::new(),
+        vec!["the new problem is solved".into()],
+        Vec::new(),
+        WS.into(),
+        "2026-06-06T00:00:00Z".into(),
+    );
+    crate::utility::working_brief::write_brief(&claude_home, &brief).expect("write brief");
+    assert!(
+        !research_evidence_is_current(&claude_home, session_id, WS, Some(1000)),
+        "a new problem (new brief) needs new external research"
+    );
 }
 
 #[test]
@@ -1719,23 +1758,30 @@ fn hook_input_normalization_preserves_existing_claude_fields() {
 }
 
 #[test]
-fn iron_law_gate_mode_defaults_to_strict() {
+fn iron_law_gate_mode_defaults_to_verified() {
     let _guard = crate::test_support::ENV_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let previous = std::env::var(IRON_LAW_GATE_ENV_VAR).ok();
     std::env::remove_var(IRON_LAW_GATE_ENV_VAR);
-    // why: using-keel and the gate comment make Strict the default; Verified is opt-in.
+    // why: the Mandatory External Research Law makes fresh external research the
+    // default; the keel-tool Strict mode is the opt-down.
     assert_eq!(
         iron_law_gate_mode(),
-        IronLawGateMode::Strict,
-        "unset must default to Strict"
+        IronLawGateMode::Verified,
+        "unset must default to Verified"
+    );
+    std::env::set_var(IRON_LAW_GATE_ENV_VAR, "verified");
+    assert_eq!(
+        iron_law_gate_mode(),
+        IronLawGateMode::Verified,
+        "explicit verified wins"
     );
     std::env::set_var(IRON_LAW_GATE_ENV_VAR, "strict");
     assert_eq!(
         iron_law_gate_mode(),
         IronLawGateMode::Strict,
-        "explicit strict wins"
+        "strict is the opt-down"
     );
     std::env::set_var(IRON_LAW_GATE_ENV_VAR, "balanced");
     assert_eq!(iron_law_gate_mode(), IronLawGateMode::Balanced);
@@ -1784,6 +1830,18 @@ fn verified_mode_requires_web_research_not_internal_state() {
         IronLawGateMode::Verified,
         "mcp__context7__get-library-docs",
         None
+    ));
+    // A fresh research-cache record/reward is reuse evidence and clears VERIFIED.
+    assert!(tool_satisfies_iron_law(
+        IronLawGateMode::Verified,
+        "Bash",
+        Some("keel memory research-cache record --question q --answer a")
+    ));
+    // Recall through the shell does not clear VERIFIED.
+    assert!(!tool_satisfies_iron_law(
+        IronLawGateMode::Verified,
+        "Bash",
+        Some("keel memory recall --query q")
     ));
     // The denial message names VERIFIED.
     let verified_home = temp_brief_gate_home("iron-law-verified");
@@ -4889,12 +4947,12 @@ fn research_gate_nudges_when_no_research_before_edit() {
         research_gate_max_blocks(),
         0,
         1,
-        session_has_research_tool(&claude_home, session_id),
+        research_evidence_is_current(&claude_home, session_id, "/tmp", Some(1000)),
     );
     assert_eq!(
         decision,
         GateDecision::Nudge,
-        "research gate must nudge when code edited but no research tool found"
+        "research gate must nudge when code edited but no external research found"
     );
 
     let nudge_msg = research_gate_message(GateDecision::Nudge);

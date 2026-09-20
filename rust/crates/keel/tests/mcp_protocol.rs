@@ -8,6 +8,7 @@
 //!   test, and stdlib `Command`/`BufReader` plumbing for stdio.
 //! Main Functions: `mcp_serve_discovery_then_tools_list_round_trip`,
 //!   `mcp_serve_tools_call_recall_status_returns_text_payload`,
+//!   `mcp_serve_context_brief_answers_within_tool_budget`,
 //!   `mcp_serve_resources_list_includes_system_map_and_recall_status`,
 //!   `mcp_serve_unknown_method_returns_method_not_found`,
 //!   `mcp_serve_parse_error_returns_dash_32700`.
@@ -19,7 +20,7 @@ use std::env;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::{mpsc, Arc, Barrier};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -42,7 +43,7 @@ fn keel_binary_path() -> PathBuf {
 struct McpServerProcess {
     child: Child,
     stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
+    lines: mpsc::Receiver<String>,
 }
 
 impl McpServerProcess {
@@ -66,10 +67,20 @@ impl McpServerProcess {
         let mut child = command.spawn().expect("spawn keel mcp serve");
         let stdin = child.stdin.take().expect("capture child stdin");
         let stdout = BufReader::new(child.stdout.take().expect("capture child stdout"));
+        // Reader thread plus channel so a test can bound its wait through
+        // `recv_with_deadline`; EOF drops the sender that `recv` reports.
+        let (line_sender, lines) = mpsc::channel();
+        thread::spawn(move || {
+            for line in stdout.lines().map_while(Result::ok) {
+                if line_sender.send(line).is_err() {
+                    break;
+                }
+            }
+        });
         Self {
             child,
             stdin,
-            stdout,
+            lines,
         }
     }
 
@@ -90,12 +101,20 @@ impl McpServerProcess {
     }
 
     fn recv(&mut self) -> Value {
-        let mut line = String::new();
-        let bytes = self
-            .stdout
-            .read_line(&mut line)
-            .expect("read response line from child stdout");
-        assert!(bytes > 0, "child closed stdout before responding");
+        let line = self
+            .lines
+            .recv()
+            .expect("child closed stdout before responding");
+        serde_json::from_str(line.trim()).expect("parse response JSON")
+    }
+
+    /// `recv` bounded by `deadline`: a tool body that wedges the stdio loop
+    /// fails the test with the elapsed budget instead of hanging the suite.
+    fn recv_with_deadline(&mut self, deadline: Duration) -> Value {
+        let line = self
+            .lines
+            .recv_timeout(deadline)
+            .unwrap_or_else(|error| panic!("no response within {deadline:?}: {error}"));
         serde_json::from_str(line.trim()).expect("parse response JSON")
     }
 
@@ -276,6 +295,58 @@ fn mcp_serve_tools_call_recall_status_returns_text_payload() {
     assert!(payload["schemaVersion"].is_string());
     assert!(payload["documents"].is_number());
     assert!(payload["claudeHome"].is_string());
+
+    server.close();
+    let _ = std::fs::remove_dir_all(&claude_home);
+}
+
+#[test]
+fn mcp_serve_context_brief_answers_within_tool_budget() {
+    // Regression: git inherited stdin and deadlocked against the server's pending
+    // read; the bound holds only when the probe spawns git with a null stdin.
+    let claude_home = unique_temp_directory("context-brief-budget");
+    let mut server = McpServerProcess::spawn(&claude_home);
+
+    let started = std::time::Instant::now();
+    server.send_modern(json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": "context_brief",
+            "arguments": {}
+        }
+    }));
+    let response = server.recv_with_deadline(Duration::from_secs(10));
+    let elapsed = started.elapsed();
+    assert_eq!(
+        response["result"]["isError"],
+        json!(false),
+        "response: {response}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "context_brief must answer inside the tool budget, took {elapsed:?}"
+    );
+
+    let content = response["result"]["content"]
+        .as_array()
+        .expect("content array");
+    assert_eq!(content.len(), 1, "response: {response}");
+    assert_eq!(content[0]["type"], json!("text"));
+    let text = content[0]["text"].as_str().expect("text field");
+    let payload: Value = serde_json::from_str(text).expect("parse context_brief payload");
+    assert!(payload["ironLaw"].is_string(), "payload: {payload}");
+    assert!(payload["skillCount"].is_number(), "payload: {payload}");
+    let truth = payload["repositoryTruth"]
+        .as_object()
+        .expect("repositoryTruth object");
+    for field in ["branch", "commit", "dirtyFiles"] {
+        assert!(
+            truth.contains_key(field),
+            "truth missing {field}: {truth:?}"
+        );
+    }
 
     server.close();
     let _ = std::fs::remove_dir_all(&claude_home);

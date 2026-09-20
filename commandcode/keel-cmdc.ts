@@ -284,7 +284,7 @@ export default function keelCmdcMod(cmd: ModApi): void {
             block: true,
             additionalContext:
               gateResult.reason ||
-              "keel Iron Law gate: call system_map/recall/context_brief before editing.",
+              "keel Iron Law gate (default VERIFIED): do a fresh web search (WebSearch/WebFetch/context7) or reuse a research-cache entry before editing.",
           };
         }
         if (gateResult.status !== "allow") {

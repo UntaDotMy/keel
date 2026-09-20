@@ -286,7 +286,7 @@ function handleToolCall(
             gateResult.reason ||
             (readingCommand
               ? "keel reading command gate denied this operation."
-              : "keel Iron Law gate: call system_map/recall/context_brief before the operation."),
+              : "keel Iron Law gate (default VERIFIED): do a fresh web search (WebSearch/WebFetch/context7) or reuse a research-cache entry before the operation."),
         };
       }
       if (gateResult.status !== "allow") {

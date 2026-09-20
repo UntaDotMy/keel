@@ -56,6 +56,7 @@ Side Effects: None — this file is informational.
 - Keep committed comments and documentation professional, concise, and neutral.
 - Avoid first-person and second-person pronouns in committed comments or documentation unless quoting user-provided text or an external source.
 - Cap each implementation comment (`//`, `#`) at two lines. Longer explanation means the code needs a clearer name or a small refactor, not more prose. Structured file/item doc headers (`///`, `//!`, `<!-- -->`) are exempt from the cap but still follow the wording rules.
+- **Enforce the cap at write time, not at review.** Step 4 of the Implementation Law (`AGENTS/references/30-execution-strategy.md` § 4) applies the AI-slop comment rules while the code is written. The comment-style gate (`keel review comments`) backstops the rule; it is not a substitute for writing to it. A comment written over-length and trimmed later is a review-time fix for a write-time rule.
 - Never use an em dash or en dash in a comment; it reads as machine-generated. Use a period or comma. Avoid the ` - ` aside and chatty filler ("just", "simply", "now we", "hope this helps").
 - State what the code does, not a narration of the change. The comment-style gate (`keel review comments`) is fail-closed on added lines: an over-length implementation comment or any em/en dash blocks; first-person, chatty, and hype wording warn.
 - Every created or modified file must keep a short doc header in the file's native comment style with `Purpose`, `Caller`, `Dependencies`, `Main Functions`, and `Side Effects`.

@@ -485,7 +485,7 @@ function handlePreToolUse(input, isPre) {
     const gate = runBridge("pre-tool-use", gateArgs, 5000);
     const gateResult = parseGateResponse(gate);
     if (gateResult.status === "deny") {
-      return denyOutput(gateResult.reason || "keel Iron Law gate: call system_map/recall/context_brief before editing.");
+      return denyOutput(gateResult.reason || "keel Iron Law gate (default VERIFIED): do a fresh web search (WebSearch/WebFetch/context7) or reuse a research-cache entry before editing.");
     }
     if (gateResult.status !== "allow") {
       return denyOutput("keel Iron Law gate could not be evaluated (keel did not respond in time). Retry the edit; if it persists, run `keel doctor`.");
@@ -507,7 +507,7 @@ function handlePreToolUse(input, isPre) {
     const gate = runBridge("pre-tool-use", gateArgs, 5000);
     const gateResult = parseGateResponse(gate);
     if (gateResult.status === "deny") {
-      return denyOutput(gateResult.reason || (readingCommand ? "keel reading command gate denied this command." : "keel Iron Law gate: call system_map/recall/context_brief before running shell commands."));
+      return denyOutput(gateResult.reason || (readingCommand ? "keel reading command gate denied this command." : "keel Iron Law gate (default VERIFIED): do a fresh web search (WebSearch/WebFetch/context7) or reuse a research-cache entry before running shell commands."));
     }
     if (gateResult.status !== "allow") {
       return denyOutput("keel Iron Law shell gate could not be evaluated. Retry after running `keel doctor`.");

@@ -117,6 +117,15 @@ Avoid infinite or low-value retry loops:
 - The `keel memory loop-guard record --signature <text>` helper records a failure signature in scoped workstream memory and increments its count; `loop-guard check --signature <text> --budget <n>` reports whether the retry budget is exhausted and exits non-zero (2) when it is, so a caller can branch on it. Use it to enforce the twice-and-change rule mechanically instead of by hand.
 - While sub-agents are running, the main agent should continue non-conflicting work instead of idling.
 
+## Mandatory External Research
+
+Every fix, problem trace, or implementation begins with external research against
+current sources. Model memory is stale by cutoff; `recall`, memory, and host reads
+are a hypothesis, never proof. The requirement is **per problem, not per session**:
+a new problem needs new evidence, and reuse happens only through a fresh, matching
+`research-cache` entry. The PreToolUse Iron Law gate defaults to `Verified`; the
+PostToolBatch/Stop research gate is per-problem.
+
 ## Live Research Tool Selection
 
 Pick the strongest truthful research surface the current runtime exposes:

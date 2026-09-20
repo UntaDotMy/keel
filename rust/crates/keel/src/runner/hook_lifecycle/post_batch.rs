@@ -335,21 +335,22 @@ pub(super) fn research_gate_blocks_path(claude_home: &Path, session_id: &str) ->
         .join(key)
 }
 
-/// Whether any research tool was called this session. Scans the tool_timings
-/// JSONL for `session_id` and checks whether any record's tool_name contains
-/// one of the research-tool substrings: "websearch", "web_fetch", "context7",
-/// or "recall". Fail-open: any read/parse problem returns `true` so the gate
-/// degrades to advisory.
-pub(super) fn session_has_research_tool(claude_home: &Path, session_id: &str) -> bool {
+/// Latest session research evidence timestamp (ms), or `None` when the session
+/// has none. Counts a fresh external web lookup (websearch/webfetch/context7) and
+/// a fresh research-cache record. `recall` and other internal reads are not
+/// evidence: the internet moves forward and memory does not.
+pub(super) fn latest_research_evidence_ms(claude_home: &Path, session_id: &str) -> Option<u64> {
     // read yesterday too so research done before midnight in a session that
     // crosses midnight still counts (matches session_start_ms's two-day span).
     let now = chrono::Local::now();
-    let today = now.format("%Y-%m-%d").to_string();
-    let yesterday = (now - chrono::Duration::days(1))
-        .format("%Y-%m-%d")
-        .to_string();
-    let mut any_readable = false;
-    for date in [today, yesterday] {
+    let dates = [
+        now.format("%Y-%m-%d").to_string(),
+        (now - chrono::Duration::days(1))
+            .format("%Y-%m-%d")
+            .to_string(),
+    ];
+    let mut newest: Option<u64> = None;
+    for date in dates {
         let path = claude_home
             .join("state")
             .join("tool-timings")
@@ -357,7 +358,6 @@ pub(super) fn session_has_research_tool(claude_home: &Path, session_id: &str) ->
         let Ok(body) = fs::read_to_string(&path) else {
             continue;
         };
-        any_readable = true;
         for line in body.lines() {
             if line.trim().is_empty() {
                 continue;
@@ -375,26 +375,51 @@ pub(super) fn session_has_research_tool(claude_home: &Path, session_id: &str) ->
                 .to_ascii_lowercase();
             // `webfetch` (Claude Code's tool name) has no underscore, so the
             // `web_fetch` substring alone missed it ; count both spellings.
-            if tool.contains("websearch")
+            let is_web = tool.contains("websearch")
                 || tool.contains("web_search")
                 || tool.contains("webfetch")
                 || tool.contains("web_fetch")
-                || tool.contains("context7")
-                || tool.contains("recall")
-            {
-                return true;
+                || tool.contains("context7");
+            if !is_web {
+                continue;
+            }
+            if let Some(ms) = row.get("recorded_at_ms").and_then(JsonDocument::as_u64) {
+                newest = Some(newest.map_or(ms, |current| current.max(ms)));
             }
         }
     }
-    // Fail-open: if no timing file was readable the code cannot prove research did not
-    // happen, so keep the gate silent rather than firing spuriously.
-    !any_readable
+    // A fresh research-cache entry is reuse evidence: same problem, no re-browse.
+    newest = newest.max(newest_file_mtime_in_dir(
+        &claude_home.join("memory").join("research-cache"),
+    ));
+    newest
+}
+
+/// Whether fresh external research covers the CURRENT problem. The problem
+/// boundary is the active working brief: evidence must be at or after the brief
+/// (or the session start when no brief applies), so a new problem needs new
+/// research while multi-edit work inside one problem reuses the same evidence.
+pub(super) fn research_evidence_is_current(
+    claude_home: &Path,
+    session_id: &str,
+    workspace_cwd: &str,
+    session_start_ms: Option<u64>,
+) -> bool {
+    let Some(evidence_ms) = latest_research_evidence_ms(claude_home, session_id) else {
+        return false;
+    };
+    let boundary = newest_brief_mtime_ms(claude_home, workspace_cwd).or(session_start_ms);
+    match boundary {
+        Some(boundary) => evidence_ms.saturating_add(BRIEF_GATE_SESSION_GRACE_MS) >= boundary,
+        // Cannot time the problem: never block a session the code cannot measure.
+        None => true,
+    }
 }
 
 pub(super) fn research_gate_message(decision: GateDecision) -> String {
     match decision {
-        GateDecision::Block => "Research gate (CLAUDE_SKILLS_RESEARCH_GATE): code changed without web search or recall evidence — escalated (imperative, still feed-forward — not a turn halt). Use WebSearch/WebFetch, the context7 MCP, or the keel `recall` tool before implementing. Bounded per session, then lets the turn through so it cannot loop. Set CLAUDE_SKILLS_RESEARCH_GATE=nudge, =block, =off.".to_string(),
-        _ => "Research gate (CLAUDE_SKILLS_RESEARCH_GATE): code changed without web search or recall evidence. Use WebSearch/WebFetch, the context7 MCP, or the keel `recall` tool before implementing. This first reminder does not stop the turn, but will escalate. Set CLAUDE_SKILLS_RESEARCH_GATE=nudge, =block, =off.".to_string(),
+        GateDecision::Block => "Research gate (CLAUDE_SKILLS_RESEARCH_GATE): this change has no fresh external research — escalated (imperative, still feed-forward — not a turn halt). Do a WebSearch/WebFetch or context7 lookup for this problem, or record/reuse a fresh `keel memory research-cache` entry. Recall and memory alone do not count. Bounded per session, then lets the turn through so it cannot loop. Set CLAUDE_SKILLS_RESEARCH_GATE=nudge, =block, =off.".to_string(),
+        _ => "Research gate (CLAUDE_SKILLS_RESEARCH_GATE): this change has no fresh external research. Do a WebSearch/WebFetch or context7 lookup for this problem, or record/reuse a fresh `keel memory research-cache` entry. Recall and memory alone do not count. This first reminder does not stop the turn, but will escalate. Set CLAUDE_SKILLS_RESEARCH_GATE=nudge, =block, =off.".to_string(),
     }
 }
 
@@ -1250,10 +1275,12 @@ pub(super) fn run_hook_post_tool_batch(
             }
         }
 
-        // Research gate: fires when code changed but no web search or recall
-        // tool was used this session. Satisfied when any research tool fired.
+        // Research gate: fires when code changed but fresh external research for
+        // THIS problem is missing (recall/internal reads do not count).
         if research_on {
-            let satisfied = session_has_research_tool(&claude_home, session_id);
+            let start = session_start_ms(&claude_home, session_id);
+            let satisfied =
+                research_evidence_is_current(&claude_home, session_id, &stats.last_cwd, start);
             let blocks_path = research_gate_blocks_path(&claude_home, session_id);
             let decision = claim_gate_decision(
                 &blocks_path,
@@ -1379,9 +1406,9 @@ pub(super) fn run_hook_stop(
         return 0;
     };
     if stop_gate_is_enforcing(research_gate_mode(), research_gate_max_blocks(), res_blocks)
-        && !session_has_research_tool(&claude_home, session_id)
+        && !research_evidence_is_current(&claude_home, session_id, &stats.last_cwd, session_start)
     {
-        blockers.push("record research evidence for the implementation");
+        blockers.push("record fresh external research for this problem");
     }
     if blockers.is_empty() {
         return 0;

@@ -15,6 +15,8 @@ You are running with keel discipline. These rules are non-negotiable. When runni
 
 3. **Find the root cause.** Trace the symptom end-to-end with file:line evidence and confirm the suspect is on that path before changing anything. The real problem is usually one layer below what was asked.
 
+4. **Mandatory external research.** Every fix, trace, or implementation starts with a live web lookup (WebSearch/WebFetch/context7) for that problem; model memory is stale by cutoff. `recall` and memory are a hypothesis, never proof. Reuse a fresh research-cache entry instead of re-browsing the same problem.
+
 ## Working Workflow
 
 - **Start work:** `keel anvil compile --goal "..." --bar "..."` then `keel anvil run --dry-run`

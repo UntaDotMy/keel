@@ -270,7 +270,7 @@ function handlePreToolUse(input: CodexHookInput, isPre: boolean): string {
     if (gateResult.status === "deny") {
       return denyOutput(
         gateResult.reason ||
-          "keel Iron Law gate: call system_map/recall/context_brief before editing.",
+          "keel Iron Law gate (default VERIFIED): do a fresh web search (WebSearch/WebFetch/context7) or reuse a research-cache entry before editing.",
       );
     }
     if (gateResult.status !== "allow") {
@@ -295,7 +295,7 @@ function handlePreToolUse(input: CodexHookInput, isPre: boolean): string {
         gateResult.reason ||
           (readingCommand
             ? "keel reading command gate denied this command."
-            : "keel Iron Law gate: call system_map/recall/context_brief before running shell commands."),
+            : "keel Iron Law gate (default VERIFIED): do a fresh web search (WebSearch/WebFetch/context7) or reuse a research-cache entry before running shell commands."),
       );
     }
     if (gateResult.status !== "allow") {

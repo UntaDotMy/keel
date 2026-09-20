@@ -4642,6 +4642,13 @@ fn tool_context_brief(arguments: &Value) -> Result<String, String> {
     mcp_json_compact(&payload).map_err(|error| format!("context_brief: {error}"))
 }
 
+/// Per-probe kill budget for the repository-truth git fields. Four probes run
+/// back to back inside one tool body, so this must leave room under the outer
+/// MCP deadline (`mcp_child_timeout`, 25s default): four 5s tries still return
+/// before the deadline that would abandon the worker. A healthy probe is
+/// ~60ms, so the budget only fires on a genuinely wedged git.
+const GIT_FIELD_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Compact current-checkout truth for plan §46: branch, commit, dirty state,
 /// and detected languages, bounded and on demand, never a full repository
 /// map. Shells out to git; every failure degrades to an explicit marker
@@ -4650,28 +4657,18 @@ fn repository_truth_snapshot(workspace_root: Option<&std::path::Path>) -> Value 
     use std::process::Command;
 
     fn git_field(root: &std::path::Path, args: &[&str]) -> Option<String> {
-        let mut child = Command::new("git")
+        // why: an inherited stdin deadlocks against the server's pending read, so
+        // null it and let the shared deadline kill a wedged git.
+        let mut command = Command::new("git");
+        command
             .args(args)
             .current_dir(root)
+            .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .ok()?;
-        let output = std::thread::scope(|scope| {
-            scope
-                .spawn(|| {
-                    use std::io::Read;
-                    let mut text = String::new();
-                    if let Some(mut stdout) = child.stdout.take() {
-                        let _ = stdout.read_to_string(&mut text);
-                    }
-                    let _ = child.wait();
-                    text
-                })
-                .join()
-        })
-        .ok()?;
-        let trimmed = output.trim().to_string();
+            .stderr(std::process::Stdio::piped());
+        let (_, stdout, _) =
+            run_command_with_timeout(command, GIT_FIELD_TIMEOUT, "context_brief").ok()?;
+        let trimmed = stdout.trim().to_string();
         (!trimmed.is_empty()).then_some(trimmed)
     }
 
@@ -4758,7 +4755,7 @@ fn detect_workspace_languages(root: &std::path::Path) -> Vec<String> {
 /// authoritative long form is injected at SessionStart by the hook layer; this
 /// is the pull-channel equivalent for sessions where that injection did not
 /// reach the model.
-const IRON_LAW_SUMMARY: &str = "Before anything that could touch code, config, or architecture: (1) Read first — read the SYSTEM_MAP and the owning file before claiming behavior. (2) Understand before building — restate the request and research what is needed; never build against an imagined spec. (3) Invoke relevant skills — if a keel skill might apply, route to it before answering. (4) Find the root cause — trace the symptom with file:line evidence before changing anything.";
+const IRON_LAW_SUMMARY: &str = "Before anything that could touch code, config, or architecture: (1) Read first — read the SYSTEM_MAP and the owning file before claiming behavior. (2) Understand before building — restate the request and research what is needed; never build against an imagined spec. (3) Invoke relevant skills — if a keel skill might apply, route to it before answering. (4) Find the root cause — trace the symptom with file:line evidence before changing anything. Mandatory external research: every fix, trace, or implementation starts with a live web lookup (WebSearch/WebFetch/context7) for THIS problem; model memory is stale by cutoff, and recall/memory alone are not proof. Reuse a fresh research-cache entry instead of re-browsing.";
 
 /// keel subcommands the `cli` passthrough refuses outright. `mcp` would
 /// recurse into another server; the destructive/management set is gated behind
