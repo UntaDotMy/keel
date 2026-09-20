@@ -319,7 +319,7 @@ fn running_mcp_serve_pids_with_ppid() -> Vec<(u32, u32)> {
         "powershell",
         &arguments,
         None,
-        std::time::Duration::from_secs(10),
+        crate::runner::shared_constants::DOCTOR_PROBE_TIMEOUT,
     );
     parse_pid_ppid_listing(
         output
@@ -339,7 +339,7 @@ fn running_mcp_serve_pids_with_ppid() -> Vec<(u32, u32)> {
         "sh",
         &arguments,
         None,
-        std::time::Duration::from_secs(10),
+        crate::runner::shared_constants::DOCTOR_PROBE_TIMEOUT,
     );
     parse_pid_ppid_listing(
         output
@@ -401,7 +401,7 @@ fn terminate_pid(pid: u32) -> bool {
         "taskkill",
         &arguments,
         None,
-        std::time::Duration::from_secs(10),
+        crate::runner::shared_constants::DOCTOR_PROBE_TIMEOUT,
     )
     .map(|result| result.code == 0)
     .unwrap_or(false)
@@ -413,7 +413,7 @@ fn terminate_pid(pid: u32) -> bool {
         "kill",
         &[pid.to_string()],
         None,
-        std::time::Duration::from_secs(10),
+        crate::runner::shared_constants::DOCTOR_PROBE_TIMEOUT,
     )
     .map(|result| result.code == 0)
     .unwrap_or(false)

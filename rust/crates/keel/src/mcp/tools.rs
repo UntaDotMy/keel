@@ -4641,8 +4641,7 @@ fn tool_context_brief(arguments: &Value) -> Result<String, String> {
 /// back to back inside one tool body, so this must leave room under the outer
 /// MCP deadline (`mcp_child_timeout`, 25s default): four 5s tries still return
 /// before the deadline that would abandon the worker. A healthy probe is
-/// ~60ms, so the budget only fires on a genuinely wedged git.
-const GIT_FIELD_TIMEOUT: Duration = Duration::from_secs(5);
+use crate::runner::shared_constants::GIT_FIELD_TIMEOUT;
 
 /// Compact current-checkout truth for plan §46: branch, commit, dirty state,
 /// and detected languages, bounded and on demand, never a full repository

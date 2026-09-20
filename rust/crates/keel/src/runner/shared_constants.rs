@@ -31,6 +31,14 @@ pub const COMPRESSION_HINT_AFTER_ENV_VAR: &str = "CLAUDE_SKILLS_COMPRESSION_HINT
 pub const CLAUDE_TARGET_OVERRIDE_ENV_VAR: &str = "CLAUDE_TARGET_OVERRIDE";
 pub const CLAUDE_SKILLS_HOOK_ENV_VAR: &str = "CLAUDE_SKILLS_HOOK";
 pub const CLAUDE_SKILLS_AGENT_ENV_VAR: &str = "CLAUDE_SKILLS_AGENT";
+pub const KEEL_HOME_ENV_VAR: &str = "KEEL_HOME";
+
+// Hook and Probe Timeout Constants
+pub const DEFAULT_HOOK_TIMEOUT_SECS: u64 = 5;
+pub const EXTENDED_HOOK_TIMEOUT_SECS: u64 = 10;
+pub const EXTENDED_HOOK_TIMEOUT_MS: u64 = 10_000;
+pub const GIT_FIELD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+pub const DOCTOR_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 // Plugin manifest configuration options
 pub const PLUGIN_REVIEW_STRICTNESS: &str = "CLAUDE_PLUGIN_OPTION_REVIEW_STRICTNESS";
