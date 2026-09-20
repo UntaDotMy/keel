@@ -77,6 +77,7 @@ Git cannot store both `refs/heads/task/<task>` and `refs/heads/task/<task>/<subt
 - **Any Type Abuse**: Using `any` type in TypeScript instead of proper typing
 - **Copy-Paste**: Duplicating code instead of extracting shared logic
 - **Hardcoding**: Hardcoding values instead of using configuration
+- **Hardcoding shared behavior**: Repeating the same behavior, vocabulary, or contract across many files instead of extending the shared/class/owner file. It multiplies review points and maintenance cost; the shared owner is the default (AGENTS.md rule 10).
 
 ### Scope Creep Shortcuts (CRITICAL)
 - **Adding Unrequested Features**: Implementing features that weren't asked for
@@ -100,6 +101,7 @@ Git cannot store both `refs/heads/task/<task>` and `refs/heads/task/<task>/<subt
 - **Guessing**: Picking among designs, host behaviors, or schema fields without evidence
 - **Skipping required work**: Omitting research, tests, review, sibling scan, flow-check, or a release-ladder rung to "save time"
 - **Shortcut closeout**: Presenting partial work as done, or fixing one site of a class bug
+- **Unresearched fix or trace**: Fixing, tracing, or implementing without a live web lookup for that problem, on the assumption that model memory is current. Training data is stale by cutoff; `recall`, memory, and host reads are a hypothesis, never proof (AGENTS.md rule 11, Implementation Law step 1).
 
 ### Testing Shortcuts
 - **Test Skipping**: Using `.skip()`, `.only()`, or commenting out failing tests

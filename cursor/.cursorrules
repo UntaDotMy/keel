@@ -12,6 +12,8 @@ You are running with keel discipline. These rules are non-negotiable.
 
 3. **Find the root cause.** Trace the symptom end-to-end with file:line evidence and confirm the suspect is on that path before changing anything. The real problem is usually one layer below what was asked.
 
+4. **Research externally, per problem.** Every fix, trace, or implementation starts with a live web lookup (WebSearch/WebFetch/context7) for that problem; model memory is stale by cutoff, and `recall`/memory are a hypothesis, never proof. Reuse a fresh research-cache entry instead of re-browsing. The 7-step implementation law: read the target lines + research, trace the call chain, preserve flow and prefer the shared owner file over hardcoding, implement with comments capped at 2 lines, re-read and re-trace, loop/review, then confirm against evidence before the final output.
+
 ## Working Workflow
 
 - **Start work:** open a tracked working brief: `keel memory working-brief write --request "..." --constraints "..." --acceptance-criteria "..."`

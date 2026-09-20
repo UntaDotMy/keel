@@ -122,9 +122,12 @@ If any of those fails, dispatch sequentially. The cost of one wasted agent run i
 - The dispatcher reconciled the full set of reports before claiming completion.
 - Sequential work was not artificially parallelized to inflate apparent throughput.
 
-## 1. Research Loop (3-Round Escalation)
+## 1. Research Loop (MANDATORY: every fix, trace, or implementation)
+
+**Mandatory external research law.** Every fix, problem trace, or implementation MUST begin with external research against current sources: a live web search / WebFetch / context7 lookup, plus Stack Overflow or vendor docs as fitting the task. Model memory is stale by cutoff; the internet moves forward. `recall`, memory, `system_map`, and host reads are a hypothesis, never proof, and never satisfy this law on their own. The requirement is **per problem, not per session**: a new problem needs new evidence. Reuse is allowed only when a fresh, matching `research-cache` entry already answers the problem, record/reward it instead of re-browsing. On any error, web search the exact error text before patching. An unresearched fix or trace is a guess.
 
 **When to research:**
+- Always, before any fix, trace, or implementation. The triggers below are examples of the rule, not the boundary of it:
 - Before any non-trivial technical guidance, design decision, or implementation plan
 - Any time the facts, tools, APIs, libraries, models, standards, or best practices may have changed
 - Unfamiliar technology or API
@@ -277,19 +280,21 @@ For any non-trivial bug involving mode, state, status, routing, connection, togg
 
 If any answer is no or not sure, the analysis is not complete.
 
-## 4. Implementation Loop
+## 4. Implementation Loop (The 7-Step Implementation Law, MANDATORY)
 
-**Write code following all quality standards:**
-- Full descriptive names (no shortforms)
-- Only requested features (no scope creep)
-- Clean updates (delete old code)
-- DRY (reuse existing code)
-- Never hardcode runtime values, environment-specific paths, thresholds, endpoints, rollout settings, or credentials when configuration, derivation, or existing constants should own them
-- Based on impact analysis from previous loop
+Every code change follows these seven steps in order:
+1. **Read + research.** Read the targeted file and the exact lines to change (before patching). Then do the web search/research for the task (official docs, Stack Overflow, or the fitting source). A fix built on memory alone is a guess.
+2. **Think and trace.** Reason about the effect before coding; trace the function and its full call chain (callers, callees, state writes) and confirm the target sits on the traced path.
+3. **Preserve flow + shared + best practice.** Run the Preserve Existing Flow ownership trace; prefer extending the shared/class/owner file over hardcoding the same behavior across many files (fewer review points, lower maintenance cost); and web search the best practice for the project's language so the change is idiomatic, not spaghetti.
+4. **Implement, slop rules enforced here, not at the end.** Apply the AI-slop comment ban **at write time**: max 2 lines per comment, no summary/narration, `// why:` or doc tags only. Do not defer comment cleanup to review. While writing, also hold: full descriptive names (no shortforms), only requested features (no scope creep), clean updates (delete old code), DRY (reuse existing code over duplication), and never hardcode runtime values, environment-specific paths, thresholds, endpoints, rollout settings, or credentials when configuration, derivation, or existing constants should own them.
+5. **Re-read and re-trace.** After the patch, re-read the implementation and think through whether it actually fixes the problem; re-trace the call chain to confirm the fix is real, not cosmetic.
+6. **Loop and review.** Repeat fix -> verify until clean; run the sibling scan (`keel code-search siblings`) and the review gate.
+7. **Confirm, then final output.** Verify every explicit requirement against evidence, then produce the final output.
 
 **Exit criteria:**
-- Code written
-- Follows all quality standards
+- All seven steps performed in order
+- Code written and re-read; the fix re-traced to the real problem
+- Follows all quality standards; comments capped at 2 lines at write time
 - No obvious errors
 - Changes align with documented impact analysis
 

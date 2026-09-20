@@ -227,7 +227,7 @@ test("Antigravity adapter translates the documented camelCase hook contract", ()
   expect(adapter).toContain('"bridge", subcommand');
 });
 
-test("Antigravity MCP research call satisfies the edit gate end to end", async () => {
+test("Antigravity external web research satisfies the edit gate end to end", async () => {
   const tempHome = await mkdtemp(join(tmpdir(), "keel-antigravity-e2e-"));
   const keelHome = join(tempHome, ".keel");
   const keelBin = join(repoRoot, "target", "debug", process.platform === "win32" ? "keel.exe" : "keel");
@@ -273,9 +273,11 @@ test("Antigravity MCP research call satisfies the edit gate end to end", async (
   };
 
   try {
+    // Verified mode (default) needs fresh EXTERNAL research: a keel MCP call such
+    // as system_map no longer clears the gate, so probe with a live web search.
     const researchCall = {
-      name: "call_mcp_tool",
-      args: { ServerName: "keel", ToolName: "system_map", Arguments: {} },
+      name: "WebSearch",
+      args: { Query: "keel research gate" },
     };
     const research = await invoke("pre-tool-use", researchCall);
     expect(research.decision).toBe("allow");

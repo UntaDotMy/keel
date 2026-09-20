@@ -159,7 +159,10 @@ This contract governs every project. **Trust the codebase, not your knowledge ba
 4. **Find the root cause.** Suspicion is a hypothesis, not a finding. Trace the real path with file:line evidence.
 5. **Preserve existing data.** Add alongside; ask before removing or replacing user data.
 
-PreToolUse denies edits and shell work until a keel research tool runs. Working-brief and review gates remain active.
+**Mandatory external research law.** Every fix, trace, or implementation starts with a live web lookup (WebSearch/WebFetch/context7); model memory is stale by cutoff. Recall and memory are a hypothesis, never proof.
+**Implementation law.** read the target lines, then research → trace the call chain → preserve flow and prefer the shared owner file over hardcoding → implement with comments capped at 2 lines (no AI slop) → re-read and re-trace the fix → loop/review → confirm against evidence, then answer.
+
+PreToolUse DENIES edits and shell work until fresh external research (WebSearch/WebFetch/context7) or a fresh `research-cache` entry runs. Research is per problem, not per session: a new problem needs new evidence, and reuse happens only via a fresh cache entry. Working-brief and review gates remain active.
 </EXTREMELY_IMPORTANT>
 
 ## Red Flags (rationalizations to ignore)

@@ -38,10 +38,22 @@ Never hardcode domain vocabularies, tool lists, subcommand sets, gate identifier
 - **Tri-mirror parity enforcement.** Every vocabulary and constant that spans Rust, TypeScript, and standalone adapter bundles must be guarded by automated parity tests (`doc_parity_test.rs`).
 
 
+## Mandatory External Research Law
+
+Every fix, problem trace, or implementation begins with external research against
+current sources (web search / WebFetch / context7; Stack Overflow or vendor docs
+as fitting). Model memory is stale by cutoff. `recall`, memory, `system_map`, and
+host reads are a hypothesis, never proof. The requirement is **per problem, not per
+session**: a new problem needs new evidence, and reuse happens only through a
+fresh, matching `research-cache` entry. An unresearched fix or trace is a guess.
+On any error, web search the exact error text before patching. This restates
+AGENTS.md rule 11; the 7-step implementation law lives in
+`AGENTS/references/30-execution-strategy.md` § 4.
+
 ## Research Reuse Defaults
 
 - Check indexed memory and any recorded research-cache entry before starting a fresh live research loop.
-- Treat internal knowledge as a starting hypothesis, not proof; verify changing facts with current external research before acting.
+- Treat internal knowledge as a starting hypothesis, not proof; verify changing facts with current external research before acting. Do not present `recall`/memory as research evidence.
 - Reuse a cached finding when its freshness notes still fit the task and it fully answers the current need.
 - Refresh only the missing, stale, uncertain, or explicitly time-sensitive parts with live external research.
 - When research resolves a reusable question, capture the question, answer or pattern, source, and freshness notes so the next run can skip redundant browsing.

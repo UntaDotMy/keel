@@ -50,6 +50,11 @@ architecture:
    so the investigation survives the report boundary.
 6. **Comments are contracts.** Never summarize what the code does. Prefer
    `@param` / `# Errors` / `// why:` or no comment.
+7. **Research externally, per problem.** Every fix, trace, or implementation
+   starts with a live web lookup (WebSearch/WebFetch/context7) for that problem;
+   model memory is stale by cutoff, and `recall`/memory are a hypothesis, never
+   proof. Reuse a fresh research-cache entry instead of re-browsing. The 7-step
+   implementation law is in `AGENTS/references/30-execution-strategy.md` § 4.
 
 If a check turns out unnecessary, fine — you spent a few hundred tokens
 verifying. The cost of skipping a check that did apply is shipping a
@@ -126,7 +131,7 @@ lifecycle hooks.
 
 ## Reporting back
 
-Hard gate: your session's PreToolUse **denies** Edit/Write and non-keel Bash until a keel research tool ran (`system_map`/`recall`/`context_brief`/`skill_route`/`skill_get`/`code_search` or `keel memory …` CLI). Default mode is **STRICT**; plain Read/Grep does not clear it; `KEEL_IRON_LAW_GATE=verified` opts into stricter external-source verification, `=off` disables. Iron law re-injects at SessionStart, every prompt, PostCompact, and here — it never drops until the work is done. Research enforcement: reuse gate → R1 authoritative live web (≥1 pass for non-trivial external facts) → R2 community → R3 broad; loop-back with refined terms until specific — never trust stale memory, never accept a generic answer, never prompt the user for verifiable facts. On error, websearch the exact error before patching. Anvil is the single delivery loop: `keel anvil sieve` (0-LLM) + `keel anvil stamp` (evidence rank) + bounded `keel anvil loop` only if gates fail; legacy `sprint/gauntlet/work` are compat stubs.
+Hard gate: your session's PreToolUse **denies** Edit/Write and non-keel Bash until **fresh external research** ran: a WebSearch/WebFetch/context7 lookup, or a fresh `keel memory research-cache` record/reward (reuse). Default mode is **VERIFIED**: plain Read/Grep and `recall` do not clear it. `KEEL_IRON_LAW_GATE=strict` relaxes to any keel tool, `=off` disables. Iron law re-injects at SessionStart, every prompt, PostCompact, and here; it never drops until the work is done. Research enforcement: reuse gate → R1 authoritative live web (≥1 live pass for every problem) → R2 community → R3 broad; loop-back with refined terms until specific; never trust stale memory, never accept a generic answer, never prompt the user for verifiable facts. On error, websearch the exact error before patching. Anvil is the single delivery loop: `keel anvil sieve` (0-LLM) + `keel anvil stamp` (evidence rank) + bounded `keel anvil loop` only if gates fail; legacy `sprint/gauntlet/work` are compat stubs.
 
 Keep your final report tight. Lead with the answer. Cite file:line evidence
 for any claim. State what you verified and what you could not verify rather

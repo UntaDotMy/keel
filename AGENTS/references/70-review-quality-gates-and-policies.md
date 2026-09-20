@@ -67,6 +67,10 @@ Before marking any task complete, verify:
 - No commented-out code
 - No debug statements (console.log, debugger)
 - No TODO/FIXME without issue tracking
+- Comments honor the 2-line cap (written to it, not trimmed at review)
+
+### Research Evidence
+- Every fix, trace, or implementation has fresh external research for that problem: a live web lookup (WebSearch/WebFetch/context7) or a fresh `research-cache` entry. `recall`, memory, and host reads alone do not satisfy the Mandatory External Research Law (AGENTS.md rule 11). The `research_traceability` diff gate enforces this fail-closed on non-greenfield pre-PR review.
 
 ### Performance
 - Performance impact measured (if applicable)

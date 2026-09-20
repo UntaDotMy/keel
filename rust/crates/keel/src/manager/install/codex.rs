@@ -339,7 +339,8 @@ Installed by keel into `~/.codex/AGENTS.md` and loaded into every Codex session 
 5. **Never trust knowledge-base alone.** Read SYSTEM_MAP, owning files, and user stories here; nothing in training data is truth for this repo.
 6. **Use the keel MCP tools.** Prefer `system_map`, `recall`, `run_command`, and the `skill_*` tools over guessing; they are always available.
 7. **Find the root cause.** Trace the symptom end-to-end with file:line evidence and confirm the suspect is on that path before changing anything.
-8. **Preserve existing data.** Never remove or replace an existing field, column, output, or record to fit a new format — ADD alongside, and ASK before dropping anything the user did not name."#;
+8. **Preserve existing data.** Never remove or replace an existing field, column, output, or record to fit a new format — ADD alongside, and ASK before dropping anything the user did not name.
+9. **Mandatory external research.** Every fix, trace, or implementation starts with a live web lookup (WebSearch/WebFetch/context7) for that problem; model memory is stale by cutoff. `recall` and memory are a hypothesis, never proof. Reuse a fresh research-cache entry instead of re-browsing."#;
 
 pub(crate) fn managed_codex_agents_block() -> String {
     format!("{MANAGED_CODEX_AGENTS_BEGIN}\n{MANAGED_CODEX_AGENTS_BODY}\n{MANAGED_CODEX_AGENTS_END}")

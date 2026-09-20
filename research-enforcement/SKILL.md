@@ -1,7 +1,7 @@
 ---
 name: research-enforcement
-description: Use when implementation depends on unstable or uncertain external-library, API, or framework facts. Verify them against current authoritative sources, reusing a fresh version-matched research-cache record when it fully answers the question and searching only the missing, stale, or time-sensitive delta.
-when_to_use: Implementing changes that touch external libraries, APIs, or frameworks; upgrading dependencies; using a library API that the model may not know the current state of; any situation where "I think this API works like..." is the starting point instead of verified documentation.
+description: Use before every fix, problem trace, or implementation. Verify the change against current authoritative external sources, reusing a fresh version-matched research-cache record when it fully answers the problem and searching only the missing, stale, or time-sensitive delta.
+when_to_use: Any fix, trace, or implementation, at the start of it. Highest value for external libraries, APIs, and frameworks; upgrading dependencies; using a library API whose current state the model may not know; and any situation where an assumed API shape is the starting point instead of verified documentation.
 allowed-tools: Read, Grep, Glob, Bash(keel memory:*), Bash(keel recall:*)
 effort: medium
 ---
@@ -15,9 +15,12 @@ deprecate endpoints, and frameworks change behavior between releases. Implementi
 against what you *remember* rather than what *is* produces code that compiles but
 fails at runtime, or uses patterns the framework no longer supports.
 
-This skill enforces a mandatory verification step before implementation that
-depends on unstable or uncertain external behavior. Verification may reuse a
-fresh, version-matched cache record; otherwise it requires current research.
+This skill enforces the Mandatory External Research Law: every fix, problem
+trace, or implementation begins with external research against current sources.
+The requirement is **per problem, not per session**: a new problem needs new
+evidence. Verification may reuse a fresh, version-matched cache record; otherwise
+it requires current research. `recall`, memory, `system_map`, and host reads are a
+hypothesis, never proof, and never satisfy the law on their own.
 
 ## The Anti-Pattern
 
@@ -109,15 +112,24 @@ This skill uses the `research-cache` memory family under `keel memory`:
 Research-cache entries live under `<claude-home>/<group>/research-cache/` and are
 isolated per memory group.
 
-## When To Skip
+## When Reuse Replaces A New Search
 
-Skip the research step only when:
+The law is per problem, not per session: a new problem needs new evidence. Run a
+fresh live lookup every time, unless a **fresh, matching `research-cache` entry
+already answers the problem**, then record/reward it and cite it instead of
+re-browsing.
 
-- The change is purely internal logic with no external dependency behavior.
-- The dependency is a local workspace crate or file whose source is in the repo.
-- You just researched the same dependency in this session (within the same conversation).
+Internal state is not evidence. `recall`, memory, `system_map`, and host reads are
+a hypothesis, never proof. A local workspace crate's source in the repo explains
+current behavior, but it is not the external contract for libraries, formats, or
+language best practice, so it does not replace a lookup.
 
-Everything else requires at least one research action before implementation.
+Everything else requires at least one fresh research action before the fix, trace,
+or implementation. On any error, web search the exact error text before patching.
+
+This skill is the research half of the 7-Step Implementation Law
+(`AGENTS/references/30-execution-strategy.md` § 4); step 1 is read-plus-research,
+and step 3 also requires a language best-practice lookup.
 
 ## Examples
 
@@ -146,6 +158,8 @@ not assume the signature verification algorithm or header names have not changed
 ## Anti-Patterns
 
 - Skipping research because "I'm pretty sure this API works like..."
+- Treating one search at the start of a session as covering every later problem in it.
+- Treating `recall`/memory/a host read as proof, then fixing or tracing from it.
 - Researching once and never checking if the cache is stale.
 - Treating training-data recall as equivalent to a web search for current docs.
 - Implementing first, researching when tests fail — research is cheaper than
@@ -154,6 +168,7 @@ not assume the signature verification algorithm or header names have not changed
 
 ## Validation
 
-Self-check before implementing: did you run at least one research action for every
-external dependency this change touches? If you cannot point to a search, a context7
-query, or a fresh recall of a non-stale cache entry, you are assuming. Research first.
+Self-check before fixing, tracing, or implementing: did you run at least one fresh
+research action for this problem? If you cannot point to a live search, a context7
+query, or a fresh, matching research-cache entry (not `recall`), you are assuming.
+Research first.

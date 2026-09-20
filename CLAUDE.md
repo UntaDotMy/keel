@@ -21,7 +21,7 @@ PostToolBatch gates check completed code changes and emit bounded follow-up cont
 - **Review gate** (`CLAUDE_SKILLS_REVIEW_GATE`): Requires a passing review after edits. Cleared by `keel review pre-pr` or `keel review pre-commit`.
 - **Memory gate** (`CLAUDE_SKILLS_MEMORY_GATE`): Nudges memory capture when code changes.
 - **Learned-skill gate** (`CLAUDE_SKILLS_LEARNED_SKILL_GATE`): Alerts on promoted skills requiring synthesis.
-- **Research gate** (`CLAUDE_SKILLS_RESEARCH_GATE`): Requires current web-search or recall evidence for the implementation after code changes and before closeout.
+- **Research gate** (`CLAUDE_SKILLS_RESEARCH_GATE`): Requires fresh external research (web search or a fresh research-cache entry) for the current problem after code changes and before closeout. Recall and memory alone do not satisfy it.
 - **Completeness gate** (`CLAUDE_SKILLS_COMPLETENESS_GATE`): Requires sibling scan via `keel code-search siblings`.
 
 ## Commands Quick Reference

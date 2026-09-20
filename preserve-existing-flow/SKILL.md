@@ -23,13 +23,14 @@ Any edit to existing handlers, loops, state machines, transport, queues, or sour
 3. **SoT stays SoT** — add fields/branches alongside; do not replace the record/format silently.
 4. **Working brief** — capture request, acceptance criteria, current flow, preserved owner, drift risks, recommended change shape **before** coding.
 5. **Verify on real path** — exercise the owner path after the change; no "looks right" without a check.
+6. **Research before reshaping**: web search the language/framework best practice and the relevant contract before choosing the extension shape, and extend the shared/owner file rather than hardcoding the same behavior across files (fewer review points, lower maintenance).
 
 ## Procedure
 1. Name the target file/function and the user-visible behavior.
 2. Read the full function + callers + callees + state writes.
 3. Record: entry → owner → SoT → effects.
-4. Choose extension shape: wrap / branch inside owner / new helper **called by** owner (not a second writer).
-5. Implement only that shape; re-read the owner after edit.
+4. Research the best practice for the language/framework and pick the extension shape: wrap / branch inside owner / new helper **called by** owner (not a second writer). Extend the shared owner; do not hardcode the same behavior in a second file.
+5. Implement only that shape; re-read the owner after edit; re-trace the owner path to confirm the change reaches the real behavior.
 6. Prove with the smallest test or smoke that hits the same path.
 
 ## Refuse
