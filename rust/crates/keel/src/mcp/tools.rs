@@ -45,7 +45,7 @@ use crate::utility::memory::refresh_system_map_with_status;
 use crate::utility::memory_families::family_counts;
 use crate::utility::recall::{
     recall_workspace_context, reindex_after_write_paths, search_recall_index_with_options,
-    RecallQueryOptions,
+    RecallQueryOptions, DEFAULT_RECALL_LIMIT, MAX_RECALL_LIMIT,
 };
 use crate::utility::record_store::{current_timestamp_millis, format_timestamp_iso8601};
 use crate::utility::skill_match::{
@@ -122,11 +122,6 @@ pub(crate) fn discovery_snapshot() -> Value {
         "ranking": "relevance+intent+usage+schema_cost+policy+error_rate",
     })
 }
-
-/// Default cap for `recall` matches when the caller does not supply one. The
-/// CLI uses the same default (see `utility::recall::DEFAULT_RECALL_LIMIT`).
-const DEFAULT_RECALL_LIMIT: usize = 20;
-const MAX_RECALL_LIMIT: usize = 100;
 
 /// A background command is transient MCP state. Keep the process-local
 /// registry bounded even when a client disappears before polling the final
