@@ -28,7 +28,7 @@
 
 use std::collections::HashSet;
 use std::env;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -3286,7 +3286,7 @@ fn spawn_background_command(mut child: Command, label: &str) -> Result<String, S
     );
 
     // Reaper: poll try_wait until the child exits (or kill takes it), then
-    // record the exit code. Consistent with run_command_with_timeout_stdin's
+    // record the exit code. Consistent with run_command_with_timeout's
     // poll loop — no platform-specific signals needed.
     let reaper_entry = Arc::clone(&entry);
     let lifetime = background_command_ttl();
@@ -4996,19 +4996,10 @@ pub(crate) fn mcp_child_timeout() -> Duration {
 /// Run a prepared `Command` with piped stdio, draining stdout/stderr on
 /// helper threads so a full pipe cannot deadlock, and kill the child if it
 /// exceeds `timeout`. Returns `(exit_code, stdout, stderr)`.
+/// MCP timeout runner: shared capture and tree ownership plus request cancellation.
+/// Kept separate from [`runtime::run_prepared_command_with_timeout`] for MCP error wordings.
 fn run_command_with_timeout(
-    command: Command,
-    timeout: Duration,
-    label: &str,
-) -> Result<(i32, String, String), String> {
-    run_command_with_timeout_stdin(command, None, timeout, label)
-}
-
-/// Same as [`run_command_with_timeout`], optionally feeding `stdin_bytes` on a
-/// writer thread so a slow consumer cannot block the kill path.
-fn run_command_with_timeout_stdin(
     mut command: Command,
-    stdin_bytes: Option<Vec<u8>>,
     timeout: Duration,
     label: &str,
 ) -> Result<(i32, String, String), String> {
@@ -5025,15 +5016,6 @@ fn run_command_with_timeout_stdin(
         }
     };
 
-    if let Some(bytes) = stdin_bytes {
-        if let Some(mut stdin_pipe) = child.stdin.take() {
-            std::thread::spawn(move || {
-                let _ = stdin_pipe.write_all(&bytes);
-                let _ = stdin_pipe.flush();
-            });
-        }
-    }
-
     let stdout_pipe = child
         .stdout
         .take()
@@ -5043,14 +5025,8 @@ fn run_command_with_timeout_stdin(
         .take()
         .ok_or_else(|| format!("{label}: missing stderr pipe"))?;
 
-    let stdout_handle = std::thread::spawn(move || {
-        let (bytes, _) = crate::runtime::capture_stream(stdout_pipe);
-        String::from_utf8_lossy(&bytes).into_owned()
-    });
-    let stderr_handle = std::thread::spawn(move || {
-        let (bytes, _) = crate::runtime::capture_stream(stderr_pipe);
-        String::from_utf8_lossy(&bytes).into_owned()
-    });
+    let (stdout_handle, stderr_handle) =
+        crate::runtime::spawn_capture_threads(stdout_pipe, stderr_pipe);
 
     let deadline = Instant::now() + timeout;
     let status = loop {
@@ -5058,14 +5034,12 @@ fn run_command_with_timeout_stdin(
             Ok(Some(status)) => break status,
             Ok(None) => {
                 if current_tool_is_cancelled() {
-                    let kill_error = crate::runtime::terminate_owned_process_tree(
+                    let kill_error = crate::runtime::terminate_tree_and_drain(
                         &mut child,
                         &mut process_guard,
-                    )
-                    .err();
-                    let _ = child.wait();
-                    let _ = stdout_handle.join();
-                    let _ = stderr_handle.join();
+                        stdout_handle,
+                        stderr_handle,
+                    );
                     let suffix = kill_error
                         .map(|error| format!("; process-tree cleanup failed: {error}"))
                         .unwrap_or_default();
@@ -5074,14 +5048,12 @@ fn run_command_with_timeout_stdin(
                     ));
                 }
                 if Instant::now() >= deadline {
-                    let kill_error = crate::runtime::terminate_owned_process_tree(
+                    let kill_error = crate::runtime::terminate_tree_and_drain(
                         &mut child,
                         &mut process_guard,
-                    )
-                    .err();
-                    let _ = child.wait();
-                    let _ = stdout_handle.join();
-                    let _ = stderr_handle.join();
+                        stdout_handle,
+                        stderr_handle,
+                    );
                     let async_hint = if label == "run_command" {
                         "; for long commands pass wait:false and poll command_output instead of waiting"
                     } else {
@@ -5110,9 +5082,11 @@ fn run_command_with_timeout_stdin(
     let _ = crate::runtime::terminate_owned_process_tree(&mut child, &mut process_guard);
     let stdout_text = stdout_handle
         .join()
+        .map(|(bytes, _)| String::from_utf8_lossy(&bytes).into_owned())
         .unwrap_or_else(|_| String::from("(stdout reader panicked)"));
     let stderr_text = stderr_handle
         .join()
+        .map(|(bytes, _)| String::from_utf8_lossy(&bytes).into_owned())
         .unwrap_or_else(|_| String::from("(stderr reader panicked)"));
     Ok((status.code().unwrap_or(-1), stdout_text, stderr_text))
 }

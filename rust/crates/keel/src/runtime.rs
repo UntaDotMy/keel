@@ -913,8 +913,7 @@ pub fn run_prepared_command_with_timeout(
         .stderr
         .take()
         .ok_or_else(|| format!("execute {label}: stderr pipe unavailable"))?;
-    let stdout_thread = std::thread::spawn(|| capture_stream(stdout));
-    let stderr_thread = std::thread::spawn(|| capture_stream(stderr));
+    let (stdout_thread, stderr_thread) = spawn_capture_threads(stdout, stderr);
     let deadline = std::time::Instant::now() + timeout;
     let status = loop {
         match child.try_wait() {
@@ -923,10 +922,12 @@ pub fn run_prepared_command_with_timeout(
                 std::thread::sleep(std::time::Duration::from_millis(25));
             }
             Ok(None) => {
-                let kill_error = terminate_owned_process_tree(&mut child, &mut process_guard).err();
-                let _ = child.wait(); // intentional cleanup after tree termination
-                let _ = stdout_thread.join(); // intentional drain-thread cleanup
-                let _ = stderr_thread.join(); // intentional drain-thread cleanup
+                let kill_error = terminate_tree_and_drain(
+                    &mut child,
+                    &mut process_guard,
+                    stdout_thread,
+                    stderr_thread,
+                );
                 let suffix = kill_error
                     .map(|error| format!("; process-tree cleanup failed: {error}"))
                     .unwrap_or_default();
@@ -936,10 +937,12 @@ pub fn run_prepared_command_with_timeout(
                 ));
             }
             Err(error) => {
-                let _ = terminate_owned_process_tree(&mut child, &mut process_guard);
-                let _ = child.wait(); // intentional cleanup after tree termination
-                let _ = stdout_thread.join(); // intentional drain-thread cleanup
-                let _ = stderr_thread.join(); // intentional drain-thread cleanup
+                terminate_tree_and_drain(
+                    &mut child,
+                    &mut process_guard,
+                    stdout_thread,
+                    stderr_thread,
+                );
                 return Err(format!("execute {label}: wait failed: {error}"));
             }
         }
@@ -1123,6 +1126,38 @@ pub fn own_process_tree(child: &mut Child) -> Result<ChildProcessGuard, String> 
         let _ = child;
         Ok(ChildProcessGuard {})
     }
+}
+
+/// Reader-thread pair draining both capture pipes: kept bytes plus original length.
+pub(crate) type CaptureThreads = (
+    std::thread::JoinHandle<(Vec<u8>, usize)>,
+    std::thread::JoinHandle<(Vec<u8>, usize)>,
+);
+
+/// Spawn reader threads draining both capture pipes. Shared by the timeout loops
+/// so the capture shape has one owner; each caller joins under its own contract.
+pub(crate) fn spawn_capture_threads(
+    stdout: std::process::ChildStdout,
+    stderr: std::process::ChildStderr,
+) -> CaptureThreads {
+    let stdout_thread = std::thread::spawn(|| capture_stream(stdout));
+    let stderr_thread = std::thread::spawn(|| capture_stream(stderr));
+    (stdout_thread, stderr_thread)
+}
+
+/// Terminate the owned tree, reap the child, and drain both readers.
+/// Returns the tree-cleanup error, if any, for the caller message suffix.
+pub(crate) fn terminate_tree_and_drain<A: Send + 'static, B: Send + 'static>(
+    child: &mut Child,
+    process_guard: &mut ChildProcessGuard,
+    stdout_thread: std::thread::JoinHandle<A>,
+    stderr_thread: std::thread::JoinHandle<B>,
+) -> Option<String> {
+    let kill_error = terminate_owned_process_tree(child, process_guard).err();
+    let _ = child.wait();
+    let _ = stdout_thread.join();
+    let _ = stderr_thread.join();
+    kill_error
 }
 
 pub fn process_is_alive(process_id: u32) -> Option<bool> {
