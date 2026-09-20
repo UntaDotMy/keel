@@ -10,6 +10,7 @@ use crate::proxy::raw_store::RunMeta;
 use crate::runtime::{
     display_path, resolve_claude_home, write_text, COMMAND_COMPACTION_EVENTS_FILE_NAME,
 };
+use crate::utility::file_lock::{is_lock_contention, LOCK_RETRY_INTERVAL, LOCK_TIMEOUT};
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
 
@@ -252,9 +253,6 @@ pub fn record_compaction_event(
 /// Serialize rotation/append/reset across processes. Bounded wait: a stalled
 /// or suspended lock holder must never delay the wrapped command indefinitely,
 /// so contention returns TimedOut and the caller fails open (telemetry only).
-const EVENT_LOG_LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
-const EVENT_LOG_LOCK_RETRY_MS: u64 = 25;
-
 fn lock_event_log(event_path: &std::path::Path) -> std::io::Result<fs::File> {
     let mut lock_path = event_path.as_os_str().to_owned();
     lock_path.push(".lock");
@@ -264,38 +262,31 @@ fn lock_event_log(event_path: &std::path::Path) -> std::io::Result<fs::File> {
         .read(true)
         .write(true)
         .open(std::path::Path::new(&lock_path))?;
-    let deadline = std::time::Instant::now() + EVENT_LOG_LOCK_TIMEOUT;
+    let deadline = std::time::Instant::now() + LOCK_TIMEOUT;
     loop {
         // Windows reports lock conflicts as OS error 33 (Uncategorized), not
         // WouldBlock; treat both as contention and retry until the deadline.
         match fs2::FileExt::try_lock_exclusive(&file) {
             Ok(()) => return Ok(file),
-            Err(error) if is_contention(&error) => {
+            Err(error) if is_lock_contention(&error) => {
                 if std::time::Instant::now() >= deadline {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::TimedOut,
                         "event log lock remained held",
                     ));
                 }
-                std::thread::sleep(std::time::Duration::from_millis(EVENT_LOG_LOCK_RETRY_MS));
+                std::thread::sleep(LOCK_RETRY_INTERVAL);
             }
             Err(error) => return Err(error),
         }
     }
 }
 
-fn is_contention(error: &std::io::Error) -> bool {
-    error.kind() == std::io::ErrorKind::WouldBlock
-        || error
-            .raw_os_error()
-            .is_some_and(|code| matches!(code, 32 | 33))
-}
-
 /// Open the event log for append, retrying transient Windows sharing
 /// violations from a concurrent rotation rename. Bounded so a persistent
 /// conflict surfaces as an error instead of hanging the wrapped command.
 fn open_event_log_for_append(event_path: &std::path::Path) -> std::io::Result<fs::File> {
-    let deadline = std::time::Instant::now() + EVENT_LOG_LOCK_TIMEOUT;
+    let deadline = std::time::Instant::now() + LOCK_TIMEOUT;
     loop {
         match fs::OpenOptions::new()
             .create(true)
@@ -303,11 +294,11 @@ fn open_event_log_for_append(event_path: &std::path::Path) -> std::io::Result<fs
             .open(event_path)
         {
             Ok(file) => return Ok(file),
-            Err(error) if is_contention(&error) => {
+            Err(error) if is_lock_contention(&error) => {
                 if std::time::Instant::now() >= deadline {
                     return Err(error);
                 }
-                std::thread::sleep(std::time::Duration::from_millis(EVENT_LOG_LOCK_RETRY_MS));
+                std::thread::sleep(LOCK_RETRY_INTERVAL);
             }
             Err(error) => return Err(error),
         }
@@ -447,8 +438,8 @@ mod tests {
         let error = record_compaction_event_impl(&path, "{}").unwrap_err();
         let elapsed = started.elapsed();
         assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
-        assert!(elapsed >= EVENT_LOG_LOCK_TIMEOUT, "elapsed {elapsed:?}");
-        assert!(elapsed < EVENT_LOG_LOCK_TIMEOUT + std::time::Duration::from_secs(2));
+        assert!(elapsed >= LOCK_TIMEOUT, "elapsed {elapsed:?}");
+        assert!(elapsed < LOCK_TIMEOUT + std::time::Duration::from_secs(2));
         drop(holder);
         record_compaction_event_impl(&path, "{}").expect("append after release");
         assert_eq!(fs::read_to_string(&path).unwrap(), "{}\n");

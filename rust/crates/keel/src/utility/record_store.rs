@@ -20,13 +20,14 @@ use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use fs2::FileExt;
 
 use crate::error::KeelError;
 use crate::json::{write_indented, Value};
 use crate::runtime::{display_path, safe_path_segment, write_text};
+use crate::utility::file_lock::{is_lock_contention, LOCK_RETRY_INTERVAL, LOCK_TIMEOUT};
 
 /// An ordered collection of string fields backing one stored record.
 pub type Record = Vec<(String, String)>;
@@ -45,8 +46,6 @@ const MAX_RECORD_BYTES: usize = 1024 * 1024;
 /// Bound one collection independently of its retention policy.
 const MAX_RECORD_STORE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_RECORD_STORE_RECORDS: usize = 10_000;
-const RECORD_STORE_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
-const RECORD_STORE_LOCK_RETRY_MS: u64 = 25;
 
 struct RecordStoreLock {
     file: fs::File,
@@ -69,29 +68,22 @@ fn lock_record_store(directory: &Path) -> io::Result<RecordStoreLock> {
         .read(true)
         .write(true)
         .open(path)?;
-    let deadline = Instant::now() + RECORD_STORE_LOCK_TIMEOUT;
+    let deadline = Instant::now() + LOCK_TIMEOUT;
     loop {
         match file.try_lock_exclusive() {
             Ok(()) => return Ok(RecordStoreLock { file }),
-            Err(error) if record_store_lock_contention(&error) => {
+            Err(error) if is_lock_contention(&error) => {
                 if Instant::now() >= deadline {
                     return Err(io::Error::new(
                         io::ErrorKind::TimedOut,
                         "record store lock remained held",
                     ));
                 }
-                std::thread::sleep(Duration::from_millis(RECORD_STORE_LOCK_RETRY_MS));
+                std::thread::sleep(LOCK_RETRY_INTERVAL);
             }
             Err(error) => return Err(error),
         }
     }
-}
-
-fn record_store_lock_contention(error: &io::Error) -> bool {
-    error.kind() == io::ErrorKind::WouldBlock
-        || error
-            .raw_os_error()
-            .is_some_and(|code| matches!(code, 32 | 33))
 }
 
 fn read_record_text_bounded(path: &Path) -> Result<Option<String>, String> {

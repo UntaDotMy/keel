@@ -13,6 +13,7 @@ pub mod config_audit;
 pub mod decision;
 pub mod design_intelligence;
 pub mod eval;
+pub(crate) mod file_lock;
 pub(crate) mod fixed_context;
 pub mod gain;
 pub mod hashing;

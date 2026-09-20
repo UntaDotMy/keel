@@ -6,6 +6,7 @@
 
 use crate::proxy::execution::ExecutionIdentity;
 use crate::runtime::resolve_claude_home;
+use crate::utility::file_lock::{is_lock_contention, LOCK_RETRY_INTERVAL, LOCK_TIMEOUT};
 use crate::utility::hashing::{fnv1a64_bytes_hex, sha256_hex};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -56,9 +57,6 @@ const RAW_STAGING_CLEANUP_INTERVAL_SECS: u64 = 6 * 60 * 60;
 /// processes. The lock is advisory to readers because publication is an atomic
 /// directory rename, but it prevents a prune from racing a writer between
 /// staging and publish.
-const RAW_STORE_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
-const RAW_STORE_LOCK_RETRY_MS: u64 = 25;
-
 struct RawStoreLock {
     file: fs::File,
 }
@@ -83,29 +81,22 @@ fn lock_raw_store(root: &Path) -> io::Result<RawStoreLock> {
         .read(true)
         .write(true)
         .open(&path)?;
-    let deadline = std::time::Instant::now() + RAW_STORE_LOCK_TIMEOUT;
+    let deadline = std::time::Instant::now() + LOCK_TIMEOUT;
     loop {
         match file.try_lock_exclusive() {
             Ok(()) => return Ok(RawStoreLock { file }),
-            Err(error) if raw_store_lock_contention(&error) => {
+            Err(error) if is_lock_contention(&error) => {
                 if std::time::Instant::now() >= deadline {
                     return Err(io::Error::new(
                         io::ErrorKind::TimedOut,
                         "raw store lock remained held",
                     ));
                 }
-                std::thread::sleep(Duration::from_millis(RAW_STORE_LOCK_RETRY_MS));
+                std::thread::sleep(LOCK_RETRY_INTERVAL);
             }
             Err(error) => return Err(error),
         }
     }
-}
-
-fn raw_store_lock_contention(error: &io::Error) -> bool {
-    error.kind() == io::ErrorKind::WouldBlock
-        || error
-            .raw_os_error()
-            .is_some_and(|code| matches!(code, 32 | 33))
 }
 
 fn bounded_capture_lengths(first: usize, second: usize) -> (usize, usize) {
