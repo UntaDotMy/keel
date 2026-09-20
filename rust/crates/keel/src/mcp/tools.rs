@@ -2158,7 +2158,7 @@ fn tool_recall(arguments: &Value) -> Result<String, String> {
         }
     };
     let claude_home = tool_claude_home("recall")?;
-    let local_only = optional_bool_arg(arguments, "local_only") == Some(true);
+    let local_only = bool_arg_or(arguments, "local_only", false);
     let workspace_context =
         recall_workspace_context(optional_string_arg(arguments, "workspace"), local_only)
             .map_err(|error| format!("recall: {error}"))?;
@@ -2923,8 +2923,8 @@ fn tool_run_command(arguments: &Value) -> Result<String, String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(PathBuf::from);
-    let wait = optional_bool_arg(arguments, "wait").unwrap_or(true);
-    let confirm = optional_bool_arg(arguments, "confirm").unwrap_or(false);
+    let wait = bool_arg_or(arguments, "wait", true);
+    let confirm = bool_arg_or(arguments, "confirm", false);
 
     // Three mutually exclusive input forms. Exactly one must be present; each
     // maps to (label, program, args) for the child. No fallback between forms:
@@ -3042,7 +3042,7 @@ fn tool_run_command(arguments: &Value) -> Result<String, String> {
         run_command_with_timeout(child, mcp_child_timeout(), "run_command")?;
     // `json` mode returns a structured object; default text report keeps real
     // newlines so multi-line build/test logs stay legible in the tool-result view.
-    if Some(true) == optional_bool_arg(arguments, "json") {
+    if bool_arg_or(arguments, "json", false) {
         let payload = json!({
             "command": label,
             "exit_code": exit_code,
@@ -3584,7 +3584,7 @@ fn tool_command_output(arguments: &Value) -> Result<String, String> {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         registry.remove(&command_id);
-        if Some(true) == optional_bool_arg(arguments, "json") {
+        if bool_arg_or(arguments, "json", false) {
             let payload = json!({
                 "command_id": command_id,
                 "label": entry.label,
@@ -5612,6 +5612,11 @@ fn optional_bool_arg(arguments: &Value, key: &str) -> Option<bool> {
     arguments.get(key).and_then(Value::as_bool)
 }
 
+/// Optional boolean flag with an explicit default when absent or non-boolean.
+fn bool_arg_or(arguments: &Value, key: &str, default: bool) -> bool {
+    optional_bool_arg(arguments, key).unwrap_or(default)
+}
+
 fn optional_int_arg(arguments: &Value, key: &str) -> Option<i64> {
     arguments.get(key).and_then(Value::as_i64)
 }
@@ -5644,7 +5649,7 @@ fn tool_review(arguments: &Value) -> Result<String, String> {
         );
     }
     if action == "closeout" {
-        if optional_bool_arg(arguments, "wait").unwrap_or(false) {
+        if bool_arg_or(arguments, "wait", false) {
             return Err(
                 "review closeout: pass wait:false; the closeout is long-running, so poll the returned commandId with command_output({\"command_id\": <commandId>}) (or stop it with command_kill({\"command_id\": <commandId>}))"
                     .to_string(),
@@ -5723,13 +5728,13 @@ fn review_closeout_args(executable: &Path, arguments: &Value) -> Vec<String> {
             args.push(format!("{flag}={value}"));
         }
     }
-    if optional_bool_arg(arguments, "strict").unwrap_or(false) {
+    if bool_arg_or(arguments, "strict", false) {
         args.push("--strict".to_string());
     }
-    if optional_bool_arg(arguments, "require_ci").unwrap_or(false) {
+    if bool_arg_or(arguments, "require_ci", false) {
         args.push("--require-ci".to_string());
     }
-    if optional_bool_arg(arguments, "write_baseline").unwrap_or(false) {
+    if bool_arg_or(arguments, "write_baseline", false) {
         args.push("--write-baseline".to_string());
     }
     args
@@ -5790,7 +5795,7 @@ fn tool_gain(arguments: &Value) -> Result<String, String> {
     let since = optional_string_arg(arguments, "since").unwrap_or("today");
     let mut all_args: Vec<&str> = vec!["--since", since];
     let mut owned: Vec<String> = Vec::new();
-    if Some(true) == optional_bool_arg(arguments, "json") {
+    if bool_arg_or(arguments, "json", false) {
         owned.push("--json".to_string());
     }
     for s in &owned {
@@ -5854,7 +5859,7 @@ fn tool_skill_lint(arguments: &Value) -> Result<String, String> {
     if let Some(root) = optional_string_arg(arguments, "repo_root") {
         owned.push(format!("--repo-root={root}"));
     }
-    if Some(true) == optional_bool_arg(arguments, "json") {
+    if bool_arg_or(arguments, "json", false) {
         owned.push("--json".to_string());
     }
     for s in &owned {
@@ -5872,7 +5877,7 @@ fn tool_telemetry(arguments: &Value) -> Result<String, String> {
     if let Some(t) = optional_int_arg(arguments, "top") {
         owned.push(format!("--top={t}"));
     }
-    if Some(true) == optional_bool_arg(arguments, "json") {
+    if bool_arg_or(arguments, "json", false) {
         owned.push("--json".to_string());
     }
     for s in &owned {
@@ -5887,7 +5892,7 @@ fn tool_session(arguments: &Value) -> Result<String, String> {
     if let Some(s) = optional_string_arg(arguments, "since") {
         owned.push(format!("--since={s}"));
     }
-    if Some(true) == optional_bool_arg(arguments, "json") {
+    if bool_arg_or(arguments, "json", false) {
         owned.push("--json".to_string());
     }
     for s in &owned {
@@ -6056,7 +6061,7 @@ fn tool_code_graph(arguments: &Value) -> Result<String, String> {
     if let Some(output) = optional_string_arg(arguments, "output") {
         owned.push(format!("--output={output}"));
     }
-    if Some(true) == optional_bool_arg(arguments, "json") {
+    if bool_arg_or(arguments, "json", false) {
         owned.push("--json".to_string());
     }
     for s in &owned {
@@ -6087,7 +6092,7 @@ fn tool_learn(arguments: &Value) -> Result<String, String> {
     if let Some(w) = optional_int_arg(arguments, "window") {
         owned.push(format!("--window={w}"));
     }
-    if Some(true) == optional_bool_arg(arguments, "json") {
+    if bool_arg_or(arguments, "json", false) {
         owned.push("--json".to_string());
     }
     for s in &owned {
@@ -6127,7 +6132,7 @@ fn tool_observe(arguments: &Value) -> Result<String, String> {
         owned.push(format!("--workspace-root={root}"));
     }
     // Agents almost always want structured health; default to JSON unless false.
-    if optional_bool_arg(arguments, "json") != Some(false) {
+    if bool_arg_or(arguments, "json", true) {
         owned.push("--json".to_string());
     }
     run_inprocess_cli("keel observe", |out, err| {
@@ -6145,7 +6150,7 @@ fn tool_stats(arguments: &Value) -> Result<String, String> {
         owned.push(format!("--workspace-root={root}"));
     }
     // Agents almost always want structured output; default to JSON unless false.
-    if optional_bool_arg(arguments, "json") != Some(false) {
+    if bool_arg_or(arguments, "json", true) {
         owned.push("--json".to_string());
     }
     run_inprocess_cli("keel stats", |out, err| {
@@ -6169,7 +6174,7 @@ fn tool_rewrite(arguments: &Value) -> Result<String, String> {
         return Err("rewrite: missing command".to_string());
     }
     let mut owned: Vec<String> = Vec::new();
-    if Some(true) == optional_bool_arg(arguments, "json") {
+    if bool_arg_or(arguments, "json", false) {
         owned.push("--json".to_string());
     }
     owned.push(command);
@@ -6184,7 +6189,7 @@ fn tool_skill_eval(arguments: &Value) -> Result<String, String> {
     if let Some(root) = optional_string_arg(arguments, "repo_root") {
         owned.push(format!("--repo-root={root}"));
     }
-    if optional_bool_arg(arguments, "json") != Some(false) {
+    if bool_arg_or(arguments, "json", true) {
         owned.push("--json".to_string());
     }
     run_inprocess_cli("keel skill-eval", |out, err| {
@@ -6213,7 +6218,7 @@ fn tool_design_intelligence(arguments: &Value) -> Result<String, String> {
             }
         }
     }
-    if Some(true) == optional_bool_arg(arguments, "json") {
+    if bool_arg_or(arguments, "json", false) {
         owned.push("--format=json".to_string());
     }
     run_inprocess_cli("keel design-intelligence", |out, err| {
