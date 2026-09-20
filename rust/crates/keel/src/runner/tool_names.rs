@@ -148,6 +148,15 @@ pub const SAFE_PIPE_CONSUMERS: &[&str] = &[
     "sed",
 ];
 
+/// File-write tool leaf used by the mounted-MCP write convention (`xd://`),
+/// where a Write to a keel device path is research, not an edit.
+pub const MOUNTED_WRITE_TOOL_NAME: &str = "write";
+
+/// Whether `tool_name` is the mounted-MCP write surface.
+pub fn is_mounted_write_tool(tool_name: &str) -> bool {
+    normalize_tool_name(tool_name) == MOUNTED_WRITE_TOOL_NAME
+}
+
 /// Whether `tool_name` mutates files on any supported host.
 pub fn is_edit_class_tool(tool_name: &str) -> bool {
     let normalized = normalize_tool_name(tool_name);

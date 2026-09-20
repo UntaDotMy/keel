@@ -72,6 +72,11 @@ pub const OBSERVATION_DEFAULT_RETENTION_DAYS: u64 = 30;
 pub const SYSTEM_MAP_REFRESH_DEFAULT_THRESHOLD: u64 = 10;
 pub const MANAGED_PRE_TOOL_USE_EVENT: &str = "PreToolUse";
 
+// Claude Code PermissionRequest surface. The tool name and the allow-rule text
+// are that host's schema, not a host-neutral shell classification.
+pub const CLAUDE_PERMISSION_TOOL_NAME: &str = "Bash";
+pub const CLAUDE_PERMISSION_ALLOW_RULE: &str = "Bash(keel *)";
+
 #[cfg(test)]
 mod tests {
     use super::*;

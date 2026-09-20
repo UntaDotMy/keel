@@ -856,6 +856,30 @@ fn no_hardcoded_tool_or_gate_literals_in_hook_lifecycle() {
     }
 }
 
+/// The standalone Antigravity adapter mirrors shared marker paths by hand, so a
+/// rename in shared_constants must fail here instead of splitting silently.
+#[test]
+fn standalone_antigravity_adapter_mirrors_shared_marker_paths() {
+    let repo_root = repository_root();
+    let adapter = fs::read_to_string(repo_root.join("antigravity/keel-antigravity.js"))
+        .expect("read the standalone antigravity adapter");
+    let shared =
+        fs::read_to_string(repo_root.join("rust/crates/keel/src/runner/shared_constants.rs"))
+            .expect("read shared constants");
+    let marker = shared
+        .lines()
+        .find_map(|line| {
+            line.trim()
+                .strip_prefix("pub const IRON_LAW_SATISFIED_DIR: &str = \"")
+                .and_then(|rest| rest.strip_suffix("\";"))
+        })
+        .expect("IRON_LAW_SATISFIED_DIR must stay a plain string constant");
+    assert!(
+        adapter.contains(&format!("\"{marker}\"")),
+        "antigravity adapter must reference the shared marker directory `{marker}`"
+    );
+}
+
 /// Every adapter's Iron Law gate-clearing list must equal the Rust one, and every
 /// adapter must refuse compound commands.
 ///

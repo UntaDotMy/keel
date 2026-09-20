@@ -83,7 +83,7 @@ pub(super) fn hook_tool_name(input: &JsonDocument) -> &str {
 }
 
 pub(crate) fn effective_tool_name<'a>(tool_name: &'a str, path: &'a str) -> &'a str {
-    if tool_name.eq_ignore_ascii_case("write") {
+    if crate::runner::tool_names::is_mounted_write_tool(tool_name) {
         if let Some(device) = path.strip_prefix("xd://") {
             let canonical = device.strip_prefix("mcp__keel__");
             let legacy = device

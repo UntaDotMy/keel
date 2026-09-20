@@ -154,8 +154,8 @@ pub(super) fn run_hook_permission_request(
         .and_then(JsonDocument::as_str)
         .unwrap_or_default();
 
-    // Only auto-approve Bash calls to keel
-    if tool_name != "Bash" {
+    // Only auto-approve this host's shell calls to keel.
+    if tool_name != CLAUDE_PERMISSION_TOOL_NAME {
         return 0;
     }
 
@@ -174,7 +174,7 @@ pub(super) fn run_hook_permission_request(
             "hookEventName": "PermissionRequest",
             "decision": {
                 "behavior": "allow",
-                "allowRules": ["Bash(keel *)"],
+                "allowRules": [CLAUDE_PERMISSION_ALLOW_RULE],
             },
         }
     });
