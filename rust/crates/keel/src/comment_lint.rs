@@ -210,10 +210,22 @@ pub fn scan_unified_diff(diff: &str) -> Vec<FileCommentFinding> {
     findings
 }
 
+/// Machine-managed learning output. The taste system writes these files from the
+/// user's own wording, so their punctuation is captured data rather than
+/// authored prose; the prose gate exempts them as it exempts any generated file.
+fn is_machine_managed_prose(path: &str) -> bool {
+    path.replace('\\', "/")
+        .to_ascii_lowercase()
+        .starts_with(".commandcode/taste/")
+}
+
 /// File extensions whose body text is prose and must be gated for AI-slop.
 /// Markdown and plain-text docs. Code files are covered by `scan_unified_diff`
 /// (comment lint); this covers the prose body those skip.
 fn is_prose_file(path: &str) -> bool {
+    if is_machine_managed_prose(path) {
+        return false;
+    }
     let lower = path.to_ascii_lowercase();
     lower.ends_with(".md")
         || lower.ends_with(".markdown")
@@ -374,7 +386,7 @@ mod tests {
             "# Guide\n\nLet's delve into how we leverage this.\n",
         )
         .expect("write markdown");
-        git(&repo, &["init", "-q"]);
+        crate::test_support::init_git_repository(&repo);
         git(&repo, &["add", "guide.md"]);
         let findings = lint_tracked_tree_prose(&repo);
         assert!(
@@ -385,11 +397,18 @@ mod tests {
     }
 
     #[test]
+    fn machine_managed_taste_files_are_not_prose_gated() {
+        assert!(!is_prose_file(".commandcode/taste/taste/taste.md"));
+        assert!(!is_prose_file(".commandcode/taste/taste.md"));
+        assert!(is_prose_file("docs/readme.md"));
+    }
+
+    #[test]
     fn tracked_tree_prose_skips_non_prose_files() {
         let repo = temp_repo("skip");
         std::fs::write(repo.join("x.rs"), "// delve into leverage\nfn main() {}\n")
             .expect("write source");
-        git(&repo, &["init", "-q"]);
+        crate::test_support::init_git_repository(&repo);
         git(&repo, &["add", "x.rs"]);
         let findings = lint_tracked_tree_prose(&repo);
         assert!(findings.is_empty(), "non-prose files skipped: {findings:?}");

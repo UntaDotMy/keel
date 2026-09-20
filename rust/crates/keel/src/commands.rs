@@ -1399,6 +1399,10 @@ mod tests {
             assert!(status.success(), "git command failed: {arguments:?}");
         };
         run_git(&["init"]);
+        // why: a Windows checkout would otherwise make `git add` print an
+        // "LF will be replaced by CRLF" notice that the warning ledger records.
+        run_git(&["config", "core.autocrlf", "false"]);
+        run_git(&["config", "core.safecrlf", "false"]);
         run_git(&["config", "user.name", "Keel Test"]);
         run_git(&["config", "user.email", "keel-test@example.invalid"]);
         std::fs::write(repository_root.join("README.md"), "# flow test\n")

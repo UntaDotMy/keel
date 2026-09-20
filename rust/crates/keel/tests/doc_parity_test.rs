@@ -856,6 +856,54 @@ fn no_hardcoded_tool_or_gate_literals_in_hook_lifecycle() {
     }
 }
 
+/// Fixture git repositories must disable `core.autocrlf`. On a Windows checkout
+/// `git add` prints "LF will be replaced by CRLF" for every added fixture file;
+/// the warning ledger records that as a rust-family diagnostic, and the closeout
+/// gate then reports a warning that no code change can clear.
+#[test]
+fn git_fixture_repositories_disable_autocrlf() {
+    let repo_root = repository_root();
+    let mut checked = 0usize;
+    for root in ["rust/crates/keel/src", "rust/crates/keel/tests"] {
+        for path in rust_sources_under(&repo_root.join(root)) {
+            let content = fs::read_to_string(&path).expect("read source");
+            let initializes_repo = content.contains("[\"init\", \"-q\"]")
+                || content.contains("[\"init\"]")
+                || content.contains("vec![\"init\"]")
+                || content.contains(".arg(\"init\")");
+            if !initializes_repo {
+                continue;
+            }
+            checked += 1;
+            assert!(
+                content.contains("core.autocrlf"),
+                "{} initializes a git fixture repository without disabling core.autocrlf",
+                path.display()
+            );
+        }
+    }
+    assert!(
+        checked > 0,
+        "the guard found no fixture initializer to check"
+    );
+}
+
+fn rust_sources_under(directory: &Path) -> Vec<std::path::PathBuf> {
+    let mut files = Vec::new();
+    let Ok(entries) = fs::read_dir(directory) else {
+        return files;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            files.extend(rust_sources_under(&path));
+        } else if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
+            files.push(path);
+        }
+    }
+    files
+}
+
 /// The standalone Antigravity adapter mirrors shared marker paths by hand, so a
 /// rename in shared_constants must fail here instead of splitting silently.
 #[test]

@@ -197,6 +197,26 @@ pub(crate) fn unique_temp_dir(label: &str) -> TestTempDir {
     TestTempDir { path }
 }
 
+/// Initialize a git fixture repository that never emits Windows line-ending
+/// notices. With `core.autocrlf=true`, `git add` prints "LF will be replaced by
+/// CRLF" for every fixture file; the warning ledger records that as a
+/// rust-family diagnostic and the closeout gate then reports a warning.
+pub(crate) fn init_git_repository(repo: &Path) {
+    for arguments in [
+        ["init", "-q"].as_slice(),
+        ["config", "core.autocrlf", "false"].as_slice(),
+        ["config", "core.safecrlf", "false"].as_slice(),
+    ] {
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(arguments)
+            .status()
+            .expect("run git init fixture");
+        assert!(status.success(), "git init fixture failed: {arguments:?}");
+    }
+}
+
 /// Build the self-hosted leader used by process-tree tests. The leader starts
 /// one descendant that inherits its output handles, prints that descendant's
 /// PID, and exits. This exercises pipe closure and tree termination without

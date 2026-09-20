@@ -486,7 +486,7 @@ fn task_evidence_gate_rejects_unjustified_status_and_tampered_evidence() {
 fn init_research_gate_repo(label: &str) -> crate::test_support::TestTempDir {
     let repository = crate::test_support::unique_temp_dir(&format!("keel-research-{label}"));
     std::fs::create_dir_all(repository.join("src")).expect("create source directory");
-    git_in(&repository, &["init", "-q"]);
+    crate::test_support::init_git_repository(&repository);
     git_in(&repository, &["config", "user.email", "test@example.com"]);
     git_in(&repository, &["config", "user.name", "Test"]);
     git_in(&repository, &["checkout", "-q", "-B", "main"]);
@@ -840,6 +840,8 @@ fn flow_gate_rejects_stale_or_false_exemption_evidence() {
     std::fs::write(&source, "fn main() {}\n").expect("initial source");
     for arguments in [
         vec!["init"],
+        vec!["config", "core.autocrlf", "false"],
+        vec!["config", "core.safecrlf", "false"],
         vec!["config", "user.email", "keel-tests@example.invalid"],
         vec!["config", "user.name", "Keel Tests"],
         vec!["add", "."],
@@ -1567,7 +1569,7 @@ fn init_temp_repo(label: &str) -> std::path::PathBuf {
         std::process::id()
     ));
     std::fs::create_dir_all(&dir).expect("create temp repo dir");
-    git_in(&dir, &["init", "-q"]);
+    crate::test_support::init_git_repository(&dir);
     git_in(&dir, &["config", "user.email", "test@example.com"]);
     git_in(&dir, &["config", "user.name", "Test"]);
     git_in(&dir, &["checkout", "-q", "-B", "main"]);
@@ -2118,7 +2120,7 @@ fn impact_gate_unresolvable_diff_returns_warn() {
 #[test]
 fn impact_gate_empty_touched_returns_not_applicable() {
     let repository = crate::test_support::unique_temp_dir("keel-impact-empty");
-    git_in(&repository, &["init", "-q"]);
+    crate::test_support::init_git_repository(&repository);
     git_in(&repository, &["config", "user.email", "test@example.com"]);
     git_in(&repository, &["config", "user.name", "Test"]);
     git_in(&repository, &["checkout", "-q", "-B", "main"]);

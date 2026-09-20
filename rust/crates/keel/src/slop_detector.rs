@@ -930,7 +930,7 @@ mod tests {
     fn tracked_tree_slop_skips_non_source_files() {
         let repo = temp_repo("skip");
         std::fs::write(repo.join("logo.bin"), "let _ = not source;\n").expect("write binary");
-        git(&repo, &["init", "-q"]);
+        crate::test_support::init_git_repository(&repo);
         git(&repo, &["add", "logo.bin"]);
         let findings = lint_tracked_tree_slop(&repo);
         assert!(

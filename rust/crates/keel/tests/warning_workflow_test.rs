@@ -35,6 +35,12 @@ fn test_tree(label: &str) -> TestTree {
 
     // Initialize git repo in fixture workspace so git rev-parse resolves root
     let _ = Command::new("git").arg("init").current_dir(&root).output();
+    // why: fixture repos must disable autocrlf, or `git add` prints a Windows
+    // line-ending notice that the warning ledger records as a diagnostic.
+    let _ = Command::new("git")
+        .args(["config", "core.autocrlf", "false"])
+        .current_dir(&root)
+        .output();
     let _ = Command::new("git")
         .args(["config", "user.name", "Keel Test"])
         .current_dir(&root)
