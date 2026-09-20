@@ -8208,6 +8208,10 @@ mod tests {
         let home = crate::test_support::unique_temp_dir("keel-mcp-observe-smoke");
         let workspace = home.as_path().join("workspace");
         std::fs::create_dir_all(&workspace).expect("temp workspace");
+        // why: a seeded workspace keeps observe's bounded dispatch stable on slow
+        // hosted runners, mirroring the orientation smoke test's deadline note.
+        std::fs::write(workspace.join("README.md"), "# observe smoke workspace\n")
+            .expect("temp workspace readme");
         let previous = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
         std::env::set_var("CLAUDE_TARGET_OVERRIDE", home.as_path());
 

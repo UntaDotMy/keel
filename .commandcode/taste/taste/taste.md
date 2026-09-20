@@ -11,3 +11,4 @@
 - Refuses to accept a delivered result that ends with open/unresolved items — explicitly demands every raised gap or "still open" item be closed before the task is called done. Confidence: 0.8
 - Treats warnings as unacceptable during development: a warning state must be resolved (or prevented), not tolerated or downgraded to a non-blocking advisory. Confidence: 0.85
 - When a class of problem keeps recurring, prefers fixing it structurally — implementing/enforcing it in the tooling itself or as an explicit rule/law — rather than leaving it to convention or manual correction. Confidence: 0.7
+- Expects work delivered end-to-end in one pass — recheck/review, commit, push the branch, and open the PR — rather than stopping at local commits and asking whether to push. Confidence: 0.7

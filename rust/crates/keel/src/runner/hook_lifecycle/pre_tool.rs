@@ -557,10 +557,12 @@ pub(crate) fn strip_keel_run_wrapper(command: &str) -> Option<&str> {
             .trim_start_matches('&')
             .trim()
             .trim_matches(|c| c == '\'' || c == '"');
-        let base = std::path::Path::new(stripped_prefix)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or(stripped_prefix);
+        // why: hosts quote Windows paths with backslashes, and `Path::file_name`
+        // only splits the host separator, so basenames split on both.
+        let base = match stripped_prefix.rfind(['/', '\\']) {
+            Some(idx) => &stripped_prefix[idx + 1..],
+            None => stripped_prefix,
+        };
         if base.eq_ignore_ascii_case("keel") || base.eq_ignore_ascii_case("keel.exe") {
             return Some(trimmed[idx + " run -- ".len()..].trim());
         }
