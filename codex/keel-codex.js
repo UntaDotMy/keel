@@ -46,14 +46,41 @@ function keelStateRoot() {
   } catch {}
   return path.join(home, ".claude", "state");
 }
+// Canonical Gate Control Environment Variables
+var IRON_LAW_GATE_ENV_VAR = "KEEL_IRON_LAW_GATE";
+var REVIEW_GATE_ENV_VAR = "CLAUDE_SKILLS_REVIEW_GATE";
+var REVIEW_GATE_MAX_BLOCKS_ENV_VAR = "CLAUDE_SKILLS_REVIEW_GATE_MAX_BLOCKS";
+var BRIEF_GATE_ENV_VAR = "CLAUDE_SKILLS_BRIEF_GATE";
+var BRIEF_GATE_MAX_BLOCKS_ENV_VAR = "CLAUDE_SKILLS_BRIEF_GATE_MAX_BLOCKS";
+var RESEARCH_GATE_ENV_VAR = "CLAUDE_SKILLS_RESEARCH_GATE";
+var RESEARCH_GATE_MAX_BLOCKS_ENV_VAR = "CLAUDE_SKILLS_RESEARCH_GATE_MAX_BLOCKS";
+var COMPLETENESS_GATE_ENV_VAR = "CLAUDE_SKILLS_COMPLETENESS_GATE";
+var COMPLETENESS_GATE_MAX_BLOCKS_ENV_VAR = "CLAUDE_SKILLS_COMPLETENESS_GATE_MAX_BLOCKS";
+var MEMORY_GATE_ENV_VAR = "CLAUDE_SKILLS_MEMORY_GATE";
+var LEARNED_SKILL_GATE_ENV_VAR = "CLAUDE_SKILLS_LEARNED_SKILL_GATE";
+
+// Canonical State Marker Directories
+var IRON_LAW_SATISFIED_DIR = "iron-law-satisfied";
+var IRON_LAW_LEGACY_GATE_DIR = "iron-law-gate";
+var REVIEW_GATE_DIR = "review-gate";
+var BRIEF_GATE_DIR = "brief-gate";
+var COMPLETENESS_GATE_DIR = "completeness-gate";
+
+// Canonical Gate Decisions
+var GATE_DECISION_BLOCK = "block";
+var GATE_DECISION_WARN = "warn";
+var GATE_DECISION_ESCALATE = "escalate";
+var GATE_DECISION_NUDGE = "nudge";
+var GATE_DECISION_OFF = "off";
+
 function sessionMarkerDirectory(host) {
   return path.join(keelStateRoot(), `${host}-session-started`);
 }
 function ironLawMarkerDirectory() {
-  return path.join(keelStateRoot(), "iron-law-satisfied");
+  return path.join(keelStateRoot(), IRON_LAW_SATISFIED_DIR);
 }
 function legacyIronLawMarkerDirectory() {
-  return path.join(os.homedir(), ".claude", "state", "iron-law-satisfied");
+  return path.join(os.homedir(), ".claude", "state", IRON_LAW_SATISFIED_DIR);
 }
 function sanitizeSessionKey(sessionID) {
   const raw = (sessionID || "default").trim() || "default";
@@ -172,6 +199,12 @@ var KEEL_RESEARCH_SUBCOMMANDS = [
   "anvil prefix-check",
   "anvil sieve"
 ];
+var SAFE_PIPE_CONSUMERS = new Set([
+  "cat", "head", "tail", "grep", "egrep", "fgrep", "jq", "less", "more", "wc",
+  "sort", "uniq", "cut", "tr", "column", "fold", "awk", "sed", "findstr",
+  "select-string", "select-object", "where-object", "measure-object",
+  "out-string", "out-host", "out-null"
+]);
 function shellCommandWords(command) {
   const words = [];
   let current = "";
@@ -197,8 +230,12 @@ function shellCommandWords(command) {
       }
       continue;
     }
-    if ("&|;`\n".includes(character) || character === "$" && command[index + 1] === "(") {
-      return [];
+    if (
+      "|;`\n".includes(character) ||
+      (character === "$" && command[index + 1] === "(") ||
+      (character === "&" && command[index + 1] === "&")
+    ) {
+      break;
     }
     current += character;
   }
@@ -213,22 +250,76 @@ function isKeelExecutable(value) {
   return basename === "keel" || basename === "keel.exe";
 }
 function isKeelReadingCommand(command) {
-  let words = shellCommandWords(command.trim().toLowerCase());
-  if (words.length >= 3 && isKeelExecutable(words[0]) && words[1] === "run" && words[2] === "--") {
-    words = words.slice(3);
+  const trimmed = command.trim();
+  if (!trimmed) return false;
+
+  const stages = [];
+  let currentStage = "";
+  let quote = "";
+  for (let i = 0; i < trimmed.length; i += 1) {
+    const ch = trimmed[i];
+    if (quote) {
+      if (ch === quote) quote = "";
+      currentStage += ch;
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      currentStage += ch;
+      continue;
+    }
+    if (
+      ch === ";" ||
+      ch === "`" ||
+      ch === "\n" ||
+      (ch === "$" && trimmed[i + 1] === "(") ||
+      (ch === "&" && trimmed[i + 1] === "&")
+    ) {
+      return false;
+    }
+    if (ch === "|") {
+      stages.push(currentStage.trim());
+      currentStage = "";
+      continue;
+    }
+    currentStage += ch;
   }
-  if (words.length < 2 || !isKeelExecutable(words[0]))
+  if (quote) return false;
+  if (currentStage.trim()) stages.push(currentStage.trim());
+
+  if (stages.length === 0) return false;
+
+  let firstWords = shellCommandWords(stages[0].toLowerCase());
+  if (firstWords.length >= 3 && isKeelExecutable(firstWords[0]) && firstWords[1] === "run" && firstWords[2] === "--") {
+    firstWords = firstWords.slice(3);
+  }
+  if (firstWords.length < 2 || !firstWords[0] || !isKeelExecutable(firstWords[0]))
     return false;
-  const subcommand = words.slice(1).join(" ");
-  return KEEL_RESEARCH_SUBCOMMANDS.some((hit) => subcommand === hit || subcommand.startsWith(`${hit} `));
+  const subcommand = firstWords.slice(1).join(" ");
+  const isFirstStageReading = KEEL_RESEARCH_SUBCOMMANDS.some((hit) => subcommand === hit || subcommand.startsWith(`${hit} `));
+  if (!isFirstStageReading) return false;
+
+  for (let i = 1; i < stages.length; i += 1) {
+    const words = shellCommandWords(stages[i].toLowerCase());
+    if (words.length === 0) return false;
+    const consumer = words[0];
+    if (!SAFE_PIPE_CONSUMERS.has(consumer)) return false;
+  }
+
+  return true;
 }
 function parseGateResponse(output) {
-  if (output.startsWith("KEEL_GATE_DENY")) {
-    return { status: "deny", reason: output.split(`
-`).slice(1).join(`
-`).trim() };
+  const normalized = output.replace(/\r/g, "");
+  if (normalized.startsWith("KEEL_GATE_DENY")) {
+    return { status: "deny", reason: normalized.split("\n").slice(1).join("\n").trim() };
   }
-  if (output.startsWith("KEEL_GATE_ALLOW"))
+  if (normalized.startsWith("KEEL_GATE_ESCALATE")) {
+    return { status: "escalate", reason: normalized.split("\n").slice(1).join("\n").trim() };
+  }
+  if (normalized.startsWith("KEEL_GATE_WARN")) {
+    return { status: "warn", reason: normalized.split("\n").slice(1).join("\n").trim() };
+  }
+  if (normalized.startsWith("KEEL_GATE_ALLOW"))
     return { status: "allow", reason: "" };
   return { status: "unknown", reason: "" };
 }

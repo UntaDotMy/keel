@@ -450,13 +450,19 @@ pub fn clean_path(raw_path: &Path) -> PathBuf {
     }
 }
 
+/// Render a path for user-visible text.
+///
+/// Windows canonicalization returns verbatim paths (`\\?\C:\...`); the prefix
+/// is an API detail and must not leak into CLI, MCP, or file output, so it is
+/// stripped through the shared platform helper.
 pub fn display_path(path: &Path) -> String {
     let rendered = path.to_string_lossy().to_string();
-    if cfg!(windows) {
+    let rendered = if cfg!(windows) {
         rendered.replace('/', "\\")
     } else {
         rendered
-    }
+    };
+    keel_platform::strip_verbatim_prefix(&rendered)
 }
 
 /// Skills are a harness-engagement artifact: the claude harness only loads them

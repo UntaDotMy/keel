@@ -157,7 +157,7 @@ impl Application {
             "help" | "--help" | "-h" => {
                 self.run_help_command(command_arguments, standard_output, standard_error)
             }
-            "version" => {
+            "version" | "--version" | "-v" | "-V" => {
                 self.run_version_command(command_arguments, standard_output, standard_error)
             }
             "platform" => {
@@ -1026,12 +1026,7 @@ fn home_directory() -> Option<String> {
 }
 
 fn path_to_display_string(path: &std::path::Path) -> String {
-    let rendered = path.to_string_lossy().to_string();
-    if cfg!(windows) {
-        rendered.replace('/', "\\")
-    } else {
-        rendered
-    }
+    crate::runtime::display_path(path)
 }
 
 #[cfg(test)]
@@ -1404,6 +1399,10 @@ mod tests {
             assert!(status.success(), "git command failed: {arguments:?}");
         };
         run_git(&["init"]);
+        // why: a Windows checkout would otherwise make `git add` print an
+        // "LF will be replaced by CRLF" notice that the warning ledger records.
+        run_git(&["config", "core.autocrlf", "false"]);
+        run_git(&["config", "core.safecrlf", "false"]);
         run_git(&["config", "user.name", "Keel Test"]);
         run_git(&["config", "user.email", "keel-test@example.invalid"]);
         std::fs::write(repository_root.join("README.md"), "# flow test\n")

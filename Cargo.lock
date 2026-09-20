@@ -381,6 +381,7 @@ dependencies = [
 name = "keel-flow"
 version = "0.1.0"
 dependencies = [
+ "keel-platform",
  "serde",
  "serde_json",
 ]

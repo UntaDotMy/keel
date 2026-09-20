@@ -1,7 +1,9 @@
 //! Purpose: Diff-scoped AI-slop detector — scans added lines for the 5 most
 //! common AI-generated code smells (dead defensive code, over-commenting,
 //! phantom flags, hallucinated APIs, N+1 query patterns) plus whole-tree N+1,
-//! copy-paste duplication, and unjustified silent fallbacks / error swallows.
+//! copy-paste duplication, unjustified silent fallbacks / error swallows, and
+//! hardcoded vocabulary (a literal repeated three times, or two copies of one
+//! literal list) that the shared-is-must rule wants centralized.
 //! Caller: review.rs surface commands (pre-commit, pre-pr) as a Warn-level gate
 //! (findings never block; heuristic false positives must not strand commits).
 //! Dependencies: runtime::run_command for git diff; comment_lint's shared
@@ -160,7 +162,7 @@ fn is_scannable_source(path: &str) -> bool {
     )
 }
 
-/// Run all 7 slop detectors against a block of added lines.
+/// Run every slop detector against a block of added lines.
 fn detect_slop_patterns(
     file: &str,
     added_lines: &[(usize, String)],
@@ -173,6 +175,8 @@ fn detect_slop_patterns(
     detect_n_plus_one_queries(file, added_lines, findings);
     detect_copy_paste_duplication(file, added_lines, findings);
     detect_silent_fallbacks(file, added_lines, findings);
+    detect_hardcoded_literal_repetition(file, added_lines, findings);
+    detect_duplicated_literal_sets(file, added_lines, findings);
 }
 /// Whole-tree scans are intentionally conservative. Diff-scoped scans include
 /// all detectors; full-tree cleanup scans only query complexity patterns so
@@ -223,6 +227,131 @@ fn detect_copy_paste_duplication(
                     text.chars().take(48).collect::<String>()
                 ),
             });
+        }
+    }
+}
+
+/// Extract double/single/back-quoted string literals from one source line.
+fn string_literals(line: &str) -> Vec<String> {
+    let mut literals = Vec::new();
+    let mut quote: Option<char> = None;
+    let mut current = String::new();
+    for character in line.chars() {
+        match quote {
+            Some(open) => {
+                if character == open {
+                    quote = None;
+                    literals.push(current.clone());
+                    current.clear();
+                } else {
+                    current.push(character);
+                }
+            }
+            None => {
+                if character == '"' || character == '\'' || character == '`' {
+                    quote = Some(character);
+                    current.clear();
+                }
+            }
+        }
+    }
+    literals
+}
+
+/// Whether a literal looks like shared vocabulary rather than prose or a format
+/// string. Vocabulary constants are the values the shared-is-must rule owns.
+fn is_vocabulary_literal(literal: &str) -> bool {
+    let length = literal.chars().count();
+    if !(2..=64).contains(&length) {
+        return false;
+    }
+    if literal.contains('{') || literal.contains('}') || literal.contains("://") {
+        return false;
+    }
+    literal
+        .chars()
+        .any(|character| character.is_ascii_alphabetic())
+}
+
+/// Test fixtures repeat literals on purpose; the rule would only add noise there.
+fn is_test_path(file: &str) -> bool {
+    let lower = file.to_ascii_lowercase();
+    lower.contains("test") || lower.ends_with("_spec.rs")
+}
+
+/// Hardcoded vocabulary: the same literal added several times in one file. The
+/// shared-is-must rule wants one owner per fact, so a value that is written
+/// three times may not be edited safely from one place.
+fn detect_hardcoded_literal_repetition(
+    file: &str,
+    added_lines: &[(usize, String)],
+    findings: &mut Vec<SlopFinding>,
+) {
+    if is_test_path(file) {
+        return;
+    }
+    let mut seen: std::collections::HashMap<String, Vec<usize>> = std::collections::HashMap::new();
+    for (line_no, line) in added_lines {
+        for literal in string_literals(line) {
+            if !is_vocabulary_literal(&literal) {
+                continue;
+            }
+            seen.entry(literal).or_default().push(*line_no);
+        }
+    }
+    for (literal, lines) in seen {
+        if lines.len() >= 3 {
+            findings.push(SlopFinding {
+                file: file.to_string(),
+                line: lines[0],
+                pattern: "hardcoded-literal-repetition",
+                severity: "warn",
+                message: format!(
+                    "the literal `{literal}` is hardcoded {} times (lines {}) - give it one owner (a shared constant) and reference that instead",
+                    lines.len(),
+                    lines.iter().map(|line| line.to_string()).collect::<Vec<_>>().join(", ")
+                ),
+            });
+        }
+    }
+}
+
+/// Duplicated vocabularies: two inline literal lists that share most of their
+/// members are the same list copied into a second place, which is how one fix
+/// misses one of a hundred copies.
+fn detect_duplicated_literal_sets(
+    file: &str,
+    added_lines: &[(usize, String)],
+    findings: &mut Vec<SlopFinding>,
+) {
+    if is_test_path(file) {
+        return;
+    }
+    let mut sets: Vec<(usize, std::collections::BTreeSet<String>)> = Vec::new();
+    for (line_no, line) in added_lines {
+        let members: std::collections::BTreeSet<String> = string_literals(line)
+            .into_iter()
+            .filter(|literal| is_vocabulary_literal(literal))
+            .collect();
+        if members.len() >= 3 {
+            sets.push((*line_no, members));
+        }
+    }
+    for (index, (line_no, members)) in sets.iter().enumerate() {
+        for (other_no, other) in sets.iter().skip(index + 1) {
+            let shared = members.intersection(other).count();
+            if shared >= 3 {
+                findings.push(SlopFinding {
+                    file: file.to_string(),
+                    line: *line_no,
+                    pattern: "duplicated-literal-set",
+                    severity: "warn",
+                    message: format!(
+                        "this literal list shares {shared} members with the list at line {other_no} - two copies of one vocabulary should become one shared constant"
+                    ),
+                });
+                break;
+            }
         }
     }
 }
@@ -732,6 +861,58 @@ mod tests {
         assert!(findings.is_empty(), "only 2 occurrences must not flag");
     }
 
+    #[test]
+    fn hardcoded_literal_repetition_flags_repeated_vocabulary() {
+        let added: Vec<(usize, String)> = (1..=3)
+            .map(|line| (line, "dir.join(\"review-gate\")".to_string()))
+            .collect();
+        let mut findings = Vec::new();
+        detect_hardcoded_literal_repetition("src/runner/x.rs", &added, &mut findings);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.pattern == "hardcoded-literal-repetition"),
+            "the same vocabulary literal 3x must be flagged: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn hardcoded_literal_repetition_skips_tests_and_format_strings() {
+        let repeated: Vec<(usize, String)> = (1..=3)
+            .map(|line| (line, "dir.join(\"review-gate\")".to_string()))
+            .collect();
+        let mut findings = Vec::new();
+        detect_hardcoded_literal_repetition("src/runner/tests.rs", &repeated, &mut findings);
+        assert!(findings.is_empty(), "test fixtures must not be flagged");
+
+        let formats: Vec<(usize, String)> = (1..=3)
+            .map(|line| (line, "format!(\"{{}}\", value)".to_string()))
+            .collect();
+        let mut findings = Vec::new();
+        detect_hardcoded_literal_repetition("src/lib.rs", &formats, &mut findings);
+        assert!(
+            findings.is_empty(),
+            "format placeholders are not vocabulary: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn duplicated_literal_sets_flags_two_copies_of_one_vocabulary() {
+        let shared = ["system-map", "recall", "doctor"].join("\", \"");
+        let added: Vec<(usize, String)> = vec![
+            (1, format!("let a = [\"{shared}\", \"code-search\"];")),
+            (2, format!("let b = [\"{shared}\", \"anvil sieve\"];")),
+        ];
+        let mut findings = Vec::new();
+        detect_duplicated_literal_sets("src/lib.rs", &added, &mut findings);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.pattern == "duplicated-literal-set"),
+            "two lists sharing 3+ members must be flagged: {findings:?}"
+        );
+    }
+
     // Whole-tree scan: pre-existing slop (no diff) must be caught by --all mode.
     #[test]
     fn tracked_tree_slop_keeps_dead_defensive_detector_available() {
@@ -749,7 +930,7 @@ mod tests {
     fn tracked_tree_slop_skips_non_source_files() {
         let repo = temp_repo("skip");
         std::fs::write(repo.join("logo.bin"), "let _ = not source;\n").expect("write binary");
-        git(&repo, &["init", "-q"]);
+        crate::test_support::init_git_repository(&repo);
         git(&repo, &["add", "logo.bin"]);
         let findings = lint_tracked_tree_slop(&repo);
         assert!(

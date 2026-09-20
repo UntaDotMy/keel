@@ -8,5 +8,6 @@ repository.workspace = true
 description = "Preserve-existing-flow evidence schema for the native keel CLI."
 
 [dependencies]
+keel-platform = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

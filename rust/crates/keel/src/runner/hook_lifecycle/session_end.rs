@@ -5,7 +5,7 @@ use super::*;
 pub(super) fn prune_raw_output_store(standard_error: &mut dyn Write) {
     let retention_days = user_config_or_env_u64(
         PLUGIN_MEMORY_RETENTION_DAYS,
-        "CLAUDE_SKILLS_RAW_RETENTION_DAYS",
+        RAW_OUTPUT_RETENTION_ENV_VAR,
         RAW_OUTPUT_DEFAULT_RETENTION_DAYS,
     );
     if retention_days == 0 {
@@ -93,8 +93,8 @@ pub(super) fn prune_state_marker_stores(standard_error: &mut dyn Write) {
         let name = entry.file_name().to_string_lossy().to_string();
         let is_marker_dir = matches!(
             name.as_str(),
-            IRON_LAW_SATISFIED_DIR | IRON_LAW_LEGACY_GATE_DIR | "review-gate"
-        ) || name.ends_with("-gate-blocks");
+            IRON_LAW_SATISFIED_DIR | IRON_LAW_LEGACY_GATE_DIR | REVIEW_GATE_DIR
+        ) || name.ends_with(GATE_BLOCKS_SUFFIX);
         if !is_marker_dir {
             continue;
         }

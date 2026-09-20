@@ -30,6 +30,14 @@ Never remove or replace existing data, fields, columns, outputs, or records to f
 - **Scope-diff before finishing.** Before declaring done, state what was asked and what you changed, and confirm the change is a strict superset of the existing data unless the user asked to remove something. Anything you did that the user did not ask for is a scope violation — surface it or do not do it.
 - **Ambiguity with a destructive branch = ASK.** If a request could mean "add" or "replace", you may not pick the destructive reading to keep moving. Ask one question — "add alongside, or replace?" — then wait.
 
+## Single Source of Truth / No Hardcoding (Shared Is Must)
+
+Never hardcode domain vocabularies, tool lists, subcommand sets, gate identifiers, environment variable names, status keys, or marker directory paths inside execution modules or host adapters.
+- **Dedicated shared modules are mandatory.** All shared concepts MUST reside in central shared definitions (`runner/tool_names.rs`, `runner/shared_constants.rs`, `_shared/ts/bridge-core.ts`) and be imported by reference.
+- **More files for shared is preferred.** Creating new shared files or dedicated vocabularies is always better than inlining string literals or duplicating arrays across files. It reduces code bloat, eliminates maintenance drift, and simplifies reviewing and fixing downstream.
+- **Tri-mirror parity enforcement.** Every vocabulary and constant that spans Rust, TypeScript, and standalone adapter bundles must be guarded by automated parity tests (`doc_parity_test.rs`).
+
+
 ## Research Reuse Defaults
 
 - Check indexed memory and any recorded research-cache entry before starting a fresh live research loop.

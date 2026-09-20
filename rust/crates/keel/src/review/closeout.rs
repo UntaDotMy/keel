@@ -759,7 +759,10 @@ fn add_wiring_findings(repository_root: &Path, findings: &mut Vec<ReviewFinding>
     }
 }
 
-fn flow_refresh_arguments(changed_paths: &[String]) -> Result<(), String> {
+/// Verify that a finalized flow check proves ownership of every changed source
+/// file. The previous version returned an error on both branches, so closeout
+/// reported an unprovable ownership finding even with valid flow evidence.
+fn flow_refresh_arguments(repository_root: &Path, changed_paths: &[String]) -> Result<(), String> {
     let source_targets: Vec<String> = changed_paths
         .iter()
         .filter(|path| {
@@ -771,13 +774,15 @@ fn flow_refresh_arguments(changed_paths: &[String]) -> Result<(), String> {
         .cloned()
         .collect();
     if source_targets.is_empty() {
-        Err("no changed source file is available for flow ownership proof".to_string())
-    } else {
-        Err(format!(
-            "flow ownership proof is unavailable for changed source files: {}",
-            source_targets.join(", ")
-        ))
+        return Ok(());
     }
+    if crate::review::diff_gates::is_flow_evidence_valid(repository_root, &source_targets) {
+        return Ok(());
+    }
+    Err(format!(
+        "flow ownership proof is unavailable for changed source files: {}",
+        source_targets.join(", ")
+    ))
 }
 
 fn sibling_refresh_arguments(
@@ -868,22 +873,31 @@ fn refresh_evidence(
         });
         return;
     }
-    let error = flow_refresh_arguments(changed_paths).expect_err("source ownership is unproven");
-    findings.push(finding(
-        "evidence:flow",
-        ReviewSeverity::Major,
-        "review/evidence",
-        None,
-        "flow evidence refresh cannot prove changed-source ownership",
-        error.clone(),
-        head,
-    ));
-    snapshots.push(ReviewGateSnapshot {
-        name: "evidence:flow".to_string(),
-        status: "blocked".to_string(),
-        blocking: true,
-        details: Some(error),
-    });
+    match flow_refresh_arguments(repository_root, changed_paths) {
+        Ok(()) => snapshots.push(ReviewGateSnapshot {
+            name: "evidence:flow".to_string(),
+            status: "current".to_string(),
+            blocking: true,
+            details: Some("finalized flow check covers every changed source file".to_string()),
+        }),
+        Err(error) => {
+            findings.push(finding(
+                "evidence:flow",
+                ReviewSeverity::Major,
+                "review/evidence",
+                None,
+                "flow evidence refresh cannot prove changed-source ownership",
+                error.clone(),
+                head,
+            ));
+            snapshots.push(ReviewGateSnapshot {
+                name: "evidence:flow".to_string(),
+                status: "blocked".to_string(),
+                blocking: true,
+                details: Some(error),
+            });
+        }
+    }
 }
 
 fn render_closeout(
@@ -1798,9 +1812,17 @@ mod tests {
             "docs/readme.md".to_string(),
             "web/app.ts".to_string(),
         ];
-        let error = flow_refresh_arguments(&changed).expect_err("must fail closed");
+        // No repository and no finalized flow check: ownership stays unproven.
+        let error =
+            flow_refresh_arguments(Path::new("D:/repo"), &changed).expect_err("must fail closed");
         assert!(error.contains("rust/src/a.rs"));
         assert!(error.contains("web/app.ts"));
+    }
+
+    #[test]
+    fn flow_refresh_is_not_applicable_without_source_changes() {
+        let changed = vec!["docs/readme.md".to_string(), "Cargo.lock".to_string()];
+        assert!(flow_refresh_arguments(Path::new("D:/repo"), &changed).is_ok());
     }
 
     #[test]

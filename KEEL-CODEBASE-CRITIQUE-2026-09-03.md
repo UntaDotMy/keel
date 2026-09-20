@@ -13,6 +13,10 @@ Side Effects: None - informational document, not wired into gates.
 - Method: five parallel subsystem audits (proxy/adapters, hooks/runner, memory/index, manager/review/MCP, docs/corpus), followed by direct spot verification of every blocker claim in source
 - Compile check: `cargo check --workspace --all-targets` clean, zero warnings, 7.4s
 
+> [!NOTE]
+> **Status (Resolved / Archived):** All verified blockers (B1-B5), divergent adapter copies, cross-host parity tests, pipeline-aware gate parsing, and Windows newline normalization have been fully addressed and remediated in the current release. Preserved for historical audit record.
+
+
 ## Executive summary
 
 Keel is an unusually disciplined, well-engineered codebase whose enforcement machinery has holes exactly where an adversarial agent would probe, and whose cross-host TypeScript adapters contain drift and dead paths that the recent "harden hooks" commit (53f5837) did not close, including two verified correctness blockers. The discipline layer (review gates, closeout) is partially self-attested rather than mechanically enforced, and three workspace-slug schemes plus four near-copies of doctrine prose have already drifted apart.

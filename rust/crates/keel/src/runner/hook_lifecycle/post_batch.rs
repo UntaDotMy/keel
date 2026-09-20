@@ -19,7 +19,7 @@ pub(crate) struct GateStatusRow {
 pub(crate) fn gate_status_rows() -> Vec<GateStatusRow> {
     vec![
         GateStatusRow {
-            dir: "review-gate-blocks",
+            dir: REVIEW_GATE_BLOCKS_DIR,
             label: "review",
             max_blocks: review_gate_max_blocks(),
         },
@@ -44,7 +44,7 @@ pub(crate) fn gate_status_rows() -> Vec<GateStatusRow> {
             max_blocks: research_gate_max_blocks(),
         },
         GateStatusRow {
-            dir: "completeness-gate-blocks",
+            dir: COMPLETENESS_GATE_BLOCKS_DIR,
             label: "completeness",
             max_blocks: completeness_gate_max_blocks(),
         },
@@ -150,10 +150,6 @@ pub(super) fn review_gate_max_blocks() -> u64 {
 
 // ---- Research gate (PostToolBatch) ----
 
-pub(super) const RESEARCH_GATE_ENV_VAR: &str = "CLAUDE_SKILLS_RESEARCH_GATE";
-
-pub(super) const RESEARCH_GATE_MAX_BLOCKS_ENV_VAR: &str = "CLAUDE_SKILLS_RESEARCH_GATE_MAX_BLOCKS";
-
 /// Research-gate behavior. Default `Escalate` (nudge first, block if ignored);
 /// `CLAUDE_SKILLS_RESEARCH_GATE=nudge` keeps it advisory-only; `=off` disables.
 pub(super) fn research_gate_mode() -> GateMode {
@@ -166,11 +162,6 @@ pub(super) fn research_gate_max_blocks() -> u64 {
         .and_then(|value| value.trim().parse::<u64>().ok())
         .unwrap_or_else(|| default_max_blocks_for(research_gate_mode()))
 }
-
-pub(super) const COMPLETENESS_GATE_ENV_VAR: &str = "CLAUDE_SKILLS_COMPLETENESS_GATE";
-
-pub(super) const COMPLETENESS_GATE_MAX_BLOCKS_ENV_VAR: &str =
-    "CLAUDE_SKILLS_COMPLETENESS_GATE_MAX_BLOCKS";
 
 pub(super) fn completeness_gate_mode() -> GateMode {
     match std::env::var(COMPLETENESS_GATE_ENV_VAR) {
@@ -194,7 +185,7 @@ pub(super) fn completeness_gate_blocks_path(claude_home: &Path, session_id: &str
     };
     claude_home
         .join("state")
-        .join("completeness-gate-blocks")
+        .join(COMPLETENESS_GATE_BLOCKS_DIR)
         .join(key)
 }
 
@@ -234,7 +225,7 @@ pub fn record_completeness_gate_clear_for(
         return;
     };
     let key = completeness_marker_key(&display_path(workspace));
-    let dir = claude_home.join("state").join("completeness-gate");
+    let dir = claude_home.join("state").join(COMPLETENESS_GATE_DIR);
     if fs::create_dir_all(&dir).is_err() {
         return;
     }
@@ -257,7 +248,7 @@ pub fn completeness_marker_record(
 ) -> Option<CompletenessScan> {
     let path = claude_home
         .join("state")
-        .join("completeness-gate")
+        .join(COMPLETENESS_GATE_DIR)
         .join(format!(
             "{}.scanned",
             completeness_marker_key(workspace_cwd)
@@ -407,10 +398,6 @@ pub(super) fn research_gate_message(decision: GateDecision) -> String {
     }
 }
 
-pub(super) const BRIEF_GATE_ENV_VAR: &str = "CLAUDE_SKILLS_BRIEF_GATE";
-
-pub(super) const BRIEF_GATE_MAX_BLOCKS_ENV_VAR: &str = "CLAUDE_SKILLS_BRIEF_GATE_MAX_BLOCKS";
-
 /// Grace window (ms) applied when deciding whether a working brief "belongs to"
 /// the current session. A brief written as the session's very first action has a
 /// file mtime a few ms BEFORE the session-start timestamp (which is taken from
@@ -467,10 +454,6 @@ pub(super) fn brief_gate_message(decision: GateDecision) -> String {
 
 // ---- Memory-save gate (PostToolBatch) ----
 
-pub(super) const MEMORY_GATE_ENV_VAR: &str = "CLAUDE_SKILLS_MEMORY_GATE";
-
-pub(super) const MEMORY_GATE_MAX_BLOCKS_ENV_VAR: &str = "CLAUDE_SKILLS_MEMORY_GATE_MAX_BLOCKS";
-
 pub(super) fn memory_gate_mode() -> GateMode {
     gate_mode(MEMORY_GATE_ENV_VAR)
 }
@@ -505,11 +488,6 @@ pub(super) fn memory_gate_message(decision: GateDecision) -> String {
 }
 
 // ---- Learned-skill reminder gate (PostToolBatch) ----
-
-pub(super) const LEARNED_SKILL_GATE_ENV_VAR: &str = "CLAUDE_SKILLS_LEARNED_SKILL_GATE";
-
-pub(super) const LEARNED_SKILL_GATE_MAX_BLOCKS_ENV_VAR: &str =
-    "CLAUDE_SKILLS_LEARNED_SKILL_GATE_MAX_BLOCKS";
 
 pub(super) fn learned_skill_gate_mode() -> GateMode {
     gate_mode(LEARNED_SKILL_GATE_ENV_VAR)
@@ -896,7 +874,7 @@ pub(super) fn review_gate_blocks_path(claude_home: &Path, session_id: &str) -> P
     };
     claude_home
         .join("state")
-        .join("review-gate-blocks")
+        .join(REVIEW_GATE_BLOCKS_DIR)
         .join(key)
 }
 
@@ -982,7 +960,7 @@ pub(super) fn review_marker_ms(claude_home: &Path, workspace_cwd: &str) -> Optio
     let key = sanitize_memory_key(workspace_cwd);
     let path = claude_home
         .join("state")
-        .join("review-gate")
+        .join(REVIEW_GATE_DIR)
         .join(format!("{key}.reviewed"));
     fs::read_to_string(&path)
         .ok()
@@ -1002,7 +980,7 @@ pub fn record_review_gate_clear() {
         return;
     };
     let key = sanitize_memory_key(&display_path(&cwd));
-    let dir = claude_home.join("state").join("review-gate");
+    let dir = claude_home.join("state").join(REVIEW_GATE_DIR);
     if fs::create_dir_all(&dir).is_err() {
         return;
     }

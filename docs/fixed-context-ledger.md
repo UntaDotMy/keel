@@ -30,7 +30,7 @@ measurement. Actual values are recomputed on every invocation and in CI.
 | `hook.user_prompt_submit.simple` | 102 | 113 |
 | `hook.user_prompt_submit.code_change` | 153 | 169 |
 | `repo.CLAUDE.md` | 1,316 | 1,448 |
-| `repo.AGENTS.md` | 2,528 | 2,781 |
+| `repo.AGENTS.md` | 2,466 | 2,713 |
 | `repo.WORKFLOW.md` | 4,884 | 5,373 |
 | `generated.claude.CLAUDE.md` | 964 | 1,061 |
 | `generated.codex.AGENTS.md` | 364 | 401 |

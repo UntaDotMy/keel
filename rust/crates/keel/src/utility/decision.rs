@@ -1451,8 +1451,23 @@ pub fn evaluate_shell_command_noul(command: &str) -> ShellNoulDecision {
     let normalized = normalize_shell_command(trimmed);
     let has_substitution = raw_lower.contains("$(") || trimmed.contains('`');
     // IFS/escape evasion markers: `rm${IFS}-rf${IFS}/`, `rm\ -rf\ /`.
-    let has_evasion =
-        raw_lower.contains("${ifs}") || raw_lower.contains("$ifs") || raw_lower.contains('\\');
+    // On Windows, '\' is the standard path separator (e.g. C:\Users\..., .\tests\...).
+    // An escaped delimiter is '\ ' (space), '\t', '\;', or '\|'.
+    let has_evasion = raw_lower.contains("${ifs}")
+        || raw_lower.contains("$ifs")
+        || if cfg!(windows) {
+            trimmed.contains("\\ ")
+                || trimmed.contains("\\\t")
+                || trimmed.contains("\\;")
+                || trimmed.contains("\\|")
+                || trimmed.contains("\\&")
+        } else {
+            trimmed.contains("\\ ")
+                || trimmed.contains("\\\t")
+                || trimmed.contains("\\-")
+                || trimmed.contains("\\/")
+                || trimmed.contains("\\;")
+        };
 
     // Canonical detector on raw AND normalized text (normalization defeats
     // IFS/escape/quote/case evasion first).
@@ -3634,5 +3649,17 @@ mod tests {
         assert!(out_str.contains("rust"));
 
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn shell_noul_allows_windows_paths_with_backslashes() {
+        let cmd = r#""C:\Users\Administrator\.keel\keel.exe" run -- cargo test"#;
+        let decision = evaluate_shell_command_noul(cmd);
+        assert_eq!(decision.action, ShellRiskAction::Allow);
+        assert_eq!(decision.category, ShellRiskCategory::Safe);
+
+        let relative_cmd = r#".\tests\run.ps1"#;
+        let rel_decision = evaluate_shell_command_noul(relative_cmd);
+        assert_eq!(rel_decision.action, ShellRiskAction::Allow);
     }
 }

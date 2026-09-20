@@ -1,0 +1,14 @@
+# Taste
+- Prefers findings and analysis presented as a table (e.g., columns for severity, issue, evidence, impact) rather than prose. Confidence: 0.7
+- Expects terminal/CLI output to be human-readable on Windows: real newlines instead of literal `\n` escapes, and no internal path prefixes (e.g. `\\?\`) leaking into user-visible text. Confidence: 0.6
+- Wants the agent to investigate and report gaps/issues but NOT apply fixes on its own; expects to review the findings and decide what to scope/fix. Confidence: 0.7
+- Wants the plan written and presented for approval, and re-issued as an updated plan when new findings or symptoms arrive, before implementation continues. Confidence: 0.8
+- Expects exhaustive "no gaps missing" verification across everything in scope, and dislikes having to iterate the same fix many times. Confidence: 0.8
+- Treats findings handed to the agent (e.g. another model's audit) as claims to verify against the source before acting on them. Confidence: 0.6
+- Wants "never hardcode / shared is must" rules actively enforced by the tooling itself for any project that uses it, not merely documented, so a fix lands in one file instead of many hardcoded copies. Confidence: 0.85
+- Values modular structure with one owner per fact, for easier review, maintenance, and checking. Confidence: 0.8
+- Expects long-lived servers/processes to serve multiple concurrent clients and to clean up after themselves, with no orphaned/zombie processes left behind. Confidence: 0.6
+- Refuses to accept a delivered result that ends with open/unresolved items — explicitly demands every raised gap or "still open" item be closed before the task is called done. Confidence: 0.8
+- Treats warnings as unacceptable during development: a warning state must be resolved (or prevented), not tolerated or downgraded to a non-blocking advisory. Confidence: 0.85
+- When a class of problem keeps recurring, prefers fixing it structurally — implementing/enforcing it in the tooling itself or as an explicit rule/law — rather than leaving it to convention or manual correction. Confidence: 0.7
+- Expects work delivered end-to-end in one pass — recheck/review, commit, push the branch, and open the PR — rather than stopping at local commits and asking whether to push. Confidence: 0.7

@@ -1227,6 +1227,38 @@ pub(crate) fn report_bridge_host_wiring(
             },
         );
     }
+
+    // Muse Code keeps hooks and the MCP server under the XDG config root; report
+    // the row only when the host is present so unrelated machines stay quiet.
+    let muse_settings = home.join(".config").join("muse").join("settings.json");
+    if muse_settings.is_file() {
+        let mcp_registered = crate::runtime::read_text_if_exists(&muse_settings)
+            .ok()
+            .and_then(|text| {
+                serde_json::from_str::<serde_json::Value>(
+                    text.strip_prefix('\u{feff}').unwrap_or(&text),
+                )
+                .ok()
+            })
+            .is_some_and(|doc| {
+                doc.get("mcpServers")
+                    .and_then(|servers| servers.get("keel"))
+                    .is_some()
+            });
+        let hooks_registered = crate::runtime::read_text_if_exists(&muse_settings)
+            .ok()
+            .is_some_and(|text| {
+                text.contains(" hook pre-tool-use")
+                    && text.contains(" hook session-start")
+                    && text.contains(" hook stop")
+            });
+        report_host(
+            standard_output,
+            "muse",
+            hooks_registered && mcp_registered,
+            mcp_registered,
+        );
+    }
 }
 
 pub(crate) fn native_mcp_is_current(document: &toml::Value, executable: &std::path::Path) -> bool {
@@ -1925,6 +1957,38 @@ mod tests {
         );
         let _ = fs::remove_dir_all(home);
     }
+    #[test]
+    fn muse_host_row_reports_hooks_and_mcp_state() {
+        let claude_home = unique_home("muse-wiring");
+        let home = claude_home.parent().unwrap();
+        let muse = home.join(".config").join("muse");
+        fs::create_dir_all(&muse).unwrap();
+        // Unwired Muse: settings exist but carry neither hooks nor the MCP server.
+        fs::write(muse.join("settings.json"), r#"{"schema_version":1}"#).unwrap();
+        let mut output = Vec::new();
+        report_bridge_host_wiring(&mut output, &claude_home);
+        let output = String::from_utf8(output).unwrap();
+        assert!(
+            output.contains("[warn] muse host: not wired"),
+            "an unwired Muse settings file must warn: {output}"
+        );
+
+        // Wired Muse: keel hooks plus the optional keel MCP server entry.
+        fs::write(
+            muse.join("settings.json"),
+            r#"{"schema_version":1,"mcpServers":{"keel":{"mode":"optional"}},"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"keel.exe hook pre-tool-use"}]}],"SessionStart":[{"hooks":[{"type":"command","command":"keel.exe hook session-start"}]}],"Stop":[{"hooks":[{"type":"command","command":"keel.exe hook stop"}]}]}}"#,
+        )
+        .unwrap();
+        let mut output = Vec::new();
+        report_bridge_host_wiring(&mut output, &claude_home);
+        let output = String::from_utf8(output).unwrap();
+        assert!(
+            output.contains("[ok] muse host: wired (rules + MCP)"),
+            "a wired Muse settings file must report wired: {output}"
+        );
+        let _ = fs::remove_dir_all(home);
+    }
+
     #[test]
     fn grok_host_reports_wired_when_hooks_and_mcp_are_current() {
         let claude_home = unique_home("grok-wired");

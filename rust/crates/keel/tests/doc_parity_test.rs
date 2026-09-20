@@ -585,15 +585,13 @@ fn read_adapter(path: &Path, adapter: &str) -> String {
 
 /// The gate-clearing subcommand list, parsed out of the Rust source of truth.
 fn rust_research_subcommands(repo_root: &Path) -> BTreeSet<String> {
-    let source = fs::read_to_string(
-        repo_root.join("rust/crates/keel/src/runner/hook_lifecycle/pre_tool.rs"),
-    )
-    .expect("read hook lifecycle pre_tool.rs");
+    let source = fs::read_to_string(repo_root.join("rust/crates/keel/src/runner/tool_names.rs"))
+        .expect("read runner tool_names.rs");
     let start = source
-        .find("const HITS: &[&str] = &[")
-        .expect("locate the HITS list in is_keel_research_command");
+        .find("pub const KEEL_RESEARCH_SUBCOMMANDS: &[&str] = &[")
+        .expect("locate KEEL_RESEARCH_SUBCOMMANDS in tool_names.rs");
     let body = &source[start..];
-    let end = body.find("];").expect("HITS list terminator");
+    let end = body.find("];").expect("list terminator");
     quoted_literals(&body[..end])
 }
 fn shared_ts_research_subcommands(repo_root: &Path) -> BTreeSet<String> {
@@ -628,11 +626,9 @@ fn quoted_literals(text: &str) -> BTreeSet<String> {
 fn tool_vocabulary(source: &str, marker: &str, terminator: &str) -> BTreeSet<String> {
     let start = source
         .find(marker)
-        .unwrap_or_else(|| panic!("locate `{marker}`"));
+        .unwrap_or_else(|| panic!("marker `{marker}` missing"));
     let body = &source[start..];
-    let end = body
-        .find(terminator)
-        .unwrap_or_else(|| panic!("locate the terminator for `{marker}`"));
+    let end = body.find(terminator).expect("list terminator");
     quoted_literals(&body[..end])
 }
 
@@ -645,13 +641,21 @@ fn rust_tool_vocabulary(repo_root: &Path, name: &str) -> BTreeSet<String> {
 fn shared_ts_tool_vocabulary(repo_root: &Path, name: &str) -> BTreeSet<String> {
     let source = fs::read_to_string(repo_root.join("_shared/ts/bridge-core.ts"))
         .expect("read shared TypeScript bridge core");
-    tool_vocabulary(&source, &format!("const {name} = new Set(["), "]);")
+    if source.contains(&format!("{name} = new Set([")) {
+        tool_vocabulary(&source, &format!("{name} = new Set(["), "]);")
+    } else {
+        tool_vocabulary(&source, &format!("{name} = ["), "];")
+    }
 }
 
 fn bundled_codex_tool_vocabulary(repo_root: &Path, name: &str) -> BTreeSet<String> {
     let source = fs::read_to_string(repo_root.join("codex/keel-codex.js"))
         .expect("read the bundled Codex adapter");
-    tool_vocabulary(&source, &format!("var {name} = new Set(["), "]);")
+    if source.contains(&format!("var {name} = new Set([")) {
+        tool_vocabulary(&source, &format!("var {name} = new Set(["), "]);")
+    } else {
+        tool_vocabulary(&source, &format!("var {name} = ["), "];")
+    }
 }
 
 /// Lowercase alphanumerics only, matching `normalize_tool_name`.
@@ -676,7 +680,12 @@ fn normalized_tool_key(tool_name: &str) -> String {
 #[test]
 fn host_tool_vocabulary_is_complete_and_in_parity() {
     let repo_root = repository_root();
-    for name in ["EDIT_CLASS_TOOL_NAMES", "SHELL_TOOL_NAMES"] {
+    for name in [
+        "EDIT_CLASS_TOOL_NAMES",
+        "SHELL_TOOL_NAMES",
+        "SAFE_PIPE_CONSUMERS",
+        "KEEL_RESEARCH_SUBCOMMANDS",
+    ] {
         let rust = rust_tool_vocabulary(&repo_root, name);
         assert!(!rust.is_empty(), "{name} parsed empty out of tool_names.rs");
         assert_eq!(
@@ -747,6 +756,176 @@ fn host_tool_vocabulary_is_complete_and_in_parity() {
             "shell vocabulary is missing `{tool}`; that host silently skips the shell gate"
         );
     }
+}
+
+#[test]
+fn shared_constants_are_in_parity() {
+    let repo_root = repository_root();
+    let rust_source =
+        fs::read_to_string(repo_root.join("rust/crates/keel/src/runner/shared_constants.rs"))
+            .expect("read shared_constants.rs");
+    let ts_source = fs::read_to_string(repo_root.join("_shared/ts/bridge-core.ts"))
+        .expect("read bridge-core.ts");
+    let codex_source =
+        fs::read_to_string(repo_root.join("codex/keel-codex.js")).expect("read keel-codex.js");
+
+    let constants = [
+        "IRON_LAW_GATE_ENV_VAR",
+        "REVIEW_GATE_ENV_VAR",
+        "REVIEW_GATE_MAX_BLOCKS_ENV_VAR",
+        "BRIEF_GATE_ENV_VAR",
+        "BRIEF_GATE_MAX_BLOCKS_ENV_VAR",
+        "RESEARCH_GATE_ENV_VAR",
+        "RESEARCH_GATE_MAX_BLOCKS_ENV_VAR",
+        "COMPLETENESS_GATE_ENV_VAR",
+        "COMPLETENESS_GATE_MAX_BLOCKS_ENV_VAR",
+        "MEMORY_GATE_ENV_VAR",
+        "LEARNED_SKILL_GATE_ENV_VAR",
+        "IRON_LAW_SATISFIED_DIR",
+        "IRON_LAW_LEGACY_GATE_DIR",
+        "REVIEW_GATE_DIR",
+        "BRIEF_GATE_DIR",
+        "COMPLETENESS_GATE_DIR",
+        "GATE_DECISION_BLOCK",
+        "GATE_DECISION_WARN",
+        "GATE_DECISION_ESCALATE",
+        "GATE_DECISION_NUDGE",
+        "GATE_DECISION_OFF",
+    ];
+
+    for const_name in constants {
+        let rust_pattern = format!("pub const {const_name}: &str = \"");
+        let rust_pos = rust_source
+            .find(&rust_pattern)
+            .unwrap_or_else(|| panic!("Rust shared_constants.rs missing {const_name}"));
+        let rust_val = &rust_source[rust_pos + rust_pattern.len()..];
+        let rust_val = &rust_val[..rust_val.find('"').expect("closing quote in Rust")];
+
+        let ts_pattern = format!("{const_name} = \"{rust_val}\"");
+        assert!(
+            ts_source.contains(&ts_pattern),
+            "_shared/ts/bridge-core.ts must define {const_name} = \"{rust_val}\""
+        );
+
+        let codex_pattern = format!("{const_name} = \"{rust_val}\"");
+        assert!(
+            codex_source.contains(&codex_pattern),
+            "codex/keel-codex.js must define {const_name} = \"{rust_val}\""
+        );
+    }
+}
+
+#[test]
+fn no_hardcoded_tool_or_gate_literals_in_hook_lifecycle() {
+    let repo_root = repository_root();
+    let hook_dir = repo_root.join("rust/crates/keel/src/runner/hook_lifecycle");
+    for entry in fs::read_dir(&hook_dir).expect("read hook_lifecycle dir") {
+        let entry = entry.expect("dir entry");
+        let path = entry.path();
+        if path.is_file() && path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
+            let filename = path.file_name().unwrap().to_str().unwrap();
+            if filename == "tests.rs" {
+                continue;
+            }
+            let content = fs::read_to_string(&path).expect("read source");
+            for forbidden in [
+                "const IRON_LAW_GATE_ENV_VAR",
+                "const REVIEW_GATE_ENV_VAR",
+                "const BRIEF_GATE_ENV_VAR",
+                "const RESEARCH_GATE_ENV_VAR",
+                "const COMPLETENESS_GATE_ENV_VAR",
+                "const MEMORY_GATE_ENV_VAR",
+                "const LEARNED_SKILL_GATE_ENV_VAR",
+                "const IRON_LAW_SATISFIED_DIR",
+                // Literal marker paths drift the same way: two modules that
+                // spell `review-gate` themselves part ways on the first rename.
+                "\"iron-law-satisfied\"",
+                "\"iron-law-gate\"",
+                "\"review-gate\"",
+                "\"review-gate-blocks\"",
+                "\"brief-gate\"",
+                "\"completeness-gate\"",
+                "\"completeness-gate-blocks\"",
+            ] {
+                assert!(
+                    !content.contains(forbidden),
+                    "{filename} in hook_lifecycle defines forbidden duplicate constant `{forbidden}`. It MUST import from shared_constants!"
+                );
+            }
+        }
+    }
+}
+
+/// Fixture git repositories must disable `core.autocrlf`. On a Windows checkout
+/// `git add` prints "LF will be replaced by CRLF" for every added fixture file;
+/// the warning ledger records that as a rust-family diagnostic, and the closeout
+/// gate then reports a warning that no code change can clear.
+#[test]
+fn git_fixture_repositories_disable_autocrlf() {
+    let repo_root = repository_root();
+    let mut checked = 0usize;
+    for root in ["rust/crates/keel/src", "rust/crates/keel/tests"] {
+        for path in rust_sources_under(&repo_root.join(root)) {
+            let content = fs::read_to_string(&path).expect("read source");
+            let initializes_repo = content.contains("[\"init\", \"-q\"]")
+                || content.contains("[\"init\"]")
+                || content.contains("vec![\"init\"]")
+                || content.contains(".arg(\"init\")");
+            if !initializes_repo {
+                continue;
+            }
+            checked += 1;
+            assert!(
+                content.contains("core.autocrlf"),
+                "{} initializes a git fixture repository without disabling core.autocrlf",
+                path.display()
+            );
+        }
+    }
+    assert!(
+        checked > 0,
+        "the guard found no fixture initializer to check"
+    );
+}
+
+fn rust_sources_under(directory: &Path) -> Vec<std::path::PathBuf> {
+    let mut files = Vec::new();
+    let Ok(entries) = fs::read_dir(directory) else {
+        return files;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            files.extend(rust_sources_under(&path));
+        } else if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
+            files.push(path);
+        }
+    }
+    files
+}
+
+/// The standalone Antigravity adapter mirrors shared marker paths by hand, so a
+/// rename in shared_constants must fail here instead of splitting silently.
+#[test]
+fn standalone_antigravity_adapter_mirrors_shared_marker_paths() {
+    let repo_root = repository_root();
+    let adapter = fs::read_to_string(repo_root.join("antigravity/keel-antigravity.js"))
+        .expect("read the standalone antigravity adapter");
+    let shared =
+        fs::read_to_string(repo_root.join("rust/crates/keel/src/runner/shared_constants.rs"))
+            .expect("read shared constants");
+    let marker = shared
+        .lines()
+        .find_map(|line| {
+            line.trim()
+                .strip_prefix("pub const IRON_LAW_SATISFIED_DIR: &str = \"")
+                .and_then(|rest| rest.strip_suffix("\";"))
+        })
+        .expect("IRON_LAW_SATISFIED_DIR must stay a plain string constant");
+    assert!(
+        adapter.contains(&format!("\"{marker}\"")),
+        "antigravity adapter must reference the shared marker directory `{marker}`"
+    );
 }
 
 /// Every adapter's Iron Law gate-clearing list must equal the Rust one, and every

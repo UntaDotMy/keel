@@ -94,7 +94,7 @@ fn ratified_budget(surface: &str) -> usize {
         "hook.user_prompt_submit.simple" => 113,
         "hook.user_prompt_submit.code_change" => 169,
         "repo.CLAUDE.md" => 1_448,
-        "repo.AGENTS.md" => 2_781,
+        "repo.AGENTS.md" => 2_713,
         "repo.WORKFLOW.md" => 5_373,
         "generated.claude.CLAUDE.md" => 1_061,
         "generated.codex.AGENTS.md" => 401,

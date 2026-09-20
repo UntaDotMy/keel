@@ -8,6 +8,7 @@ pub mod bridge;
 pub mod hook_lifecycle;
 pub mod learning;
 pub mod observation;
+pub mod shared_constants;
 pub mod shell_rewrite;
 pub mod telemetry;
 pub mod tool_names;

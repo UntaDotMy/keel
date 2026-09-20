@@ -3827,7 +3827,8 @@ mod tests {
     #[test]
     fn decision_cache_routing_speedup_over_recompute() {
         // Plan J02: cached beats recompute (~1.3x on 25 skills: both paths
-        // are file-IO dominated). Directional assertion only.
+        // are file-IO dominated). Directional assertion only; the best-of-rounds
+        // comparison keeps a loaded hosted runner from inverting the result.
         let bulk: Vec<(String, String)> = (0..23)
             .map(|i| {
                 (
@@ -3846,26 +3847,33 @@ mod tests {
         );
         let home = home_with_skills("bench", &refs);
         let prompt = "reviewer review this code diff j02-bench";
-        let _ = match_skill_for_prompt_with_details(&home, prompt);
-        let iterations = 30u32;
-        let start = std::time::Instant::now();
-        for _ in 0..iterations {
-            let _ = match_skill_for_prompt_with_details(&home, prompt);
+        let _warmup = match_skill_for_prompt_with_details(&home, prompt);
+        let rounds = 5u32;
+        let iterations = 12u32;
+        let mut cached_best = std::time::Duration::MAX;
+        let mut uncached_best = std::time::Duration::MAX;
+        for round in 0..rounds {
+            let round_prompt = format!("{prompt} round-{round}");
+            let _cached = match_skill_for_prompt_with_details(&home, &round_prompt);
+            let start = std::time::Instant::now();
+            for _ in 0..iterations {
+                let _routing = match_skill_for_prompt_with_details(&home, &round_prompt);
+            }
+            cached_best = cached_best.min(start.elapsed());
+            let start = std::time::Instant::now();
+            for i in 0..iterations {
+                let unique = format!("{round_prompt} miss-{i}");
+                let _uncached = match_skill_for_prompt_with_details(&home, &unique);
+            }
+            uncached_best = uncached_best.min(start.elapsed());
         }
-        let cached = start.elapsed();
-        let start = std::time::Instant::now();
-        for i in 0..iterations {
-            let unique = format!("{prompt} {i}");
-            let _ = match_skill_for_prompt_with_details(&home, &unique);
-        }
-        let uncached = start.elapsed();
         println!(
-            "routing cache: cached={cached:?} uncached={uncached:?} ratio={:.1}x",
-            uncached.as_secs_f64() / cached.as_secs_f64().max(f64::EPSILON)
+            "routing cache: best cached={cached_best:?} best uncached={uncached_best:?} ratio={:.1}x",
+            uncached_best.as_secs_f64() / cached_best.as_secs_f64().max(f64::EPSILON)
         );
         assert!(
-            cached < uncached,
-            "cached routing must beat recomputation: cached={cached:?} uncached={uncached:?}"
+            cached_best < uncached_best,
+            "cached routing must beat recomputation: best cached={cached_best:?} best uncached={uncached_best:?}"
         );
         let _ = fs::remove_dir_all(&home);
     }

@@ -190,3 +190,15 @@ fn grok_camel_case_post_tool_use_updates_lifecycle_state() {
     assert!(observation.contains(r#""tool_name":"search_replace""#));
     assert!(observation.contains(r#""signature":"edit:rs""#));
 }
+
+#[test]
+fn keel_version_flags_succeed() {
+    for flag in ["version", "--version", "-v", "-V"] {
+        let assert = keel_bin().arg(flag).assert().success();
+        let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+        assert!(
+            stdout.contains("keel"),
+            "Flag {flag} output did not contain 'keel': {stdout}"
+        );
+    }
+}

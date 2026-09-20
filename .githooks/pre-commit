@@ -15,29 +15,12 @@ FOUND_ANY=0
 ERRORS=0
 
 # ----- Rust -----
+# Format and lint for Rust run inside the `keel review pre-commit` gate below,
+# which owns them for every supported ecosystem. Running them here too cost
+# every commit a duplicate `cargo clippy --all-targets` pass.
 if [ -f "Cargo.toml" ]; then
     FOUND_ANY=1
-    echo "[rust] Checking..."
-    if command -v cargo >/dev/null 2>&1; then
-        if ! cargo fmt -- --check 2>/dev/null; then
-            echo "  ✗ cargo fmt failed — run: cargo fmt"
-            ERRORS=$((ERRORS + 1))
-        else
-            echo "  ✓ cargo fmt passed"
-        fi
-        if cargo clippy --version >/dev/null 2>&1; then
-            # why: without --all-targets clippy skips test code, so lint failures
-            # in tests pass the hook and reach CI.
-            if ! cargo clippy --workspace --all-targets -- -D warnings 2>/dev/null; then
-                echo "  ✗ cargo clippy failed"
-                ERRORS=$((ERRORS + 1))
-            else
-                echo "  ✓ cargo clippy passed"
-            fi
-        fi
-    else
-        echo "  [skip] cargo not on PATH"
-    fi
+    echo "[rust] Format and lint run by the keel review gate below."
 fi
 
 # ----- Go -----

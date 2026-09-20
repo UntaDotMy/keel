@@ -82,6 +82,8 @@ Side Effects: None — this file is informational.
 - Reviewer lanes must read the working brief, scoped memory, `SYSTEM_MAP.md`, the changed-surface map, and proving validation evidence before findings or approval.
 - During final code review on this Rust-backed repo, run `cargo test --workspace` and wait for it to finish before passing the gate.
 - After implementation and repo-wide proof on non-trivial work, run a second reviewer-quality pass before the final answer.
+- Resolve warnings in the change that introduces them: a new warning is a defect of this change, not a waiver candidate. Waivers are only for pre-existing, externally caused diagnostics and always carry a reason and an expiry.
+- Fixture git repositories must disable `core.autocrlf`, because a Windows checkout makes `git add` print a line-ending notice that the warning ledger records and the closeout gate then reports. The `git_fixture_repositories_disable_autocrlf` guard fails a fixture that forgets, and `test_support::init_git_repository` is the shared initializer.
 - Configure review strictness in `.claude-plugin/plugin.json` under `userConfig.review_strictness`, and run the tracked gates with `keel review pre-commit`, `keel review pre-pr`, and `keel review gates check`.
 
 **New Features:**

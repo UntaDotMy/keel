@@ -866,3 +866,49 @@ fn mcp_stdio_unsupported_initialize_lists_both_eras() {
     server.close();
     let _ = std::fs::remove_dir_all(home);
 }
+
+#[test]
+fn mcp_stdio_classic_meta_without_version_soft_defaults() {
+    let home = unique_temp_directory("classic-meta-soft-default");
+    let mut server = McpServerProcess::spawn(&home);
+    server.send(&json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"legacy","version":"1"}}}));
+    assert!(server.recv().get("result").is_some());
+    server.send(&json!({"jsonrpc":"2.0","method":"notifications/initialized"}));
+    // A classic host that attaches `_meta` with an empty protocolVersion used to
+    // fail every call with -32602; it must be served as a classic request.
+    server.send(&json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":""}}}));
+    let listed = server.recv();
+    assert!(
+        listed.get("result").is_some(),
+        "empty protocolVersion must soft-default to classic: {listed}"
+    );
+    // An unrelated `_meta` object is not a modern claim either.
+    server.send(&json!({"jsonrpc":"2.0","id":3,"method":"ping","params":{"_meta":{}}}));
+    assert_eq!(server.recv()["result"]["resultType"], "complete");
+    // A declared but unsupported version still fails closed.
+    server.send(&json!({"jsonrpc":"2.0","id":4,"method":"ping","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"1999-01-01"}}}));
+    let unsupported = server.recv();
+    assert_eq!(unsupported["error"]["code"], -32022, "{unsupported}");
+    server.close();
+    let _ = std::fs::remove_dir_all(home);
+}
+
+#[test]
+fn mcp_stdio_modern_era_keeps_strict_meta() {
+    let home = unique_temp_directory("modern-era-strict");
+    let mut server = McpServerProcess::spawn(&home);
+    let minimal = json!({
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientCapabilities": {}
+    });
+    server.send(
+        &json!({"jsonrpc":"2.0","id":1,"method":"server/discover","params":{"_meta":minimal}}),
+    );
+    assert!(server.recv().get("result").is_some());
+    // Post-discover requests keep the modern contract: a malformed claim is an error.
+    server.send(&json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":""}}}));
+    let rejected = server.recv();
+    assert_eq!(rejected["error"]["code"], -32602, "{rejected}");
+    server.close();
+    let _ = std::fs::remove_dir_all(home);
+}
