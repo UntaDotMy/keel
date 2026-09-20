@@ -1012,17 +1012,11 @@ fn resolve_default_claude_home_directory() -> Result<String, String> {
 }
 
 fn home_directory() -> Option<String> {
-    if let Ok(home_value) = env::var("HOME") {
-        if !home_value.is_empty() {
-            return Some(home_value);
-        }
-    }
-    if let Ok(userprofile_value) = env::var("USERPROFILE") {
-        if !userprofile_value.is_empty() {
-            return Some(userprofile_value);
-        }
-    }
-    None
+    // Single owner: runtime::resolve_user_home carries the full fallback chain,
+    // so scrubbed-host environments resolve the same home everywhere.
+    crate::runtime::resolve_user_home()
+        .ok()
+        .map(|path| path.to_string_lossy().into_owned())
 }
 
 fn path_to_display_string(path: &std::path::Path) -> String {

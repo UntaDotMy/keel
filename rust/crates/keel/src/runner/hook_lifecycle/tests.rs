@@ -3694,6 +3694,22 @@ fn session_start_emits_hook_specific_output_additional_context() {
         !context.trim().is_empty(),
         "SessionStart additionalContext must not be empty"
     );
+    // Strict hosts (Muse) reject unknown hookSpecificOutput keys, so the
+    // SessionStart shape is pinned to exactly the documented pair.
+    let keys: std::collections::BTreeSet<String> = output
+        .get("hookSpecificOutput")
+        .and_then(JsonDocument::as_object)
+        .expect("hookSpecificOutput must be an object")
+        .keys()
+        .cloned()
+        .collect();
+    assert_eq!(
+        keys,
+        ["additionalContext".to_string(), "hookEventName".to_string()]
+            .into_iter()
+            .collect(),
+        "SessionStart hookSpecificOutput must carry only the documented keys"
+    );
 
     assert!(
             output.get("systemMessage").is_none(),

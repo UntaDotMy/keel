@@ -77,27 +77,12 @@ pub(super) fn run_hook_lifecycle(
 /// could have shipped silently.
 pub(crate) fn render_lifecycle_payload(event: &HookEvent, context: &str) -> JsonDocument {
     if event.supports_hook_specific_output {
-        let mut hook_output = serde_json::json!({
+        // Only the documented keys: strict hosts reject unknown entries
+        // (Muse failed SessionStart on `watchPaths`), lenient hosts ignore extras.
+        let hook_output = serde_json::json!({
             "hookEventName": event.name,
             "additionalContext": context,
         });
-
-        // SessionStart: add watchPaths for key files so FileChanged fires
-        // when CLAUDE.md, Cargo.toml, or settings change during the session.
-        if event.name == "SessionStart" {
-            if let Ok(cwd) = std::env::current_dir() {
-                let watch_files: Vec<String> = [
-                    "CLAUDE.md",
-                    "Cargo.toml",
-                    "package.json",
-                    ".claude/settings.json",
-                ]
-                .iter()
-                .map(|f| display_path(&cwd.join(f)))
-                .collect();
-                hook_output["watchPaths"] = serde_json::json!(watch_files);
-            }
-        }
 
         serde_json::json!({
             "hookSpecificOutput": hook_output,
