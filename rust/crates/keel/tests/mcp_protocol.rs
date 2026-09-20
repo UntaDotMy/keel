@@ -855,7 +855,13 @@ fn mcp_stdio_unsupported_initialize_lists_both_eras() {
     let supported = rejected["error"]["data"]["supported"]
         .as_array()
         .expect("supported list");
-    for version in ["2024-11-05", "2025-03-26", "2025-11-25", "2026-07-28"] {
+    for version in [
+        "2024-11-05",
+        "2025-03-26",
+        "2025-06-18",
+        "2025-11-25",
+        "2026-07-28",
+    ] {
         assert!(
             supported
                 .iter()

@@ -298,10 +298,11 @@ pub(super) const MCP_PROTOCOL_META: &str = "io.modelcontextprotocol/protocolVers
 pub(super) const MCP_CAPABILITIES_META: &str = "io.modelcontextprotocol/clientCapabilities";
 
 /// Classic initialize revisions (Stack A) accepted without `_meta`.
-/// Cursor / Antigravity-class hosts speak these; keep them additive with modern.
+/// Cursor / Antigravity / Muse-class hosts speak these; keep them additive with modern.
 pub(super) const CLASSIC_PROTOCOL_VERSIONS: &[&str] = &[
     "2024-11-05",
     "2025-03-26",
+    "2025-06-18",
     "2025-11-25",
     "2024-10-07",
     "legacy",
@@ -2454,7 +2455,13 @@ mod tests {
         // Fresh classic session context: Modern→Classic downgrade is refused on a
         // shared modern session, so classic soft-default needs an isolated era.
         let classic_context = McpRequestContext::authoritative(None);
-        for (id, version) in [(2, "2024-11-05"), (3, "2025-03-26"), (4, "2025-11-25")] {
+        // Muse sends 2025-06-18; it must negotiate like every other classic revision.
+        for (id, version) in [
+            (2, "2024-11-05"),
+            (3, "2025-03-26"),
+            (13, "2025-06-18"),
+            (4, "2025-11-25"),
+        ] {
             let legacy = serde_json::json!({
                 "jsonrpc":"2.0","id":id,"method":"initialize",
                 "params":{"protocolVersion":version,"capabilities":{},"clientInfo":{"name":"classic","version":"1"}}
