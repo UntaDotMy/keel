@@ -256,9 +256,16 @@ pub fn is_absolute_any_platform(path: &str) -> bool {
     bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
 }
 
-/// The user's home directory (`$HOME`, falling back to `%USERPROFILE%`).
+/// The user's home directory.
+///
+/// Resolution order: `$HOME` → `%USERPROFILE%` → `%HOMEDRIVE%%HOMEPATH%`
+/// → the install location (`<home>/.keel/<exe>` implies `<home>`).
+/// The last two exist because strict hosts (Muse) spawn hooks and MCP
+/// servers with a scrubbed environment where the home variables are
+/// missing; without them every home-dependent tool fails there with
+/// "no user home directory available".
 pub fn resolve_user_home() -> Result<PathBuf, String> {
-    let home = env::var("HOME")
+    let from_env = env::var("HOME")
         .ok()
         .filter(|value| !value.trim().is_empty())
         .or_else(|| {
@@ -266,8 +273,47 @@ pub fn resolve_user_home() -> Result<PathBuf, String> {
                 .ok()
                 .filter(|value| !value.trim().is_empty())
         })
-        .ok_or_else(|| "no user home directory available".to_string())?;
-    Ok(clean_path(&PathBuf::from(home)))
+        .or_else(|| {
+            match (
+                env::var("HOMEDRIVE")
+                    .ok()
+                    .filter(|value| !value.trim().is_empty()),
+                env::var("HOMEPATH")
+                    .ok()
+                    .filter(|value| !value.trim().is_empty()),
+            ) {
+                (Some(drive), Some(path)) => Some(format!("{drive}{path}")),
+                _ => None,
+            }
+        });
+    if let Some(home) = from_env {
+        return Ok(clean_path(&PathBuf::from(home)));
+    }
+    if let Some(home) = std::env::current_exe()
+        .ok()
+        .as_deref()
+        .and_then(user_home_from_exe_path)
+    {
+        return Ok(home);
+    }
+    Err("no user home directory available".to_string())
+}
+
+/// Derive the user home from a standard install path: a binary running
+/// as `<home>/.keel/keel(.exe)` implies `<home>`, even when the
+/// environment carries no home variable at all. Anything else (dev
+/// `target/` builds, system dirs, bare names) yields `None` so exotic
+/// layouts keep the explicit error instead of a guessed home.
+pub(crate) fn user_home_from_exe_path(executable: &Path) -> Option<PathBuf> {
+    let parent = executable.parent()?;
+    if parent.file_name().and_then(|name| name.to_str()) != Some(KEEL_HOME_DIRECTORY_NAME) {
+        return None;
+    }
+    let home = parent.parent()?;
+    if home.as_os_str().is_empty() {
+        return None;
+    }
+    Some(clean_path(home))
 }
 
 /// keel's host-neutral root home: the binary, data, and state live here so
@@ -1870,6 +1916,61 @@ mod keel_home_split_tests {
         // only the invariant that holds in every case: an absolute home.
         let home = resolve_keel_home("").unwrap();
         assert!(home.is_absolute(), "keel home must be absolute: {home:?}");
+    }
+    #[test]
+    fn user_home_derives_from_standard_install_layout() {
+        assert_eq!(
+            user_home_from_exe_path(&PathBuf::from("/home/user/.keel/keel")),
+            Some(PathBuf::from("/home/user"))
+        );
+        assert_eq!(
+            user_home_from_exe_path(&PathBuf::from("C:/Users/user/.keel/keel.exe")),
+            Some(PathBuf::from("C:/Users/user"))
+        );
+        assert!(
+            user_home_from_exe_path(&PathBuf::from("/opt/keel/keel")).is_none(),
+            "system layouts must not guess a home"
+        );
+        assert!(
+            user_home_from_exe_path(&PathBuf::from("keel")).is_none(),
+            "bare names must not guess a home"
+        );
+    }
+
+    #[test]
+    fn user_home_falls_back_to_drive_and_path_without_home_vars() {
+        // Strict hosts (Muse) scrub HOME/USERPROFILE for MCP servers; the
+        // Windows drive+path pair must still resolve the same home.
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let saved: Vec<(&str, Option<std::ffi::OsString>)> = [
+            "HOME",
+            "USERPROFILE",
+            "HOMEDRIVE",
+            "HOMEPATH",
+            "KEEL_HOME",
+            "CLAUDE_TARGET_OVERRIDE",
+        ]
+        .iter()
+        .map(|key| (*key, std::env::var_os(key)))
+        .collect();
+        std::env::remove_var("HOME");
+        std::env::remove_var("USERPROFILE");
+        std::env::remove_var("KEEL_HOME");
+        std::env::remove_var("CLAUDE_TARGET_OVERRIDE");
+        std::env::set_var("HOMEDRIVE", "C:");
+        std::env::set_var("HOMEPATH", "\\Users\\test");
+
+        let resolved = resolve_user_home().expect("drive+path fallback must resolve");
+
+        for (key, previous) in saved {
+            match previous {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+        assert_eq!(resolved, PathBuf::from("C:\\Users\\test"));
     }
 }
 #[cfg(test)]
