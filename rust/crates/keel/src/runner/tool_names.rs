@@ -93,6 +93,61 @@ pub const SHELL_TOOL_NAMES: &[&str] = &[
     "unifiedexec",
 ];
 
+/// Keel research and orientation subcommands that clear the edit gate.
+pub const KEEL_RESEARCH_SUBCOMMANDS: &[&str] = &[
+    "system-map",
+    "system_map",
+    "recall",
+    "doctor",
+    "code-search",
+    "code_search",
+    "skill-route",
+    "skill_route",
+    "skill-list",
+    "skill_list",
+    "skill-get",
+    "skill_get",
+    "context-brief",
+    "context_brief",
+    "memory status",
+    "memory recall",
+    "memory system-map",
+    "memory scope",
+    "anvil prefix-check",
+    "anvil sieve",
+];
+
+/// Safe stream consumers that can receive piped output from a keel research command
+/// without violating the read-only gate contract.
+pub const SAFE_PIPE_CONSUMERS: &[&str] = &[
+    "cat",
+    "head",
+    "tail",
+    "grep",
+    "egrep",
+    "fgrep",
+    "findstr",
+    "select-string",
+    "select-object",
+    "where-object",
+    "measure-object",
+    "out-string",
+    "out-host",
+    "out-null",
+    "jq",
+    "less",
+    "more",
+    "wc",
+    "sort",
+    "uniq",
+    "cut",
+    "tr",
+    "column",
+    "fold",
+    "awk",
+    "sed",
+];
+
 /// Whether `tool_name` mutates files on any supported host.
 pub fn is_edit_class_tool(tool_name: &str) -> bool {
     let normalized = normalize_tool_name(tool_name);
@@ -103,6 +158,26 @@ pub fn is_edit_class_tool(tool_name: &str) -> bool {
 pub fn is_shell_tool_name(tool_name: &str) -> bool {
     let normalized = normalize_tool_name(tool_name);
     !normalized.is_empty() && SHELL_TOOL_NAMES.contains(&normalized.as_str())
+}
+
+/// Whether a subcommand is in the canonical research set.
+pub fn is_keel_research_subcommand(subcommand: &str) -> bool {
+    let lower = subcommand.trim().to_ascii_lowercase();
+    KEEL_RESEARCH_SUBCOMMANDS
+        .iter()
+        .any(|hit| lower == *hit || lower.starts_with(&format!("{hit} ")))
+}
+
+/// Whether a program executable is a recognized safe stream consumer in pipelines.
+pub fn is_safe_pipe_consumer(program: &str) -> bool {
+    let token = program
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .trim_matches(['\'', '"']);
+    let exe = token.rsplit(['/', '\\']).next().unwrap_or(token);
+    let exe_clean = exe.strip_suffix(".exe").unwrap_or(exe);
+    SAFE_PIPE_CONSUMERS.contains(&exe_clean)
 }
 
 #[cfg(test)]

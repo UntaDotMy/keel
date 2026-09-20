@@ -50,37 +50,24 @@ These rules **must** be followed on every turn. They are short by design; the re
 7. **Completion reconciliation.** Re-read the working brief and impacted surface before the final answer. Every explicit user requirement **must** map to evidence or a verified blocker. Do not present partial work as complete.
 8. **Writing Discipline.** All written output (docs, code comments, commit/PR text, review notes, chat) **must** follow: write less, be accurate not impressive, lead with the point, no filler or AI tells, stay on the asked scope. Full rule in `_shared/common-discipline.md` § Writing Discipline.
 9. **Agent teams.** Use `designing-agent-teams` when a task needs coordinated multi-agent decomposition. Subagents **must not** spawn subagents — route delegation back to the main thread. Teammates **must** communicate via `SendMessage(to: <agent-id>)`. Resumed subagents retain full history and auto-resume in background on `SendMessage`.
+10. **Shared is must (never hardcode).** Never hardcode domain vocabularies, tool lists, gate identifiers, env vars, or marker paths across modules/adapters. Centralize in shared modules (`runner/tool_names.rs`, `runner/shared_constants.rs`, `_shared/ts/bridge-core.ts`) and consume by reference. Adding a shared file is preferred over duplicating. Parity tests enforce tri-mirror consistency.
+
 
 ## Git Hooks (Mandatory Enforcement)
 
-Git hooks are **mandatory** and must be installed before making any commits or pushes. They work with **any language** (auto-detect) and **any AI agent tool** (native git hooks).
-
-### Installation
-
-```bash
-keel hook git-hooks install
-```
+Git hooks are **mandatory** and must be installed before committing or pushing: `keel hook git-hooks install`. Requires a `.githooks/` directory in repository.
 
 | Hook | What It Checks | Consequence |
-|------|----------------|-------------|
-| **pre-commit** | Auto-detects project language (Rust/Go/Python/JS/C++) and runs format + lint | Commit is **blocked** if checks fail |
-| **pre-push** | Branch policy (blocks direct pushes to `main` or `dev`) | Push is **blocked** if the branch policy check fails |
-**Installation Note**: `keel hook git-hooks install` configures the git hooks path but requires a `.githooks/` directory to exist in your repository. Copy from the keel workspace or ensure the directory is present.
+|---|---|---|
+| **pre-commit** | Auto-detects project language (Rust/Go/Python/JS/C++) and runs format + lint | Commit blocked on failure |
+| **pre-push** | Branch policy (blocks direct pushes to `main` or `dev`) | Push blocked on failure |
 
-### Bypassing Hooks
-
-**Do not bypass hooks** (`git commit --no-verify` or `git push --no-verify`) unless genuine emergency. Document the bypass in the commit message and follow up with a cleanup commit.
+**Do not bypass hooks** (`git commit --no-verify` or `git push --no-verify`) unless genuine emergency. Document bypass in commit message and follow up with a cleanup commit.
 
 
 ## Review Gate Enforcement (Optional Hard Blocking)
 
-PostToolBatch review reminders are feed-forward context and do not halt the current turn. The `Stop` hook may refuse closeout for an unmet armed review gate, under its per-session cap. Native `keel review` commands remain fail-closed on blocking findings. To make the hook gate imperative:
-
-Set environment variable `CLAUDE_SKILLS_REVIEW_GATE=block` → every bounded PostToolBatch fire is imperative and Stop enforces the unmet gate while its cap remains
-
-Default behavior (no env var set): escalate from a non-halting reminder to an imperative non-halting reminder; Stop can refuse closeout while the bounded gate remains armed.
-
-See [70-review-quality-gates-and-policies.md](AGENTS/references/70-review-quality-gates-and-policies.md) for full details on review surfaces and gates.
+PostToolBatch review reminders are feed-forward context. `Stop` hook may refuse closeout for unmet armed review gates under its per-session cap; native `keel review` is fail-closed on blocking findings. To make hook gates imperative, set `CLAUDE_SKILLS_REVIEW_GATE=block`. Default (unset): escalate reminder; Stop can refuse closeout while gate is armed. See [70-review-quality-gates-and-policies.md](AGENTS/references/70-review-quality-gates-and-policies.md).
 
 ## Instruction Budget and Scope Policy
 

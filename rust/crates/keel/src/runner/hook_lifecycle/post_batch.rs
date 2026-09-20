@@ -150,10 +150,6 @@ pub(super) fn review_gate_max_blocks() -> u64 {
 
 // ---- Research gate (PostToolBatch) ----
 
-pub(super) const RESEARCH_GATE_ENV_VAR: &str = "CLAUDE_SKILLS_RESEARCH_GATE";
-
-pub(super) const RESEARCH_GATE_MAX_BLOCKS_ENV_VAR: &str = "CLAUDE_SKILLS_RESEARCH_GATE_MAX_BLOCKS";
-
 /// Research-gate behavior. Default `Escalate` (nudge first, block if ignored);
 /// `CLAUDE_SKILLS_RESEARCH_GATE=nudge` keeps it advisory-only; `=off` disables.
 pub(super) fn research_gate_mode() -> GateMode {
@@ -166,11 +162,6 @@ pub(super) fn research_gate_max_blocks() -> u64 {
         .and_then(|value| value.trim().parse::<u64>().ok())
         .unwrap_or_else(|| default_max_blocks_for(research_gate_mode()))
 }
-
-pub(super) const COMPLETENESS_GATE_ENV_VAR: &str = "CLAUDE_SKILLS_COMPLETENESS_GATE";
-
-pub(super) const COMPLETENESS_GATE_MAX_BLOCKS_ENV_VAR: &str =
-    "CLAUDE_SKILLS_COMPLETENESS_GATE_MAX_BLOCKS";
 
 pub(super) fn completeness_gate_mode() -> GateMode {
     match std::env::var(COMPLETENESS_GATE_ENV_VAR) {
@@ -407,10 +398,6 @@ pub(super) fn research_gate_message(decision: GateDecision) -> String {
     }
 }
 
-pub(super) const BRIEF_GATE_ENV_VAR: &str = "CLAUDE_SKILLS_BRIEF_GATE";
-
-pub(super) const BRIEF_GATE_MAX_BLOCKS_ENV_VAR: &str = "CLAUDE_SKILLS_BRIEF_GATE_MAX_BLOCKS";
-
 /// Grace window (ms) applied when deciding whether a working brief "belongs to"
 /// the current session. A brief written as the session's very first action has a
 /// file mtime a few ms BEFORE the session-start timestamp (which is taken from
@@ -467,10 +454,6 @@ pub(super) fn brief_gate_message(decision: GateDecision) -> String {
 
 // ---- Memory-save gate (PostToolBatch) ----
 
-pub(super) const MEMORY_GATE_ENV_VAR: &str = "CLAUDE_SKILLS_MEMORY_GATE";
-
-pub(super) const MEMORY_GATE_MAX_BLOCKS_ENV_VAR: &str = "CLAUDE_SKILLS_MEMORY_GATE_MAX_BLOCKS";
-
 pub(super) fn memory_gate_mode() -> GateMode {
     gate_mode(MEMORY_GATE_ENV_VAR)
 }
@@ -505,11 +488,6 @@ pub(super) fn memory_gate_message(decision: GateDecision) -> String {
 }
 
 // ---- Learned-skill reminder gate (PostToolBatch) ----
-
-pub(super) const LEARNED_SKILL_GATE_ENV_VAR: &str = "CLAUDE_SKILLS_LEARNED_SKILL_GATE";
-
-pub(super) const LEARNED_SKILL_GATE_MAX_BLOCKS_ENV_VAR: &str =
-    "CLAUDE_SKILLS_LEARNED_SKILL_GATE_MAX_BLOCKS";
 
 pub(super) fn learned_skill_gate_mode() -> GateMode {
     gate_mode(LEARNED_SKILL_GATE_ENV_VAR)

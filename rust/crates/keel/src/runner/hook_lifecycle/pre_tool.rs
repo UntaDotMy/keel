@@ -2,17 +2,6 @@
 
 use super::*;
 
-pub(super) const IRON_LAW_GATE_ENV_VAR: &str = "KEEL_IRON_LAW_GATE";
-
-/// Shared satisfaction marker dir used by Claude PreToolUse, bridge hosts, and
-/// PostToolUse/observe (one source of truth across hosts).
-pub(super) const IRON_LAW_SATISFIED_DIR: &str = "iron-law-satisfied";
-
-/// Legacy one-shot acknowledge dir from the old "deny once then always allow"
-/// gate. Still checked for back-compat so in-flight sessions mid-upgrade are not
-/// re-blocked after they already cleared the old gate.
-pub(super) const IRON_LAW_LEGACY_GATE_DIR: &str = "iron-law-gate";
-
 pub(super) const IRON_LAW_GATE_DENIAL_STRICT: &str =
     "[keel] Iron Law gate (STRICT): Edit/Write/Bash (non-keel) and Agent/Task are \
         BLOCKED until this session used a keel research tool. Text reminders are not \
@@ -560,17 +549,59 @@ pub(super) fn is_shell_tool_name(tool_name: &str) -> bool {
     crate::runner::shell_rewrite::is_shell_tool_name(tool_name)
 }
 
+pub(crate) fn strip_keel_run_wrapper(command: &str) -> Option<&str> {
+    let trimmed = command.trim();
+    if let Some(idx) = trimmed.find(" run -- ") {
+        let prefix = &trimmed[..idx];
+        let stripped_prefix = prefix
+            .trim_start_matches('&')
+            .trim()
+            .trim_matches(|c| c == '\'' || c == '"');
+        let base = std::path::Path::new(stripped_prefix)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(stripped_prefix);
+        if base.eq_ignore_ascii_case("keel") || base.eq_ignore_ascii_case("keel.exe") {
+            return Some(trimmed[idx + " run -- ".len()..].trim());
+        }
+    }
+    None
+}
+
 /// Whether a shell command is a keel research/read surface (not install/mutate).
 pub(crate) fn is_keel_research_command(command: &str) -> bool {
     let trimmed = command.trim().to_ascii_lowercase();
     if trimmed.is_empty() {
         return false;
     }
-    // Strip common wrappers: keel run -- <cmd>, env prefixes left to contains checks.
-    let body = trimmed
+    // Reject compound commands that could smuggle unsafe tails;
+    // only standalone invocations or safe pipelines clear.
+    if trimmed.contains("&&")
+        || trimmed.contains("||")
+        || trimmed.contains(';')
+        || trimmed.contains('`')
+        || trimmed.contains("$(")
+        || trimmed.contains('\n')
+        || trimmed.contains('>')
+        || trimmed.contains('<')
+    {
+        return false;
+    }
+
+    // Research / orientation subcommands that clear the edit gate. Kept in lockstep
+    const HITS: &[&str] = crate::runner::tool_names::KEEL_RESEARCH_SUBCOMMANDS;
+
+    let stages: Vec<&str> = trimmed.split('|').map(str::trim).collect();
+    if stages.is_empty() {
+        return false;
+    }
+
+    // First stage must be a valid keel research invocation
+    let first_stage = stages[0];
+    let body = first_stage
         .strip_prefix("keel run -- ")
-        .or_else(|| trimmed.strip_prefix("keel.exe run -- "))
-        .unwrap_or(trimmed.as_str());
+        .or_else(|| first_stage.strip_prefix("keel.exe run -- "))
+        .unwrap_or(first_stage);
     let has_keel = body.starts_with("keel ")
         || body.starts_with("keel.exe ")
         || body.contains("\\keel.exe ")
@@ -579,42 +610,18 @@ pub(crate) fn is_keel_research_command(command: &str) -> bool {
     if !has_keel {
         return false;
     }
-    // a compound/chained command can smuggle a non-keel tail past the gate
-    // (`keel doctor && python exfil.py`); only a standalone keel invocation clears.
-    if body.contains("&&")
-        || body.contains("||")
-        || body.contains(';')
-        || body.contains('|')
-        || body.contains('`')
-        || body.contains("$(")
-        || body.contains('\n')
-    {
+    if !HITS.iter().any(|h| body.contains(h)) {
         return false;
     }
-    // Research / orientation subcommands that clear the edit gate. Kept in lockstep
-    const HITS: &[&str] = &[
-        "system-map",
-        "system_map",
-        "recall",
-        "doctor",
-        "code-search",
-        "code_search",
-        "skill-route",
-        "skill_route",
-        "skill-list",
-        "skill_list",
-        "skill-get",
-        "skill_get",
-        "context-brief",
-        "context_brief",
-        "memory status",
-        "memory recall",
-        "memory system-map",
-        "memory scope",
-        "anvil prefix-check",
-        "anvil sieve",
-    ];
-    HITS.iter().any(|h| body.contains(h))
+
+    // Any downstream stages in the pipeline must be safe stream consumers
+    for stage in &stages[1..] {
+        if !crate::runner::tool_names::is_safe_pipe_consumer(stage) {
+            return false;
+        }
+    }
+
+    true
 }
 
 pub(crate) fn is_host_shell_tool_name(tool_name: &str) -> bool {
@@ -1124,8 +1131,11 @@ pub(super) fn run_hook_pre_tool_use(
     if !is_shell_tool_name(tool_name) {
         return 0;
     }
+    // If the command is already wrapped in `keel run -- ...`, evaluate the inner payload
+    let effective_command = strip_keel_run_wrapper(command).unwrap_or(command);
+
     // J06: Shell destructive probability & risk action via Noul evaluation
-    let noul = crate::utility::decision::evaluate_shell_command_noul(command);
+    let noul = crate::utility::decision::evaluate_shell_command_noul(effective_command);
     match noul.action {
         crate::utility::decision::ShellRiskAction::Block => {
             let reason = format!(
@@ -1148,7 +1158,9 @@ pub(super) fn run_hook_pre_tool_use(
     }
 
     // Inspect EVERY segment of a compound command, not just the first supported
-    if let Some(finding) = crate::runner::shell_rewrite::detect_destructive_in_command(command) {
+    if let Some(finding) =
+        crate::runner::shell_rewrite::detect_destructive_in_command(effective_command)
+    {
         let reason = match finding.severity {
             crate::runner::shell_rewrite::DestructiveSeverity::Block => format!(
                 "[keel] Destructive command blocked: {}. This command is almost certainly unsafe. \
@@ -1237,15 +1249,20 @@ pub(crate) fn emit_pretool_deny(
     standard_output: &mut dyn Write,
     standard_error: &mut dyn Write,
 ) {
+    let clean_reason = if cfg!(windows) {
+        reason.replace("\r\n", "\n").replace('\n', "\r\n")
+    } else {
+        reason.to_string()
+    };
     // Claude reads hookSpecificOutput.permissionDecision. Grok reads top-level
     // decision/reason. Emit both so one payload blocks every host.
     let deny_payload = serde_json::json!({
         "decision": "deny",
-        "reason": reason,
+        "reason": clean_reason,
         "hookSpecificOutput": {
             "hookEventName": MANAGED_PRE_TOOL_USE_EVENT,
             "permissionDecision": "deny",
-            "permissionDecisionReason": reason,
+            "permissionDecisionReason": clean_reason,
         }
     });
     match serde_json::to_string(&deny_payload) {

@@ -1243,6 +1243,13 @@ fn iron_law_research_command_rejects_bypass_and_non_research_surfaces() {
         "keel code-search search --query x"
     ));
     assert!(is_keel_research_command("keel doctor"));
+    // Pipelines to safe readers/filters clear the gate
+    assert!(is_keel_research_command("keel memory scope | cat"));
+    assert!(is_keel_research_command("keel memory scope | jq ."));
+    assert!(is_keel_research_command("keel recall query | head -n 10"));
+    assert!(is_keel_research_command("keel system-map | grep foo"));
+    assert!(!is_keel_research_command("keel memory scope | rm -rf /"));
+    assert!(!is_keel_research_command("keel memory scope | bash"));
     // And a smuggling compound stays gated at the tool level.
     assert!(tool_is_iron_law_gated(
         "Bash",
@@ -5664,4 +5671,28 @@ fn escalate_flag_respects_confidence_threshold() {
         !above_threshold.needs_escalation(),
         "confidence above threshold (0.92) with escalate flag must NOT need escalation"
     );
+}
+
+#[test]
+fn test_strip_keel_run_wrapper_extracts_payload() {
+    use super::pre_tool::strip_keel_run_wrapper;
+    assert_eq!(
+        strip_keel_run_wrapper("keel run -- cargo test"),
+        Some("cargo test")
+    );
+    assert_eq!(
+        strip_keel_run_wrapper("keel.exe run -- cargo test"),
+        Some("cargo test")
+    );
+    assert_eq!(
+        strip_keel_run_wrapper(
+            r#""C:\Users\Administrator\.keel\keel.exe" run -- cargo test --workspace"#
+        ),
+        Some("cargo test --workspace")
+    );
+    assert_eq!(
+        strip_keel_run_wrapper(r#"& 'C:\Users\Administrator\.keel\keel.exe' run -- cargo test"#),
+        Some("cargo test")
+    );
+    assert_eq!(strip_keel_run_wrapper("cargo test"), None);
 }

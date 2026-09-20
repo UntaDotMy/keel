@@ -50,16 +50,43 @@ export function keelStateRoot(): string {
   return neutralHome;
 }
 
+// Canonical Gate Control Environment Variables
+export const IRON_LAW_GATE_ENV_VAR = "KEEL_IRON_LAW_GATE";
+export const REVIEW_GATE_ENV_VAR = "CLAUDE_SKILLS_REVIEW_GATE";
+export const REVIEW_GATE_MAX_BLOCKS_ENV_VAR = "CLAUDE_SKILLS_REVIEW_GATE_MAX_BLOCKS";
+export const BRIEF_GATE_ENV_VAR = "CLAUDE_SKILLS_BRIEF_GATE";
+export const BRIEF_GATE_MAX_BLOCKS_ENV_VAR = "CLAUDE_SKILLS_BRIEF_GATE_MAX_BLOCKS";
+export const RESEARCH_GATE_ENV_VAR = "CLAUDE_SKILLS_RESEARCH_GATE";
+export const RESEARCH_GATE_MAX_BLOCKS_ENV_VAR = "CLAUDE_SKILLS_RESEARCH_GATE_MAX_BLOCKS";
+export const COMPLETENESS_GATE_ENV_VAR = "CLAUDE_SKILLS_COMPLETENESS_GATE";
+export const COMPLETENESS_GATE_MAX_BLOCKS_ENV_VAR = "CLAUDE_SKILLS_COMPLETENESS_GATE_MAX_BLOCKS";
+export const MEMORY_GATE_ENV_VAR = "CLAUDE_SKILLS_MEMORY_GATE";
+export const LEARNED_SKILL_GATE_ENV_VAR = "CLAUDE_SKILLS_LEARNED_SKILL_GATE";
+
+// Canonical State Marker Directories
+export const IRON_LAW_SATISFIED_DIR = "iron-law-satisfied";
+export const IRON_LAW_LEGACY_GATE_DIR = "iron-law-gate";
+export const REVIEW_GATE_DIR = "review-gate";
+export const BRIEF_GATE_DIR = "brief-gate";
+export const COMPLETENESS_GATE_DIR = "completeness-gate";
+
+// Canonical Gate Decisions
+export const GATE_DECISION_BLOCK = "block";
+export const GATE_DECISION_WARN = "warn";
+export const GATE_DECISION_ESCALATE = "escalate";
+export const GATE_DECISION_NUDGE = "nudge";
+export const GATE_DECISION_OFF = "off";
+
 export function sessionMarkerDirectory(host: string): string {
   return path.join(keelStateRoot(), `${host}-session-started`);
 }
 
 export function ironLawMarkerDirectory(): string {
-  return path.join(keelStateRoot(), "iron-law-satisfied");
+  return path.join(keelStateRoot(), IRON_LAW_SATISFIED_DIR);
 }
 
 export function legacyIronLawMarkerDirectory(): string {
-  return path.join(os.homedir(), ".claude", "state", "iron-law-satisfied");
+  return path.join(os.homedir(), ".claude", "state", IRON_LAW_SATISFIED_DIR);
 }
 
 /** Match Rust `sanitize_memory_key`: lowercase alnum, other runs become `-`. */
@@ -274,12 +301,19 @@ export function isKeelResearchTool(toolName: string): boolean {
   );
 }
 
-const KEEL_RESEARCH_SUBCOMMANDS = [
+export const KEEL_RESEARCH_SUBCOMMANDS = [
   "system-map", "system_map", "recall", "doctor", "code-search", "code_search",
   "skill-route", "skill_route", "skill-list", "skill_list", "skill-get", "skill_get",
   "context-brief", "context_brief", "memory status", "memory recall",
   "memory system-map", "memory scope", "anvil prefix-check", "anvil sieve",
 ];
+
+export const SAFE_PIPE_CONSUMERS = new Set([
+  "cat", "head", "tail", "grep", "egrep", "fgrep", "jq", "less", "more", "wc",
+  "sort", "uniq", "cut", "tr", "column", "fold", "awk", "sed", "findstr",
+  "select-string", "select-object", "where-object", "measure-object",
+  "out-string", "out-host", "out-null",
+]);
 
 function shellCommandWords(command: string): string[] {
   const words: string[] = [];
@@ -306,8 +340,12 @@ function shellCommandWords(command: string): string[] {
       }
       continue;
     }
-    if ("&|;`\n".includes(character) || (character === "$" && command[index + 1] === "(")) {
-      return [];
+    if (
+      "|;`\n".includes(character) ||
+      (character === "$" && command[index + 1] === "(") ||
+      (character === "&" && command[index + 1] === "&")
+    ) {
+      break;
     }
     current += character;
   }
@@ -327,24 +365,81 @@ export function isAlreadyCompacted(command: string): boolean {
 }
 
 export function isKeelReadingCommand(command: string): boolean {
-  let words = shellCommandWords(command.trim().toLowerCase());
-  if (words.length >= 3 && isKeelExecutable(words[0]) && words[1] === "run" && words[2] === "--") {
-    words = words.slice(3);
+  const trimmed = command.trim();
+  if (!trimmed) return false;
+
+  // Split on unquoted pipes to inspect pipeline stages
+  const stages: string[] = [];
+  let currentStage = "";
+  let quote = "";
+  for (let i = 0; i < trimmed.length; i += 1) {
+    const ch = trimmed[i];
+    if (quote) {
+      if (ch === quote) quote = "";
+      currentStage += ch;
+      continue;
+    }
+    if (ch === "'" || ch === "\"") {
+      quote = ch;
+      currentStage += ch;
+      continue;
+    }
+    if (
+      ch === ";" ||
+      ch === "`" ||
+      ch === "\n" ||
+      (ch === "$" && trimmed[i + 1] === "(") ||
+      (ch === "&" && trimmed[i + 1] === "&")
+    ) {
+      return false;
+    }
+    if (ch === "|") {
+      stages.push(currentStage.trim());
+      currentStage = "";
+      continue;
+    }
+    currentStage += ch;
   }
-  if (words.length < 2 || !isKeelExecutable(words[0])) return false;
-  const subcommand = words.slice(1).join(" ");
-  return KEEL_RESEARCH_SUBCOMMANDS.some(
+  if (quote) return false;
+  if (currentStage.trim()) stages.push(currentStage.trim());
+
+  if (stages.length === 0) return false;
+
+  let firstWords = shellCommandWords(stages[0].toLowerCase());
+  if (firstWords.length >= 3 && isKeelExecutable(firstWords[0]) && firstWords[1] === "run" && firstWords[2] === "--") {
+    firstWords = firstWords.slice(3);
+  }
+  if (firstWords.length < 2 || !firstWords[0] || !isKeelExecutable(firstWords[0])) return false;
+  const subcommand = firstWords.slice(1).join(" ");
+  const isFirstStageReading = KEEL_RESEARCH_SUBCOMMANDS.some(
     (hit) => subcommand === hit || subcommand.startsWith(`${hit} `),
   );
+  if (!isFirstStageReading) return false;
+
+  for (let i = 1; i < stages.length; i += 1) {
+    const words = shellCommandWords(stages[i].toLowerCase());
+    if (words.length === 0) return false;
+    const consumer = words[0];
+    if (!SAFE_PIPE_CONSUMERS.has(consumer)) return false;
+  }
+
+  return true;
 }
 
-export type GateResponse = "allow" | "deny" | "unknown";
+export type GateResponse = "allow" | "deny" | "escalate" | "warn" | "unknown";
 
 export function parseGateResponse(output: string): { status: GateResponse; reason: string } {
-  if (output.startsWith("KEEL_GATE_DENY")) {
-    return { status: "deny", reason: output.split("\n").slice(1).join("\n").trim() };
+  const normalized = output.replace(/\r/g, "");
+  if (normalized.startsWith("KEEL_GATE_DENY")) {
+    return { status: "deny", reason: normalized.split("\n").slice(1).join("\n").trim() };
   }
-  if (output.startsWith("KEEL_GATE_ALLOW")) return { status: "allow", reason: "" };
+  if (normalized.startsWith("KEEL_GATE_ESCALATE")) {
+    return { status: "escalate", reason: normalized.split("\n").slice(1).join("\n").trim() };
+  }
+  if (normalized.startsWith("KEEL_GATE_WARN")) {
+    return { status: "warn", reason: normalized.split("\n").slice(1).join("\n").trim() };
+  }
+  if (normalized.startsWith("KEEL_GATE_ALLOW")) return { status: "allow", reason: "" };
   console.warn("[keel] unknown gate response:", output.slice(0, 200));
   return { status: "unknown", reason: "" };
 }

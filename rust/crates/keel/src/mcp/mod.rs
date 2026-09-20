@@ -916,6 +916,20 @@ fn serve_stdio_owned_stdin(standard_output: &mut dyn Write, standard_error: &mut
         let _ = writeln!(standard_error, "[keel mcp] spawn stdin reader: {error}");
         return 1;
     }
+
+    // Active parent watchdog: monitor parent PID so orphaned servers
+    // self-reap within seconds if the harness crashes or exits.
+    if let Some(parent) = ParentWatch::capture() {
+        let _ = thread::Builder::new()
+            .name("keel-mcp-watchdog".into())
+            .spawn(move || loop {
+                thread::sleep(std::time::Duration::from_secs(3));
+                if !parent.alive() {
+                    std::process::exit(0);
+                }
+            });
+    }
+
     run_serve_event_loop(
         event_tx,
         event_rx,
@@ -1837,8 +1851,11 @@ pub(super) fn dispatch_cancellable_with_context(
     }
 
     let requires_modern_meta = method == "server/discover"
-        || params.get("_meta").is_some()
-        || request_context.wire_era() == WireEra::Modern;
+        || request_context.wire_era() == WireEra::Modern
+        || params
+            .get("_meta")
+            .and_then(Value::as_object)
+            .is_some_and(|m| m.contains_key(MCP_PROTOCOL_META));
     if requires_modern_meta {
         if let Err(response) = validate_request_metadata(&params, &request_id) {
             return Some(response);

@@ -157,7 +157,7 @@ impl Application {
             "help" | "--help" | "-h" => {
                 self.run_help_command(command_arguments, standard_output, standard_error)
             }
-            "version" => {
+            "version" | "--version" | "-v" | "-V" => {
                 self.run_version_command(command_arguments, standard_output, standard_error)
             }
             "platform" => {

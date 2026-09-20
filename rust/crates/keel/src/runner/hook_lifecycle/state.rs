@@ -2,42 +2,6 @@
 
 use super::*;
 
-pub(super) const RAW_OUTPUT_DEFAULT_RETENTION_DAYS: u64 = 14;
-
-/// Tool-timings JSONL rows are tiny (one short line per tool call) compared
-/// to raw-output directories, so a longer default retention is fine. 30 days
-/// gives an analyzer a useful month-long sample without letting the directory
-/// grow unbounded across long sessions. Tunable via
-/// `CLAUDE_SKILLS_TIMINGS_RETENTION_DAYS`; setting it to `0` disables the
-/// SessionEnd prune.
-pub(super) const TIMINGS_DEFAULT_RETENTION_DAYS: u64 = 30;
-
-/// Behavioral observation JSONL rows feed the learning loop. They age out of
-/// the loop's 7-day distillation window naturally, but the files are pruned on
-/// a longer horizon so a late `learn --window 14` inspection still has data.
-/// Tunable via `CLAUDE_SKILLS_OBSERVATION_RETENTION_DAYS`; `0` disables.
-pub(super) const OBSERVATION_DEFAULT_RETENTION_DAYS: u64 = 30;
-
-pub(super) const MANAGED_PRE_TOOL_USE_EVENT: &str = "PreToolUse";
-
-/// SYSTEM_MAP.md is rebuilt every N edit-class tool calls so the workspace
-/// pointer stays in sync with the repo without paying refresh cost on every
-/// tool call. Tunable via `CLAUDE_SKILLS_SYSTEM_MAP_REFRESH_INTERVAL`; setting
-/// it to `0` disables the periodic refresh.
-pub(super) const SYSTEM_MAP_REFRESH_DEFAULT_THRESHOLD: u64 = 10;
-
-/// Env var that disables the SessionStart MCP-registration self-heal. Unset (the
-/// default) keeps the self-heal on; set to `off` to skip it (used by tests that
-/// must not touch any `~/.claude.json`, and as an operator escape hatch). Any
-/// other value leaves the self-heal enabled.
-pub(super) const MCP_SELF_HEAL_ENV_VAR: &str = "CLAUDE_SKILLS_MCP_SELF_HEAL";
-
-/// Env var that disables the SessionEnd auto-capture of a session work summary
-/// to memory. Unset (the default) keeps it on; set to `off` to skip it. Any
-/// other value leaves it enabled. The capture is silent on sessions that did no
-/// edit-class work, so research/question-only turns never write a summary.
-pub(super) const SESSION_CAPTURE_ENV_VAR: &str = "CLAUDE_SKILLS_SESSION_CAPTURE";
-
 /// Iterate canonical hook event names. Single-line wrapper around the table so
 /// existing for-loops keep their `for event in claude_hook_event_names()` shape
 /// without caring that the source is a typed row table.
@@ -438,18 +402,7 @@ pub(super) fn reset_counter_file(path: &Path) -> std::io::Result<()> {
     crate::runtime::write_text(path, "0").map_err(std::io::Error::other)
 }
 
-pub(super) const REVIEW_GATE_ENV_VAR: &str = "CLAUDE_SKILLS_REVIEW_GATE";
-
-pub(super) const REVIEW_GATE_MAX_BLOCKS_ENV_VAR: &str = "CLAUDE_SKILLS_REVIEW_GATE_MAX_BLOCKS";
-
-// The plugin manifest (.claude-plugin/plugin.json `userConfig`) declares three
-
-pub(super) const PLUGIN_REVIEW_STRICTNESS: &str = "CLAUDE_PLUGIN_OPTION_REVIEW_STRICTNESS";
-
-pub(super) const PLUGIN_SYSTEM_MAP_REFRESH_INTERVAL: &str =
-    "CLAUDE_PLUGIN_OPTION_SYSTEM_MAP_REFRESH_INTERVAL";
-
-pub(super) const PLUGIN_MEMORY_RETENTION_DAYS: &str = "CLAUDE_PLUGIN_OPTION_MEMORY_RETENTION_DAYS";
+// The plugin manifest (.claude-plugin/plugin.json `userConfig`) options are defined in shared_constants.
 
 /// Map the harness userConfig vocabulary (`advisory`/`strict`/`off`) onto the
 /// `GateMode` vocabulary (`nudge`/`block`/`off`). Unrecognized values fall
