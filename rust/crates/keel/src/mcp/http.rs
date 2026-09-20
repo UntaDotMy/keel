@@ -71,7 +71,15 @@ pub(super) fn serve_http(
     let inflight = Arc::new(InflightGuard::new(max_inflight));
     let connections = Arc::new(InflightGuard::new(max_inflight.saturating_add(8)));
 
+    // Shared daemon lifecycle: the reaper mirrors the stdio watchdog contract,
+    // so a server that outlives its launcher cannot linger indefinitely.
+    let last_activity = Arc::new(Mutex::new(Instant::now()));
+    spawn_http_reaper(Arc::clone(&last_activity), Arc::clone(&connections));
+
     for connection in listener.incoming() {
+        *last_activity
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Instant::now();
         match connection {
             Ok(mut stream) => {
                 let Some(connection_permit) = connections.try_acquire() else {
@@ -105,6 +113,45 @@ pub(super) fn serve_http(
         }
     }
     0
+}
+
+/// Self-reap for the shared HTTP daemon.
+///
+/// Mirrors the stdio watchdog contract: exit only when the spawning process is
+/// gone, the accept loop has been idle for the whole budget, and no connection
+/// or in-flight request is live. A live parent, or a parent that cannot be
+/// probed, keeps serving so a daemon started on purpose is never killed under a
+/// running session. `KEEL_MCP_IDLE_TIMEOUT_SECS=0` disables the reaper.
+fn spawn_http_reaper(last_activity: Arc<Mutex<Instant>>, connections: Arc<InflightGuard>) {
+    let Some(budget) = super::idle_timeout() else {
+        return;
+    };
+    let parent = super::ParentWatch::capture();
+    let _ = thread::Builder::new()
+        .name("keel-mcp-http-reaper".into())
+        .spawn(move || loop {
+            thread::sleep(Duration::from_secs(3));
+            let idle = {
+                let last = last_activity
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                last.elapsed()
+            };
+            if idle < budget {
+                continue;
+            }
+            if connections.in_flight() > 0 {
+                continue;
+            }
+            if parent
+                .as_ref()
+                .map(super::ParentWatch::alive)
+                .unwrap_or(true)
+            {
+                continue;
+            }
+            std::process::exit(0);
+        });
 }
 
 fn parse_bind(arguments: &[String]) -> Option<String> {
@@ -327,8 +374,7 @@ impl InflightGuard {
         })
     }
 
-    /// Test observation only; production paths rely on acquire/permit drop.
-    #[cfg(test)]
+    /// Live permit count; the HTTP reaper reads it before any self-exit.
     fn in_flight(&self) -> usize {
         *self.lock()
     }
@@ -635,10 +681,15 @@ fn handle_post(stream: &mut TcpStream, headers: &HttpHeaders, body: &[u8]) -> st
         );
     }
     let method = value["method"].as_str().unwrap_or("");
+    // Only a declared modern revision makes a request modern: modern transport
+    // headers, or a body `_meta` that actually claims the protocol version.
     let is_modern = method == "server/discover"
         || headers.protocol_version.as_deref() == Some(super::MCP_PROTOCOL_VERSION)
         || headers.mcp_method.is_some()
-        || value["params"].get("_meta").is_some();
+        || value["params"]
+            .get("_meta")
+            .and_then(|meta| meta.get(super::MCP_PROTOCOL_META))
+            .is_some();
 
     // Modern HTTP remains sessionless; a client-supplied session id is rejected on modern path.
     if is_modern && headers.session_id.is_some() {
@@ -738,7 +789,7 @@ fn validate_http_metadata(headers: &HttpHeaders, value: &Value) -> Result<(), Va
     if !aligned {
         return Err(mismatch("MCP-Protocol-Version"));
     }
-    super::validate_request_metadata(&value["params"], &id)?;
+    super::validate_request_metadata(&value["params"], &id, super::MetaRequirement::ClaimedOnly)?;
     let source = match method {
         "resources/read" => Some("uri"),
         "tools/call" | "prompts/get" => Some("name"),

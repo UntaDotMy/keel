@@ -1026,12 +1026,7 @@ fn home_directory() -> Option<String> {
 }
 
 fn path_to_display_string(path: &std::path::Path) -> String {
-    let rendered = path.to_string_lossy().to_string();
-    if cfg!(windows) {
-        rendered.replace('/', "\\")
-    } else {
-        rendered
-    }
+    crate::runtime::display_path(path)
 }
 
 #[cfg(test)]

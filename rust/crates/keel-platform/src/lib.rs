@@ -55,6 +55,22 @@ pub fn normalize_target(
     })
 }
 
+/// Strip the Windows verbatim (`\\?\`) prefix from a rendered path string.
+///
+/// Canonicalized Windows paths carry a verbatim prefix (`\\?\C:\...`,
+/// `\\?\UNC\server\share`). The prefix is an API detail, not part of the path
+/// users and host configs should see, so rendered output strips it here: one
+/// owner for the CLI renderers, the flow schema, and the review gates.
+pub fn strip_verbatim_prefix(value: &str) -> String {
+    if let Some(rest) = value.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{rest}");
+    }
+    if let Some(rest) = value.strip_prefix(r"\\?\") {
+        return rest.to_string();
+    }
+    value.to_string()
+}
+
 fn normalize_operating_system(
     runtime_operating_system: &str,
 ) -> Result<String, NormalizeTargetError> {
@@ -127,5 +143,26 @@ mod tests {
             architecture: "amd64".into(),
         };
         assert_eq!(target.directory_name(), "linux-amd64");
+    }
+
+    #[test]
+    fn strip_verbatim_prefix_unwraps_drive_and_unc_paths() {
+        assert_eq!(
+            strip_verbatim_prefix(r"\\?\C:\Users\example\repo"),
+            r"C:\Users\example\repo"
+        );
+        assert_eq!(
+            strip_verbatim_prefix(r"\\?\UNC\server\share\repo"),
+            r"\\server\share\repo"
+        );
+    }
+
+    #[test]
+    fn strip_verbatim_prefix_leaves_plain_paths_untouched() {
+        assert_eq!(
+            strip_verbatim_prefix(r"C:\Users\example"),
+            r"C:\Users\example"
+        );
+        assert_eq!(strip_verbatim_prefix("/home/example"), "/home/example");
     }
 }

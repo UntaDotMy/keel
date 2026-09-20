@@ -64,6 +64,22 @@ Anvil never commits or pushes.
 | Anvil + review | Fail-closed delivery loop and local review gates so non-trivial work does not self-merge on vibes. |
 | Brownfield flow check | For edits to established source, review can require owner-path evidence (`keel flow …`) before gates pass. Soft claim only — not a bakeoff-proven uniqueness line. |
 
+## MCP across many windows
+
+Each host session normally spawns its own `keel mcp serve` (stdio) process. That
+is right for one window; `keel doctor` reports how many are running, warns when
+one is orphaned, and `keel doctor --fix` reaps the orphans. For many windows, run
+one shared daemon and point every host at it:
+
+```sh
+keel mcp serve-http --bind 127.0.0.1:3920
+```
+
+Register `http://127.0.0.1:3920/mcp` (Streamable HTTP) in each host instead of
+the stdio command. The HTTP transport is sessionless and serves concurrent
+clients; it exits on its own once its launcher is gone and it has been idle for
+`KEEL_MCP_IDLE_TIMEOUT_SECS` (default 300, min 30, max 86400, `0` disables).
+
 ## What keel is not
 
 | Not this | Why |

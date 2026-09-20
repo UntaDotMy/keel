@@ -169,6 +169,9 @@ pub fn is_keel_research_subcommand(subcommand: &str) -> bool {
 }
 
 /// Whether a program executable is a recognized safe stream consumer in pipelines.
+///
+/// Matching is case-insensitive and ignores a trailing `.exe`, because hosts
+/// report the same reader as `head`, `Head`, or `HEAD.EXE` depending on shell.
 pub fn is_safe_pipe_consumer(program: &str) -> bool {
     let token = program
         .split_whitespace()
@@ -176,7 +179,8 @@ pub fn is_safe_pipe_consumer(program: &str) -> bool {
         .unwrap_or("")
         .trim_matches(['\'', '"']);
     let exe = token.rsplit(['/', '\\']).next().unwrap_or(token);
-    let exe_clean = exe.strip_suffix(".exe").unwrap_or(exe);
+    let lowered = exe.to_ascii_lowercase();
+    let exe_clean = lowered.strip_suffix(".exe").unwrap_or(lowered.as_str());
     SAFE_PIPE_CONSUMERS.contains(&exe_clean)
 }
 

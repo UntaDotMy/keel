@@ -837,6 +837,15 @@ fn no_hardcoded_tool_or_gate_literals_in_hook_lifecycle() {
                 "const MEMORY_GATE_ENV_VAR",
                 "const LEARNED_SKILL_GATE_ENV_VAR",
                 "const IRON_LAW_SATISFIED_DIR",
+                // Literal marker paths drift the same way: two modules that
+                // spell `review-gate` themselves part ways on the first rename.
+                "\"iron-law-satisfied\"",
+                "\"iron-law-gate\"",
+                "\"review-gate\"",
+                "\"review-gate-blocks\"",
+                "\"brief-gate\"",
+                "\"completeness-gate\"",
+                "\"completeness-gate-blocks\"",
             ] {
                 assert!(
                     !content.contains(forbidden),

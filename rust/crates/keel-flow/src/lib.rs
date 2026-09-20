@@ -361,17 +361,7 @@ fn raw_workspace_identity(repository_root: &Path) -> String {
 }
 
 fn normalized_workspace_path(repository_root: &Path) -> String {
-    let cleaned = clean_path(repository_root).to_string_lossy().to_string();
-    #[cfg(windows)]
-    {
-        if let Some(rest) = cleaned.strip_prefix(r"\\?\UNC\") {
-            return format!(r"\\{rest}");
-        }
-        if let Some(rest) = cleaned.strip_prefix(r"\\?\") {
-            return rest.to_string();
-        }
-    }
-    cleaned
+    keel_platform::strip_verbatim_prefix(&clean_path(repository_root).to_string_lossy())
 }
 
 #[cfg(windows)]

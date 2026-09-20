@@ -568,40 +568,16 @@ pub(crate) fn strip_keel_run_wrapper(command: &str) -> Option<&str> {
     None
 }
 
-/// Whether a shell command is a keel research/read surface (not install/mutate).
-pub(crate) fn is_keel_research_command(command: &str) -> bool {
-    let trimmed = command.trim().to_ascii_lowercase();
-    if trimmed.is_empty() {
+/// Whether one already-tokenized segment is a keel research invocation.
+fn segment_is_keel_research(words: &[String]) -> bool {
+    if words.is_empty() {
         return false;
     }
-    // Reject compound commands that could smuggle unsafe tails;
-    // only standalone invocations or safe pipelines clear.
-    if trimmed.contains("&&")
-        || trimmed.contains("||")
-        || trimmed.contains(';')
-        || trimmed.contains('`')
-        || trimmed.contains("$(")
-        || trimmed.contains('\n')
-        || trimmed.contains('>')
-        || trimmed.contains('<')
-    {
-        return false;
-    }
-
-    // Research / orientation subcommands that clear the edit gate. Kept in lockstep
-    const HITS: &[&str] = crate::runner::tool_names::KEEL_RESEARCH_SUBCOMMANDS;
-
-    let stages: Vec<&str> = trimmed.split('|').map(str::trim).collect();
-    if stages.is_empty() {
-        return false;
-    }
-
-    // First stage must be a valid keel research invocation
-    let first_stage = stages[0];
-    let body = first_stage
+    let rendered = words.join(" ").to_ascii_lowercase();
+    let body = rendered
         .strip_prefix("keel run -- ")
-        .or_else(|| first_stage.strip_prefix("keel.exe run -- "))
-        .unwrap_or(first_stage);
+        .or_else(|| rendered.strip_prefix("keel.exe run -- "))
+        .unwrap_or(rendered.as_str());
     let has_keel = body.starts_with("keel ")
         || body.starts_with("keel.exe ")
         || body.contains("\\keel.exe ")
@@ -610,18 +586,42 @@ pub(crate) fn is_keel_research_command(command: &str) -> bool {
     if !has_keel {
         return false;
     }
-    if !HITS.iter().any(|h| body.contains(h)) {
+    // Research / orientation subcommands that clear the edit gate. Kept in lockstep
+    const HITS: &[&str] = crate::runner::tool_names::KEEL_RESEARCH_SUBCOMMANDS;
+    HITS.iter().any(|hit| body.contains(hit))
+}
+
+/// Whether a shell command is a keel research/read surface (not install/mutate).
+///
+/// Compound commands clear the gate only when at least one segment is a keel
+/// research invocation and every other segment is a safe stream consumer, so
+/// `git status && keel recall` stays denied while `keel recall; keel doctor` and
+/// `keel system-map | head` are allowed. Substitution, subshells, and
+/// redirection always fail closed: their payload is not a segment and cannot be
+/// classified.
+pub(crate) fn is_keel_research_command(command: &str) -> bool {
+    let trimmed = command.trim();
+    if trimmed.is_empty() {
         return false;
     }
-
-    // Any downstream stages in the pipeline must be safe stream consumers
-    for stage in &stages[1..] {
-        if !crate::runner::tool_names::is_safe_pipe_consumer(stage) {
+    let (words, operators) = crate::runner::shell_rewrite::shell_words_and_operators(trimmed);
+    if operators
+        .iter()
+        .any(|operator| matches!(operator.as_str(), "<" | ">" | ">>" | "`" | "(" | ")"))
+    {
+        return false;
+    }
+    let mut research_seen = false;
+    for segment in crate::runner::shell_rewrite::segments_from_words(&words) {
+        if segment_is_keel_research(&segment) {
+            research_seen = true;
+            continue;
+        }
+        if !crate::runner::tool_names::is_safe_pipe_consumer(&segment.join(" ")) {
             return false;
         }
     }
-
-    true
+    research_seen
 }
 
 pub(crate) fn is_host_shell_tool_name(tool_name: &str) -> bool {

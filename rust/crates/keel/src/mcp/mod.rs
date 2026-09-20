@@ -917,18 +917,23 @@ fn serve_stdio_owned_stdin(standard_output: &mut dyn Write, standard_error: &mut
         return 1;
     }
 
-    // Active parent watchdog: monitor parent PID so orphaned servers
-    // self-reap within seconds if the harness crashes or exits.
-    if let Some(parent) = ParentWatch::capture() {
-        let _ = thread::Builder::new()
-            .name("keel-mcp-watchdog".into())
-            .spawn(move || loop {
+    // Active parent watchdog: a failed startup probe is retried rather than
+    // disabling the watchdog, which is how an orphan survives `doctor --fix`.
+    let _ = thread::Builder::new()
+        .name("keel-mcp-watchdog".into())
+        .spawn(move || {
+            let mut parent = ParentWatch::capture();
+            loop {
                 thread::sleep(std::time::Duration::from_secs(3));
-                if !parent.alive() {
+                if parent.is_none() {
+                    parent = ParentWatch::capture();
+                    continue;
+                }
+                if !parent.as_ref().map(ParentWatch::alive).unwrap_or(true) {
                     std::process::exit(0);
                 }
-            });
-    }
+            }
+        });
 
     run_serve_event_loop(
         event_tx,
@@ -1850,14 +1855,17 @@ pub(super) fn dispatch_cancellable_with_context(
         ));
     }
 
-    let requires_modern_meta = method == "server/discover"
-        || request_context.wire_era() == WireEra::Modern
-        || params
-            .get("_meta")
-            .and_then(Value::as_object)
-            .is_some_and(|m| m.contains_key(MCP_PROTOCOL_META));
-    if requires_modern_meta {
-        if let Err(response) = validate_request_metadata(&params, &request_id) {
+    // Modern requests (server/discover, post-discover) must carry a complete
+    // `_meta` claim; classic paths validate only what the client claims.
+    let strict_meta = method == "server/discover" || request_context.wire_era() == WireEra::Modern;
+    let attached_meta = params.get("_meta").and_then(Value::as_object).is_some();
+    if strict_meta || attached_meta {
+        let requirement = if strict_meta {
+            MetaRequirement::Required
+        } else {
+            MetaRequirement::ClaimedOnly
+        };
+        if let Err(response) = validate_request_metadata(&params, &request_id, requirement) {
             return Some(response);
         }
     }
@@ -1994,36 +2002,65 @@ fn handle_method_cancellable(
     }
 }
 
-pub(super) fn validate_request_metadata(params: &Value, id: &Value) -> Result<(), Value> {
+/// How strictly one request's `_meta` claim is validated.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum MetaRequirement {
+    /// Modern claims (`server/discover` and post-discover requests): `_meta` and
+    /// every declared field must be complete.
+    Required,
+    /// Classic path that still attached `_meta`: validate the declared fields
+    /// only, so a missing or empty protocolVersion stays a classic request
+    /// instead of failing the call.
+    ClaimedOnly,
+}
+
+pub(super) fn validate_request_metadata(
+    params: &Value,
+    id: &Value,
+    requirement: MetaRequirement,
+) -> Result<(), Value> {
     // Modern `_meta` gate order (Architect tip):
-    // 1) missing _meta → -32602
-    // 2) bad/empty protocolVersion → -32602
+    // 1) missing _meta → -32602 (Required only)
+    // 2) bad/empty protocolVersion → -32602 (Required) or classic soft-default
     // 3) unsupported → -32022 with data.supported+requested
-    // 4) clientCapabilities not object → -32602
+    // 4) clientCapabilities malformed, or missing while Required → -32602
     // 5) clientInfo if present must have string name+version
     let invalid = |message: &str| error_response(id.clone(), JSON_RPC_INVALID_PARAMS, message);
-    let meta = params
-        .get("_meta")
-        .and_then(Value::as_object)
-        .ok_or_else(|| invalid("params._meta is required"))?;
-    let version = match meta.get(MCP_PROTOCOL_META).and_then(Value::as_str) {
-        Some(version) if !version.is_empty() => version,
-        Some(_) | None => {
+    let meta = match params.get("_meta").and_then(Value::as_object) {
+        Some(meta) => meta,
+        None if requirement == MetaRequirement::Required => {
+            return Err(invalid("params._meta is required"));
+        }
+        None => return Ok(()),
+    };
+    let claimed_version = meta
+        .get(MCP_PROTOCOL_META)
+        .and_then(Value::as_str)
+        .filter(|version| !version.is_empty());
+    match claimed_version {
+        Some(version) if version != MCP_PROTOCOL_VERSION => {
+            return Err(unsupported_version_response(id.clone(), version));
+        }
+        Some(_) => {}
+        None if requirement == MetaRequirement::Required => {
             return Err(invalid(
                 "_meta.io.modelcontextprotocol/protocolVersion must be a non-empty string",
             ));
         }
-    };
-    if version != MCP_PROTOCOL_VERSION {
-        return Err(unsupported_version_response(id.clone(), version));
+        None => return Ok(()),
     }
-    if !meta
-        .get(MCP_CAPABILITIES_META)
-        .is_some_and(Value::is_object)
-    {
-        return Err(invalid(
-            "_meta.io.modelcontextprotocol/clientCapabilities must be an object",
-        ));
+    match meta.get(MCP_CAPABILITIES_META) {
+        Some(capabilities) if !capabilities.is_object() => {
+            return Err(invalid(
+                "_meta.io.modelcontextprotocol/clientCapabilities must be an object",
+            ));
+        }
+        None if requirement == MetaRequirement::Required => {
+            return Err(invalid(
+                "_meta.io.modelcontextprotocol/clientCapabilities must be an object",
+            ));
+        }
+        _ => {}
     }
     if let Some(info) = meta.get("io.modelcontextprotocol/clientInfo") {
         if !info.is_object()

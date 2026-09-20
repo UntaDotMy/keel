@@ -435,38 +435,43 @@ pub fn analyze_command_text(command: &str) -> CommandAnalysis {
 fn split_shell_segments(command: &str) -> Vec<Vec<String>> {
     let (words, operators) = shell_words_and_operators(command);
 
-    if words.is_empty() {
-        return Vec::new();
+    let segments = segments_from_words(&words);
+
+    if segments.is_empty()
+        && !operators.is_empty()
+        && !words.iter().any(|word| is_shell_separator_token(word))
+    {
+        return vec![Vec::new()];
     }
 
+    segments
+}
+
+/// Split tokenized shell words into segments at separator tokens.
+///
+/// Shared with the Iron Law research gate so command segmentation has exactly
+/// one owner across the rewriter and the gate.
+pub(crate) fn segments_from_words(words: &[String]) -> Vec<Vec<String>> {
     let mut segments = Vec::new();
 
     let mut current = Vec::new();
 
-    let mut operator_index = 0usize;
-
     for word in words {
-        if is_shell_separator_token(&word) {
+        if is_shell_separator_token(word) {
             if !current.is_empty() {
                 segments.push(current);
 
                 current = Vec::new();
             }
 
-            operator_index += 1;
-
             continue;
         }
 
-        current.push(word);
+        current.push(word.clone());
     }
 
     if !current.is_empty() {
         segments.push(current);
-    }
-
-    if segments.is_empty() && !operators.is_empty() && operator_index == 0 {
-        segments.push(Vec::new());
     }
 
     segments

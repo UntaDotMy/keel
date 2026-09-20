@@ -3913,25 +3913,22 @@ fn tool_skill_get(arguments: &Value) -> Result<String, String> {
     }
 
     if requested_level == Some(1) {
-        let Some((path, body, raw_tokens, visible_tokens, truncated)) =
+        let Some((path, body, _raw_tokens, visible_tokens, truncated)) =
             skill_core_projection(&claude_home, &name)
         else {
             return Err(format!(
                 "skill_get: no readable skill core for {name:?} (or name is unsafe)"
             ));
         };
-        return mcp_json_compact(&json!({
-            "name": name,
-            "path": display_path(&path),
-            "level": 1,
-            "body": body,
-            "rawTokens": raw_tokens,
-            "visibleTokens": visible_tokens,
-            "budgetTokens": SKILL_S1_HARD_TOKENS,
-            "truncated": truncated,
-            "next": "Request level 2 with one resource path when a referenced file is required.",
-        }))
-        .map_err(|error| format!("skill_get: {error}"));
+        return Ok(render_skill_text(
+            &name,
+            &display_path(&path),
+            &format!(
+                "level: 1 | tokens: {visible_tokens}/{SKILL_S1_HARD_TOKENS} | truncated: {truncated}"
+            ),
+            &["next: Request level 2 with one resource path when a referenced file is required."],
+            &body,
+        ));
     }
 
     if requested_level == Some(2) {
@@ -3946,48 +3943,61 @@ fn tool_skill_get(arguments: &Value) -> Result<String, String> {
                     .to_string(),
             );
         }
-        let (path, body, raw_tokens, visible_tokens, truncated) =
+        let (path, body, _raw_tokens, visible_tokens, truncated) =
             skill_resource_projection(&claude_home, &name, resource)?;
-        return mcp_json_compact(&json!({
-            "name": name,
-            "path": display_path(&path),
-            "resource": resource,
-            "level": 2,
-            "body": body,
-            "rawTokens": raw_tokens,
-            "visibleTokens": visible_tokens,
-            "budgetTokens": SKILL_S2_HARD_TOKENS,
-            "truncated": truncated,
-        }))
-        .map_err(|error| format!("skill_get: {error}"));
+        return Ok(render_skill_text(
+            &name,
+            &display_path(&path),
+            &format!(
+                "resource: {resource} | level: 2 | tokens: {visible_tokens}/{SKILL_S2_HARD_TOKENS} | truncated: {truncated}"
+            ),
+            &[],
+            &body,
+        ));
     }
 
     // Omitted level preserves the bounded complete SKILL.md compatibility path;
     // new clients should use S0/S1/S2 to avoid loading unrelated references.
     match skill_full_body(&claude_home, &name) {
         Some((path, body)) => {
-            // Compact JSON (not pretty): pretty multi-line inner payloads inflate
-            // the outer tools/call frame and have triggered host transport decode
-            // failures that surface as 120s MCP tool timeouts.
             let body_chars = body.chars().count();
             let (body_out, truncated) = truncate_chars(&body, MAX_SKILL_BODY_CHARS);
             let body_tokens = crate::proxy::token_meter::TokenMeter::count_text(&body_out);
-            let payload = json!({
-                "name": name,
-                "path": display_path(&path),
-                "level": 1,
-                "body": body_out,
-                "bodyChars": body_chars,
-                "bodyTokens": body_tokens,
-                "budgetTokens": SKILL_S1_HARD_TOKENS,
-                "truncated": truncated,
-            });
-            mcp_json_compact(&payload).map_err(|error| format!("skill_get: {error}"))
+            Ok(render_skill_text(
+                &name,
+                &display_path(&path),
+                &format!(
+                    "level: 1 | chars: {body_chars} | tokens: {body_tokens}/{SKILL_S1_HARD_TOKENS} | truncated: {truncated}"
+                ),
+                &[],
+                &body_out,
+            ))
         }
         None => Err(format!(
             "skill_get: no installed skill named {name:?} (or name is unsafe)"
         )),
     }
+}
+
+/// Render a skill payload as text the host can display verbatim.
+///
+/// Skill bodies are markdown the agent follows, so the text keeps real newlines
+/// and carries its structured facts in the header lines; JSON-encoding the body
+/// escaped every newline and made host transcripts unreadable.
+fn render_skill_text(name: &str, path: &str, facts: &str, notes: &[&str], body: &str) -> String {
+    let mut text = String::new();
+    text.push_str(&format!("skill: {name}\n"));
+    text.push_str(&format!("path: {path}\n"));
+    text.push_str(facts);
+    text.push('\n');
+    for note in notes {
+        text.push_str(note);
+        text.push('\n');
+    }
+    text.push('\n');
+    text.push_str(body.trim_end_matches(['\n', '\r']));
+    text.push('\n');
+    text
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

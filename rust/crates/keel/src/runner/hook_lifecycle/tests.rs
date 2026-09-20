@@ -1224,6 +1224,21 @@ fn iron_law_research_command_rejects_bypass_and_non_research_surfaces() {
         "keel memory recall foo | tee out"
     ));
     assert!(!is_keel_research_command("keel recall $(whoami)"));
+    // Keel-only compounds and filtered reads clear the gate.
+    assert!(is_keel_research_command(
+        "keel memory system-map; keel doctor"
+    ));
+    assert!(is_keel_research_command(
+        "keel doctor && keel memory recall foo"
+    ));
+    assert!(is_keel_research_command(
+        "keel memory system-map | Select-Object -First 20"
+    ));
+    // A non-keel segment stays gated, and redirection always fails closed.
+    assert!(!is_keel_research_command(
+        "git status && keel memory recall foo"
+    ));
+    assert!(!is_keel_research_command("keel recall foo > out.txt"));
     // Non-research keel surfaces no longer clear the edit gate.
     assert!(!is_keel_research_command("keel help"));
     assert!(!is_keel_research_command("keel status"));

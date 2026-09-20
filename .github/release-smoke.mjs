@@ -413,15 +413,20 @@ async function runSmoke(options) {
 
     const activatedSkill = await recordCheck(checks, "skill-activation-get", async () => {
       const result = await callTool(session, "skill_get", { name: route.skill, level: 1 });
-      const { value } = parseToolJson(result, "skill_get");
+      // Skill text is human-readable with real newlines and a `key: value` header:
+      // hosts render raw tool text, so JSON-encoded bodies showed literal `\n`.
+      const text = requireToolText(result, "skill_get");
       const context = requireBoundedContext(result, "skill_get");
-      if (value.name !== route.skill || value.level !== 1 || typeof value.body !== "string" || value.body.length === 0) {
-        throw new Error(`skill_get did not return an activated skill body: ${JSON.stringify(value)}`);
+      const budget = /tokens: (\d+)\/(\d+)/.exec(text);
+      const separator = text.indexOf("\n\n");
+      const body = separator >= 0 ? text.slice(separator + 2).trim() : "";
+      if (!text.startsWith(`skill: ${route.skill}\n`) || !text.includes("level: 1") || body.length === 0) {
+        throw new Error(`skill_get did not return an activated skill body: ${text.slice(0, 200)}`);
       }
-      if (Number(value.visibleTokens) > Number(value.budgetTokens)) {
-        throw new Error(`skill_get body exceeded its own budget: ${JSON.stringify(value)}`);
+      if (!budget || Number(budget[1]) > Number(budget[2])) {
+        throw new Error(`skill_get body exceeded its own budget: ${text.slice(0, 200)}`);
       }
-      return { ...context, skill: value.name, visibleSkillTokens: value.visibleTokens };
+      return { ...context, skill: route.skill, visibleSkillTokens: Number(budget[1]) };
     });
 
     await recordCheck(checks, "memory-status", async () => {

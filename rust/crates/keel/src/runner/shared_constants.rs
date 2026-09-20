@@ -46,6 +46,13 @@ pub const BRIEF_GATE_DIR: &str = "brief-gate";
 pub const COMPLETENESS_GATE_DIR: &str = "completeness-gate";
 pub const SESSION_STARTED_DIR_SUFFIX: &str = "-session-started";
 
+/// Suffix that turns a gate directory into its block-counter directory.
+pub const GATE_BLOCKS_SUFFIX: &str = "-blocks";
+/// Per-gate block-counter directories. Must stay the gate dir plus the suffix;
+/// the unit test at the bottom of this file pins that derivation.
+pub const REVIEW_GATE_BLOCKS_DIR: &str = "review-gate-blocks";
+pub const COMPLETENESS_GATE_BLOCKS_DIR: &str = "completeness-gate-blocks";
+
 pub const REVIEWED_EXT: &str = ".reviewed";
 pub const BRIEFED_EXT: &str = ".briefed";
 pub const SCANNED_EXT: &str = ".scanned";
@@ -64,3 +71,20 @@ pub const TIMINGS_DEFAULT_RETENTION_DAYS: u64 = 30;
 pub const OBSERVATION_DEFAULT_RETENTION_DAYS: u64 = 30;
 pub const SYSTEM_MAP_REFRESH_DEFAULT_THRESHOLD: u64 = 10;
 pub const MANAGED_PRE_TOOL_USE_EVENT: &str = "PreToolUse";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn block_counter_dirs_derive_from_their_gate_dirs() {
+        assert_eq!(
+            REVIEW_GATE_BLOCKS_DIR,
+            format!("{REVIEW_GATE_DIR}{GATE_BLOCKS_SUFFIX}")
+        );
+        assert_eq!(
+            COMPLETENESS_GATE_BLOCKS_DIR,
+            format!("{COMPLETENESS_GATE_DIR}{GATE_BLOCKS_SUFFIX}")
+        );
+    }
+}

@@ -368,62 +368,66 @@ export function isKeelReadingCommand(command: string): boolean {
   const trimmed = command.trim();
   if (!trimmed) return false;
 
-  // Split on unquoted pipes to inspect pipeline stages
-  const stages: string[] = [];
-  let currentStage = "";
+  // Split on unquoted separators: a compound command clears the gate only when
+  // one segment is keel research and every other is a safe stream consumer.
+  const segments: string[] = [];
+  let current = "";
   let quote = "";
   for (let i = 0; i < trimmed.length; i += 1) {
     const ch = trimmed[i];
     if (quote) {
       if (ch === quote) quote = "";
-      currentStage += ch;
+      current += ch;
       continue;
     }
     if (ch === "'" || ch === "\"") {
       quote = ch;
-      currentStage += ch;
+      current += ch;
       continue;
     }
-    if (
-      ch === ";" ||
-      ch === "`" ||
-      ch === "\n" ||
-      (ch === "$" && trimmed[i + 1] === "(") ||
-      (ch === "&" && trimmed[i + 1] === "&")
-    ) {
+    if (ch === "`" || ch === ">" || ch === "<" || ch === "(" || ch === ")") {
       return false;
     }
-    if (ch === "|") {
-      stages.push(currentStage.trim());
-      currentStage = "";
+    if (ch === "$" && trimmed[i + 1] === "(") return false;
+    if (ch === "|" || ch === ";" || ch === "&" || ch === "\n") {
+      if (current.trim()) segments.push(current.trim());
+      current = "";
+      if ((ch === "&" || ch === "|") && trimmed[i + 1] === ch) i += 1;
       continue;
     }
-    currentStage += ch;
+    current += ch;
   }
   if (quote) return false;
-  if (currentStage.trim()) stages.push(currentStage.trim());
+  if (current.trim()) segments.push(current.trim());
+  if (segments.length === 0) return false;
 
-  if (stages.length === 0) return false;
-
-  let firstWords = shellCommandWords(stages[0].toLowerCase());
-  if (firstWords.length >= 3 && isKeelExecutable(firstWords[0]) && firstWords[1] === "run" && firstWords[2] === "--") {
-    firstWords = firstWords.slice(3);
-  }
-  if (firstWords.length < 2 || !firstWords[0] || !isKeelExecutable(firstWords[0])) return false;
-  const subcommand = firstWords.slice(1).join(" ");
-  const isFirstStageReading = KEEL_RESEARCH_SUBCOMMANDS.some(
-    (hit) => subcommand === hit || subcommand.startsWith(`${hit} `),
-  );
-  if (!isFirstStageReading) return false;
-
-  for (let i = 1; i < stages.length; i += 1) {
-    const words = shellCommandWords(stages[i].toLowerCase());
+  let researchSeen = false;
+  for (const segment of segments) {
+    const words = shellCommandWords(segment.toLowerCase());
     if (words.length === 0) return false;
-    const consumer = words[0];
-    if (!SAFE_PIPE_CONSUMERS.has(consumer)) return false;
+    let firstWords = words;
+    if (
+      firstWords.length >= 3 &&
+      isKeelExecutable(firstWords[0]) &&
+      firstWords[1] === "run" &&
+      firstWords[2] === "--"
+    ) {
+      firstWords = firstWords.slice(3);
+    }
+    if (firstWords.length >= 2 && isKeelExecutable(firstWords[0])) {
+      const subcommand = firstWords.slice(1).join(" ");
+      const isReading = KEEL_RESEARCH_SUBCOMMANDS.some(
+        (hit) => subcommand === hit || subcommand.startsWith(`${hit} `),
+      );
+      if (isReading) {
+        researchSeen = true;
+        continue;
+      }
+    }
+    if (!SAFE_PIPE_CONSUMERS.has(words[0])) return false;
   }
 
-  return true;
+  return researchSeen;
 }
 
 export type GateResponse = "allow" | "deny" | "escalate" | "warn" | "unknown";

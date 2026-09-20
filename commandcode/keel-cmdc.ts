@@ -174,6 +174,13 @@ export default function keelCmdcMod(cmd: ModApi): void {
     // keep it for appendSystemPrompt injection.
     onSessionStart: async ({ source }, ctx) => {
       void source;
+      // The pre-run fallback key is shared by every session in the workspace;
+      // clear both keys so a stale marker cannot pre-satisfy this session.
+      clearIronLawMarker(sessionIdFor(cmd.cwd));
+      const workspaceKey = sanitizeSessionKey(cmd.cwd);
+      if (workspaceKey && workspaceKey !== "workspace") {
+        clearIronLawMarker(`cmdc-${workspaceKey}`);
+      }
       if (hasSessionStarted(ctx, cmd.cwd)) return;
       const contract = runBridge(
         "session-start",
