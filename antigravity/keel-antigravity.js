@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 
 // keel:managed-host-file (remove this line before customizing to opt out of upgrades)
+// why: Antigravity exports no variable keel recognises, so the adapter declares its own host.
+process.env.KEEL_HOST_SIGNAL = process.env.KEEL_HOST_SIGNAL || "antigravity";
 // Keel Antigravity hook adapter translates payloads to bridge commands and gate results.
 
 import { execFileSync } from "node:child_process";

@@ -392,11 +392,13 @@ fn with_flag_wires_zcode_native_surfaces() {
                 .join(" ")
         })
         .collect::<Vec<_>>();
-    assert!(stop_commands.iter().any(|command| command == "hook stop"));
+    assert!(stop_commands
+        .iter()
+        .any(|command| command == "hook stop --host zcode"));
     assert!(
         stop_commands
             .iter()
-            .any(|command| command == "hook session-end"),
+            .any(|command| command == "hook session-end --host zcode"),
         "ZCode has no SessionEnd event, so Stop must also run learning/session capture"
     );
     let _ = fs::remove_dir_all(&home);

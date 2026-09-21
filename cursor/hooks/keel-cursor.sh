@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # keel:managed-host-file (remove this line before customizing to opt out of upgrades)
+# why: Cursor exports no variable keel recognises, so the adapter declares its own host.
+export KEEL_HOST_SIGNAL="${KEEL_HOST_SIGNAL:-cursor}"
 # ---------------------------------------------------------------------------
 # keel Cursor adapter — bridges Cursor hook events to `keel bridge`.
 #

@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 
 // keel:managed-host-file (remove this line before customizing to opt out of upgrades)
+// why: Pi exports no variable keel recognises, so the adapter declares its own host.
+process.env.KEEL_HOST_SIGNAL = process.env.KEEL_HOST_SIGNAL || "pi";
 // ---------------------------------------------------------------------------
 // keel Pi Agent Extension — bridges Pi lifecycle events to `keel bridge`.
 //

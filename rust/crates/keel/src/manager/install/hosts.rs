@@ -857,6 +857,7 @@ pub(crate) fn maybe_wire_omp(
                 "sessionMarkerDirectory(\"pi\")",
                 "sessionMarkerDirectory(\"omp\")",
             )
+            .replace("KEEL_HOST_SIGNAL || \"pi\"", "KEEL_HOST_SIGNAL || \"omp\"")
         }) {
             Err(error) => status_parts.push(format!("extension skipped ({error})")),
             Ok(desired) => {

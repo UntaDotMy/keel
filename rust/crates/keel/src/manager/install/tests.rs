@@ -13,6 +13,42 @@ fn read_file(path: &Path) -> String {
     fs::read_to_string(path).unwrap()
 }
 
+/// Every claimed host that exports no variable keel recognises must declare the
+/// marker in the adapter keel installs for it. Otherwise that host captures
+/// nothing and says nothing about it, which is how Command Code stayed silent.
+#[test]
+fn hosts_without_a_runtime_signal_declare_the_marker() {
+    use crate::proxy::execution::HostCapabilities;
+
+    let repository_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let adapters = [
+        ("cursor", "cursor/hooks/keel-cursor.sh"),
+        ("pi", "pi/keel-pi.ts"),
+        ("antigravity", "antigravity/keel-antigravity.js"),
+    ];
+    for (host, relative) in adapters {
+        let entry = HostCapabilities::HOST_CAPTURE_SIGNALS
+            .iter()
+            .find(|(name, _)| *name == host)
+            .expect("host is claimed");
+        assert!(
+            entry.1.is_empty(),
+            "{host} carries a variable, so the marker is not what covers it"
+        );
+        let text = read_file(&repository_root.join(relative));
+        assert!(
+            text.lines()
+                .any(|line| line.contains("KEEL_HOST_SIGNAL") && line.contains(host)),
+            "{host} declares no host marker in {relative}"
+        );
+    }
+
+    // OMP installs the Pi extension with the host rewritten, so the marker must
+    // be rewritten too or OMP sessions report themselves as Pi.
+    let pi = read_file(&repository_root.join("pi").join("keel-pi.ts"));
+    assert!(pi.contains("KEEL_HOST_SIGNAL || \"pi\""));
+}
+
 #[test]
 fn merge_json_mcp_opencode_preserves_existing_keys_and_adds_keel() {
     let dir = std::env::temp_dir().join(format!("ulw-mcp-merge-{}", std::process::id()));
