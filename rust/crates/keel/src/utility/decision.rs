@@ -2728,10 +2728,19 @@ pub fn handle_decision_tool(arguments: &Value) -> Result<String, String> {
                 None => {
                     // why: every corpus trains, so no class is left with zero
                     // evidence; each site's page one stays held out for scoring.
-                    let fetched = crate::utility::decision_benchmark::fetch_all_corpora(
+                    let mut fetched = crate::utility::decision_benchmark::fetch_all_corpora(
                         per_tag, pages,
                     )
                     .map_err(|error| format!("decision train-lexical: {error}"))?;
+                    // why: rows already fetched stay in the corpus even when a
+                    // provider is rate-limited and cannot serve them again.
+                    if let Some(existing) =
+                        crate::utility::decision_benchmark::read_external_cache(&corpus)
+                    {
+                        fetched.extend(existing);
+                        fetched.sort_by(|left, right| left.0.cmp(&right.0));
+                        fetched.dedup_by(|left, right| left.0 == right.0);
+                    }
                     let _ = crate::utility::decision_benchmark::write_external_cache(
                         &corpus, &fetched,
                     );

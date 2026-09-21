@@ -387,6 +387,8 @@ pub fn fetch_external_site(
 
 const CRATES_ENDPOINT: &str = "https://crates.io/api/v1/crates";
 const CRATES_USER_AGENT: &str = "keel-benchmark/0.1 (evaluation harness)";
+/// Pages fetched for training. Page one is reserved as the evaluation shell.
+const CRATES_TRAINING_PAGES: usize = 10;
 
 /// crates.io categories are a controlled vocabulary as well, on a second provider
 /// with a different noise profile: one-line crate descriptions instead of
@@ -463,9 +465,12 @@ pub fn fetch_all_corpora(
             Err(error) => failures.push(format!("{site}: {error}")),
         }
     }
-    match fetch_crates_categories(per_tag, 1) {
-        Ok(fetched) => rows.extend(fetched),
-        Err(error) => failures.push(format!("crates: {error}")),
+    // why: pages two and up train while page one stays the evaluation shell.
+    for page in 2..=CRATES_TRAINING_PAGES {
+        match fetch_crates_categories(per_tag, page) {
+            Ok(fetched) => rows.extend(fetched),
+            Err(error) => failures.push(format!("crates page {page}: {error}")),
+        }
     }
     if rows.is_empty() {
         return Err(failures.join("; "));
