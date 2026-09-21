@@ -1,8 +1,8 @@
-//! Purpose: Offline-fit calibration experts over the labeled decision samples.
+//! Purpose: Offline-fit calibration experts over the labeled decision samples, sealed against tampering.
 //! Caller: the decision `train` and `model` actions; the compute-backend profile names where this math may run.
-//! Dependencies: serde, std::fs, utility::decision_samples.
+//! Dependencies: serde, std::fs, utility::decision_samples, utility::hashing.
 //! Main Functions: fit_surface_experts, predict_surface, train_decision_model, load_decision_model.
-//! Side Effects: Reads the sample corpus and writes <keel-home>/state/decision-model.json.
+//! Side Effects: Reads the sample corpus and writes the model, its per-home key, and its seal under <keel-home>/state/.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -10,6 +10,10 @@ use std::path::{Path, PathBuf};
 
 /// Stored model file name under the keel state directory.
 pub const DECISION_MODEL_FILE: &str = "decision-model.json";
+/// The seal bound to this home's key; a model without it never loads.
+const DECISION_MODEL_SEAL_FILE: &str = "decision-model.seal";
+/// The per-home key the seal is bound to.
+const DECISION_MODEL_KEY_FILE: &str = "decision-model.key";
 
 /// One surface's expert: Platt scaling over the signal's logit, so the raw
 /// signal is the starting point and the fit learns a monotone correction.
@@ -167,19 +171,69 @@ pub fn save_decision_model(claude_home: &Path, model: &DecisionModel) -> Result<
     }
     let text = serde_json::to_string_pretty(model)
         .map_err(|e| format!("serialize decision model: {e}"))?;
-    fs::write(&path, text).map_err(|e| format!("write decision model: {e}"))
+    fs::write(&path, &text).map_err(|e| format!("write decision model: {e}"))?;
+    let key = decision_model_key(claude_home)?;
+    fs::write(
+        decision_model_seal_file(claude_home),
+        model_seal(&key, &text),
+    )
+    .map_err(|e| format!("write decision model seal: {e}"))
 }
 
-/// The persisted model, or `None` before the first train (or on a bad file).
+/// The persisted model, or `None` when it is missing, unreadable, or fails its
+/// seal. Sealing is tamper evidence plus a home binding, not secrecy: the key
+/// lives beside the model, so it stops drift and copying, not a local reader.
 pub fn load_decision_model(claude_home: &Path) -> Option<DecisionModel> {
-    let path = decision_model_file(claude_home);
-    let Ok(text) = fs::read_to_string(&path) else {
+    let Ok(text) = fs::read_to_string(decision_model_file(claude_home)) else {
         return None;
     };
+    let Ok(seal) = fs::read_to_string(decision_model_seal_file(claude_home)) else {
+        return None;
+    };
+    let Ok(key) = fs::read_to_string(decision_model_key_file(claude_home)) else {
+        return None;
+    };
+    if model_seal(key.trim(), &text) != seal.trim() {
+        return None;
+    }
     let Ok(model) = serde_json::from_str::<DecisionModel>(&text) else {
         return None;
     };
     Some(model)
+}
+
+fn decision_model_seal_file(claude_home: &Path) -> PathBuf {
+    crate::runtime::state_directory(claude_home).join(DECISION_MODEL_SEAL_FILE)
+}
+
+fn decision_model_key_file(claude_home: &Path) -> PathBuf {
+    crate::runtime::state_directory(claude_home).join(DECISION_MODEL_KEY_FILE)
+}
+
+/// The per-home key: created on the first save, so a model file copied to
+/// another home has no matching key and never verifies there.
+fn decision_model_key(claude_home: &Path) -> Result<String, String> {
+    let path = decision_model_key_file(claude_home);
+    if let Ok(existing) = fs::read_to_string(&path) {
+        if !existing.trim().is_empty() {
+            return Ok(existing.trim().to_string());
+        }
+    }
+    let entropy = format!(
+        "{}-{}-{}",
+        now_ms(),
+        std::process::id(),
+        claude_home.display()
+    );
+    let key = crate::utility::hashing::sha256_hex(entropy.as_bytes());
+    fs::write(&path, &key).map_err(|e| format!("write decision model key: {e}"))?;
+    Ok(key)
+}
+
+/// Keyed digest over the exact stored bytes plus a version tag, so a seal can
+/// never be replayed from another artifact shape.
+fn model_seal(key: &str, text: &str) -> String {
+    crate::utility::hashing::sha256_hex(format!("keel-decision-model-v1\n{key}\n{text}").as_bytes())
 }
 
 #[cfg(test)]
@@ -243,5 +297,43 @@ mod tests {
         let loaded = load_decision_model(&home).expect("model file");
         assert_eq!(loaded.trained_at_ms, model.trained_at_ms);
         let _ = fs::remove_dir_all(&home);
+    }
+
+    /// Red team: a tampered model, a missing seal, and a model copied to a home
+    /// that does not hold its key must all fail closed.
+    #[test]
+    fn a_tampered_or_copied_model_fails_closed() {
+        let home = std::env::temp_dir().join(format!("keel-decision-seal-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&home);
+        let model = train_decision_model(&home, 30);
+        save_decision_model(&home, &model).expect("save model");
+        assert!(load_decision_model(&home).is_some());
+
+        let path = decision_model_file(&home);
+        let text = fs::read_to_string(&path).expect("read model");
+        fs::write(&path, format!("{text} ")).expect("tamper");
+        assert!(
+            load_decision_model(&home).is_none(),
+            "a tampered model must not load"
+        );
+        save_decision_model(&home, &model).expect("re-save");
+        assert!(load_decision_model(&home).is_some());
+
+        let copied =
+            std::env::temp_dir().join(format!("keel-decision-copy-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&copied);
+        fs::create_dir_all(crate::runtime::state_directory(&copied)).expect("copy home");
+        fs::copy(&path, decision_model_file(&copied)).expect("copy model");
+        fs::copy(
+            decision_model_seal_file(&home),
+            decision_model_seal_file(&copied),
+        )
+        .expect("copy seal");
+        assert!(
+            load_decision_model(&copied).is_none(),
+            "a copied model must not verify without its key"
+        );
+        let _ = fs::remove_dir_all(&home);
+        let _ = fs::remove_dir_all(&copied);
     }
 }
