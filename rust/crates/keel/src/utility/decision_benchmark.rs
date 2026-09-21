@@ -252,20 +252,54 @@ pub const EXTERNAL_TAGS: &[(&str, &str)] = &[
     ("kubernetes", "cloud-and-devops-expert"),
 ];
 
+/// Ops-domain corpus: the same API on another site, so a result here is not the
+/// developer corpus wearing new labels.
+const OPS_SKILL: &str = "cloud-and-devops-expert";
+
+pub const OPS_TAGS: &[(&str, &str)] = &[
+    ("nginx", OPS_SKILL),
+    ("docker", OPS_SKILL),
+    ("kubernetes", OPS_SKILL),
+    ("postgresql", "postgres-migration-safety"),
+    ("security", "adversarial-security-review"),
+    ("monitoring", "observability-and-incident-response"),
+];
+
+/// Design-domain corpus for the third benchmark.
+pub const DESIGN_TAGS: &[(&str, &str)] = &[
+    ("architecture", "backend-and-data-architecture"),
+    ("api", "api-contract-design"),
+    ("testing", "test-driven-development"),
+    ("security", "adversarial-security-review"),
+    ("dependencies", "dependency-and-supply-chain"),
+];
+
+/// Site plus tag map for one corpus. An unknown name falls back to the developer
+/// corpus rather than inventing a fourth.
+pub fn corpus_for(site: &str) -> (&'static str, &'static [(&'static str, &'static str)]) {
+    match site {
+        "serverfault" => ("serverfault", OPS_TAGS),
+        "softwareengineering" => ("softwareengineering", DESIGN_TAGS),
+        _ => ("stackoverflow", EXTERNAL_TAGS),
+    }
+}
+
 /// Fetch recent question titles per tag from the public Stack Exchange API. The
 /// keyless quota is 300 requests a day and each tag costs one request per page,
 /// so the caller caches the corpus instead of refetching it. Pages let training
 /// rows stay disjoint from the evaluation rows they are scored against.
-pub fn fetch_external(
+pub fn fetch_external_site(
+    site_hint: &str,
     per_tag: usize,
     first_page: usize,
     pages: usize,
 ) -> Result<Vec<(String, Option<String>)>, String> {
+    let (site, tags) = corpus_for(site_hint);
     let mut cases = Vec::new();
     for page in first_page..first_page + pages {
-        for (tag, skill) in EXTERNAL_TAGS {
+        for (tag, skill) in tags {
             let url = format!(
-                "{EXTERNAL_ENDPOINT}?order=desc&sort=activity&site=stackoverflow&pagesize={per_tag}&page={page}&tagged={tag}"
+                "{EXTERNAL_ENDPOINT}?order=desc&sort=activity&site={site}&pagesize={per_tag}&page={page}&tagged={tag}"
             );
             let output = Command::new("curl")
                 .args([
@@ -317,6 +351,15 @@ pub fn fetch_external(
         return Err("stackexchange returned no question titles".to_string());
     }
     Ok(cases)
+}
+
+/// Developer-corpus fetch, the corpus the models are trained on.
+pub fn fetch_external(
+    per_tag: usize,
+    first_page: usize,
+    pages: usize,
+) -> Result<Vec<(String, Option<String>)>, String> {
+    fetch_external_site("stackoverflow", per_tag, first_page, pages)
 }
 
 /// Cache location for a fetched corpus: refetching would spend the keyless quota

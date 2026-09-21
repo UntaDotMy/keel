@@ -2789,8 +2789,12 @@ pub fn handle_decision_tool(arguments: &Value) -> Result<String, String> {
                 let cases = match cached {
                     Some(cases) => cases,
                     None => {
-                        let fetched = crate::utility::decision_benchmark::fetch_external(
-                            per_tag, 1, 1,
+                        let site = arguments
+                            .get("site")
+                            .and_then(Value::as_str)
+                            .unwrap_or("stackoverflow");
+                        let fetched = crate::utility::decision_benchmark::fetch_external_site(
+                            site, per_tag, 1, 1,
                         )
                         .map_err(|error| format!("decision benchmark: {error}"))?;
                         if let Some(path) = cache.as_deref() {
@@ -3044,6 +3048,7 @@ pub fn run_decision_command(
             flag_set.bool_flag("external", false);
             flag_set.bool_flag("refresh", false);
             flag_set.string_flag("per-tag", "25");
+            flag_set.string_flag("site", "stackoverflow");
             flag_set.bool_flag("json", false);
         }
         "train-lexical" => {
@@ -3213,6 +3218,7 @@ pub fn run_decision_command(
             "external": flag_set.bool_value("external"),
             "refresh": flag_set.bool_value("refresh"),
             "per_tag": flag_set.string_value("per-tag").trim().parse::<u64>().unwrap_or(25),
+            "site": flag_set.string_value("site"),
             "json": flag_set.bool_value("json"),
         }),
         "train-lexical" => serde_json::json!({
