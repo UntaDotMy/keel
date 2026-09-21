@@ -593,12 +593,12 @@ pub fn match_skill_for_prompt_with_details(
         // The learned expert is the only evidence trained on real phrasing, so it
         // speaks only where the term model and the curated tier fall silent.
         let verdict = || -> Option<(String, f64)> {
-            const ACCEPT_CONFIDENCE: f64 = 0.80;
             let model = crate::utility::lexical_experts::load(
                 &crate::utility::lexical_experts::artifact_path(claude_home),
             )?;
+            let accept = crate::utility::lexical_experts::accept_threshold(&model);
             let (name, confidence) = crate::utility::lexical_experts::predict(&model, prompt)?;
-            if confidence < ACCEPT_CONFIDENCE {
+            if confidence < accept {
                 return None;
             }
             let path = resolve_skill_path(claude_home, &name)?;

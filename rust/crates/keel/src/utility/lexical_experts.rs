@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-pub const LEXICAL_SCHEMA: u32 = 2;
+pub const LEXICAL_SCHEMA: u32 = 3;
 const DEFAULT_SEED: u64 = 42;
 const EPOCHS: usize = 30;
 const LEARNING_RATE: f64 = 0.5;
@@ -43,11 +43,26 @@ pub struct LexicalExpert {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct HeldOut {
     pub rows: usize,
+    /// Rows the model had a verdict for, whatever the confidence: accuracy
+    /// divides by `rows`, brier by `decided`, so neither reads against the
+    /// wrong denominator.
+    pub decided: usize,
     pub correct: usize,
     pub accuracy: f64,
     pub brier: f64,
     /// Temperature fitted on this split by lowest Brier.
     pub scale: f64,
+    /// Lowest confidence that still held the precision floor on this split.
+    pub accept: f64,
+    /// The trade the accept point was chosen from, so the choice is inspectable.
+    pub operating_points: Vec<OperatingPoint>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct OperatingPoint {
+    pub threshold: f64,
+    pub coverage: f64,
+    pub precision: f64,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -378,6 +393,16 @@ pub fn predict(model: &LexicalModel, prompt: &str) -> Option<(String, f64)> {
     Scorer::new(model).predict(prompt, scale)
 }
 
+/// The confidence the held-out split supports. With no held-out split this is
+/// 1.0, so an unfitted model refuses everything instead of guessing.
+pub fn accept_threshold(model: &LexicalModel) -> f64 {
+    model
+        .held_out
+        .as_ref()
+        .map(|metrics| metrics.accept)
+        .unwrap_or(1.0)
+}
+
 fn score_held_out(fitted: &Fitted, rows: &LabelledRows) -> Option<HeldOut> {
     if rows.is_empty() {
         return None;
@@ -416,12 +441,56 @@ fn score_held_out(fitted: &Fitted, rows: &LabelledRows) -> Option<HeldOut> {
             correct += 1;
         }
     }
+    // Fitted, never assumed: the lowest confidence whose precision clears the
+    // floor, because a hand-picked 0.80 threw most correct answers away.
+    const PRECISION_FLOOR: f64 = 0.75;
+    let decided = documents
+        .iter()
+        .filter(|(_, document)| !document.is_empty())
+        .count();
+    let mut accept = 1.0f64;
+    let mut operating_points = Vec::new();
+    for step in 1..=19 {
+        let threshold = step as f64 * 0.05;
+        let mut answered = 0usize;
+        let mut right = 0usize;
+        for (skill, document) in &documents {
+            if document.is_empty() {
+                continue;
+            }
+            let (best, confidence) = best_of(&scorer.probabilities(document, best_scale));
+            if confidence < threshold {
+                continue;
+            }
+            answered += 1;
+            if &scorer.names[best] == skill {
+                right += 1;
+            }
+        }
+        let coverage = answered as f64 / documents.len().max(1) as f64;
+        let precision = if answered == 0 {
+            0.0
+        } else {
+            right as f64 / answered as f64
+        };
+        operating_points.push(OperatingPoint {
+            threshold,
+            coverage,
+            precision,
+        });
+        if precision >= PRECISION_FLOOR && accept == 1.0 {
+            accept = threshold;
+        }
+    }
     Some(HeldOut {
         rows: rows.len(),
+        decided,
         correct,
         accuracy: correct as f64 / rows.len() as f64,
         brier: best_brier,
         scale: best_scale,
+        accept,
+        operating_points,
     })
 }
 
