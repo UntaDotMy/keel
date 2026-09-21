@@ -208,6 +208,13 @@ pub fn record_and_save_skill_calibration(
         .calibrated;
     save_skill_calibration(claude_home, &record)?;
     record_global_calibration_outcome(claude_home, was_correct);
+    crate::utility::decision_samples::record_decision_sample(
+        claude_home,
+        crate::utility::decision_samples::SURFACE_ROUTING,
+        skill_name,
+        computed_confidence,
+        was_correct,
+    );
     Ok(calibrated)
 }
 
@@ -291,6 +298,13 @@ pub fn record_gate_outcome(
         .calibrated_confidence(declared_confidence, 0, 0)
         .calibrated;
     save_skill_calibration(claude_home, &record)?;
+    crate::utility::decision_samples::record_decision_sample(
+        claude_home,
+        crate::utility::decision_samples::SURFACE_GATE,
+        gate_name,
+        declared_confidence,
+        outcome == GateOutcome::Upheld,
+    );
     Ok(calibrated)
 }
 
@@ -507,6 +521,13 @@ pub fn record_conformal_outcome(
         .map_err(|e| format!("serialize conformal scores: {e}"))?;
     fs::write(conformal_history_file(claude_home), text)
         .map_err(|e| format!("write conformal history: {e}"))?;
+    crate::utility::decision_samples::record_decision_sample(
+        claude_home,
+        crate::utility::decision_samples::SURFACE_CONFORMAL,
+        "single",
+        confidence,
+        was_correct,
+    );
     Ok(())
 }
 
@@ -2055,7 +2076,7 @@ fn load_shell_families(claude_home: &Path) -> BTreeMap<String, ShellFamilyOutcom
         .unwrap_or_default()
 }
 
-fn record_shell_override(claude_home: &Path, family: &str, agreed: bool) {
+fn record_shell_override(claude_home: &Path, family: &str, confidence: f64, agreed: bool) {
     let mut families = load_shell_families(claude_home);
     let entry = families.entry(family.to_string()).or_default();
     entry.total = entry.total.saturating_add(1);
@@ -2068,6 +2089,13 @@ fn record_shell_override(claude_home: &Path, family: &str, agreed: bool) {
     if let Ok(text) = serde_json::to_string_pretty(&families) {
         let _ = fs::write(shell_calibration_file(claude_home), text);
     }
+    crate::utility::decision_samples::record_decision_sample(
+        claude_home,
+        crate::utility::decision_samples::SURFACE_SHELL,
+        family,
+        confidence,
+        agreed,
+    );
 }
 
 /// Agreement samples and rate for one pattern family.
@@ -2222,7 +2250,7 @@ pub fn handle_decision_tool(arguments: &Value) -> Result<String, String> {
         .get("action")
         .and_then(Value::as_str)
         .ok_or_else(|| {
-            "decision: 'action' is required (score, noul, choice, calibrate, review-feedback, noul-feedback, calibration-report, conformal)"
+            "decision: 'action' is required (score, noul, choice, calibrate, review-feedback, noul-feedback, calibration-report, conformal, samples)"
                 .to_string()
         })?;
 
@@ -2411,7 +2439,7 @@ pub fn handle_decision_tool(arguments: &Value) -> Result<String, String> {
                 .map_err(|e| format!("resolve home: {e}"))?;
             let decision = evaluate_shell_command_noul(command);
             let agreed = allowed == decision.is_allowed();
-            record_shell_override(&home, &decision.family, agreed);
+            record_shell_override(&home, &decision.family, decision.confidence, agreed);
             let (samples, rate) = shell_family_stats(&home, &decision.family);
             let out = serde_json::json!({
                 "command": command,
@@ -2555,6 +2583,30 @@ pub fn handle_decision_tool(arguments: &Value) -> Result<String, String> {
             serde_json::to_string_pretty(&out)
                 .map_err(|e| format!("serialize calibration report: {e}"))
         }
+        "samples" => {
+            let home = crate::runtime::resolve_claude_home("")
+                .map_err(|e| format!("resolve home: {e}"))?;
+            let days = arguments.get("days").and_then(Value::as_u64).unwrap_or(30);
+            let counts = crate::utility::decision_samples::sample_counts(&home, days);
+            let surfaces: Vec<Value> = counts
+                .iter()
+                .map(|(surface, samples, correct)| {
+                    serde_json::json!({
+                        "surface": surface,
+                        "samples": samples,
+                        "correct": correct,
+                    })
+                })
+                .collect();
+            let total: usize = counts.iter().map(|(_, samples, _)| samples).sum();
+            let out = serde_json::json!({
+                "days": days,
+                "total_samples": total,
+                "surfaces": surfaces,
+            });
+            serde_json::to_string_pretty(&out)
+                .map_err(|e| format!("serialize decision samples: {e}"))
+        }
         "conformal" => {
             let home = crate::runtime::resolve_claude_home("")
                 .map_err(|e| format!("resolve home: {e}"))?;
@@ -2679,7 +2731,7 @@ pub fn handle_decision_tool(arguments: &Value) -> Result<String, String> {
             serde_json::to_string_pretty(&res)
                 .map_err(|e| format!("serialize conformal set result: {e}"))
         }
-        unknown => Err(format!("Unknown decision action: '{unknown}'. Supported: score, noul, choice, calibrate, review-feedback, noul-feedback, calibration-report, conformal, classify, priors, conformal-set")),
+        unknown => Err(format!("Unknown decision action: '{unknown}'. Supported: score, noul, choice, calibrate, review-feedback, noul-feedback, calibration-report, conformal, classify, priors, conformal-set, samples")),
     }
 }
 
@@ -2704,6 +2756,7 @@ pub fn run_decision_command(
                 cache-stats         Show decision-cache hit/miss counters (routing + gates)\n  \
                 review-feedback     Record review accuracy outcome and inspect calibration error\n  \
                 noul-feedback       Record a human allow/deny verdict on a shell command\n  \
+                samples             Show labeled decision samples collected for offline training\n  \
                 calibration-report  Show calibration health across routing, review, composition, shell, conformal"
         );
         return 0;
@@ -2760,6 +2813,9 @@ pub fn run_decision_command(
             flag_set.string_flag("allowed", "");
         }
         "calibration-report" => {}
+        "samples" => {
+            flag_set.string_flag("days", "30");
+        }
         other => {
             let _ = writeln!(
                 standard_error,
@@ -2888,6 +2944,14 @@ pub fn run_decision_command(
         }
         "calibration-report" => {
             serde_json::json!({ "action": "calibration-report" })
+        }
+        "samples" => {
+            let days = flag_set
+                .string_value("days")
+                .trim()
+                .parse::<u64>()
+                .unwrap_or(30);
+            serde_json::json!({ "action": "samples", "days": days })
         }
         "conformal" => {
             let conf = flag_set
@@ -3687,9 +3751,9 @@ mod tests {
             )
             .expect("record outcome");
         }
-        record_shell_override(&home, "pipe", true);
-        record_shell_override(&home, "pipe", true);
-        record_shell_override(&home, "pipe", false);
+        for (confidence, agreed) in [(0.8, true), (0.8, true), (0.6, false)] {
+            record_shell_override(&home, "pipe", confidence, agreed);
+        }
         let out = handle_decision_tool(&serde_json::json!({"action": "calibration-report"}))
             .expect("report call ok");
         let report: Value = serde_json::from_str(&out).expect("parse report");

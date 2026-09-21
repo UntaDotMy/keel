@@ -1333,11 +1333,11 @@ fn tools_list_catalog() -> Value {
             },
             {
                 "name": "decision",
-                "description": "Jev-style typed decisions with calibrated confidence: score (review/plan rubrics), noul (shell danger probability), choice (skill composition), calibrate (routing confidence), conformal (conformal risk control), review-feedback (accuracy outcomes), noul-feedback (shell override labels), cache-stats (hit/miss counters), calibration-report (calibration health). Deterministic and local; escalates below 0.6 confidence.",
+                "description": "Jev-style typed decisions with calibrated confidence: score (review/plan rubrics), noul (shell danger probability), choice (skill composition), calibrate (routing confidence), conformal (conformal risk control), review-feedback (accuracy outcomes), noul-feedback (shell override labels), cache-stats (hit/miss counters), calibration-report (calibration health), samples (offline training corpus counts). Deterministic and local; escalates below 0.6 confidence.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "action": { "type": "string", "description": "Decision operation: score, noul, choice, calibrate, conformal, review-feedback, noul-feedback, cache-stats, calibration-report." }
+                        "action": { "type": "string", "description": "Decision operation: score, noul, choice, calibrate, conformal, review-feedback, noul-feedback, cache-stats, calibration-report, samples." }
                     },
                     "required": ["action"]
                 }
