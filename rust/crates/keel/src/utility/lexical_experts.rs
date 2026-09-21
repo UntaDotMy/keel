@@ -54,6 +54,9 @@ pub struct HeldOut {
     pub scale: f64,
     /// Lowest confidence that still held the precision floor on this split.
     pub accept: f64,
+    /// Per-class accept points: one global cut punishes a strong class and a
+    /// weak one the same way, which selective classification shows is avoidable.
+    pub accept_per_skill: Vec<(String, f64)>,
     /// The trade the accept point was chosen from, so the choice is inspectable.
     pub operating_points: Vec<OperatingPoint>,
 }
@@ -430,6 +433,21 @@ pub fn accept_threshold(model: &LexicalModel) -> f64 {
         .unwrap_or(1.0)
 }
 
+/// The accept point for one class, falling back to the global one for a class
+/// the held-out split could not score.
+pub fn accept_threshold_for(model: &LexicalModel, skill: &str) -> f64 {
+    let held_out = match model.held_out.as_ref() {
+        Some(metrics) => metrics,
+        None => return 1.0,
+    };
+    held_out
+        .accept_per_skill
+        .iter()
+        .find(|(name, _)| name == skill)
+        .map(|(_, accept)| *accept)
+        .unwrap_or(held_out.accept)
+}
+
 fn score_held_out(fitted: &Fitted, rows: &LabelledRows) -> Option<HeldOut> {
     if rows.is_empty() {
         return None;
@@ -509,6 +527,37 @@ fn score_held_out(fitted: &Fitted, rows: &LabelledRows) -> Option<HeldOut> {
             accept = threshold;
         }
     }
+    let mut accept_per_skill: Vec<(String, f64)> = Vec::new();
+    for (class, name) in scorer.names.iter().enumerate() {
+        let mut accept_for_class = 1.0f64;
+        for step in 1..=19 {
+            let threshold = step as f64 * 0.05;
+            let mut answered = 0usize;
+            let mut right = 0usize;
+            for (skill, document) in &documents {
+                if document.is_empty() {
+                    continue;
+                }
+                let (best, confidence) = best_of(&scorer.probabilities(document, best_scale));
+                if best != class || confidence < threshold {
+                    continue;
+                }
+                answered += 1;
+                if skill == name {
+                    right += 1;
+                }
+            }
+            let precision = if answered == 0 {
+                0.0
+            } else {
+                right as f64 / answered as f64
+            };
+            if answered > 0 && precision >= PRECISION_FLOOR && accept_for_class == 1.0 {
+                accept_for_class = threshold;
+            }
+        }
+        accept_per_skill.push((name.clone(), accept_for_class));
+    }
     Some(HeldOut {
         rows: rows.len(),
         decided,
@@ -517,6 +566,7 @@ fn score_held_out(fitted: &Fitted, rows: &LabelledRows) -> Option<HeldOut> {
         brier: best_brier,
         scale: best_scale,
         accept,
+        accept_per_skill,
         operating_points,
     })
 }
