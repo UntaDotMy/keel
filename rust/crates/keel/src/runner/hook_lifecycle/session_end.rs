@@ -244,13 +244,23 @@ pub(super) fn run_hook_session_end(
     // Read the payload once: the marker release and the summary capture both
     // need it, and a `dyn Read` cannot be read twice.
     let payload = read_json_stdin_fail_open(standard_input);
-    release_iron_law_marker(
-        payload
-            .as_ref()
-            .and_then(|document| document.get("session_id"))
-            .and_then(JsonDocument::as_str)
-            .unwrap_or_default(),
-    );
+    let session_id = payload
+        .as_ref()
+        .and_then(|document| document.get("session_id"))
+        .and_then(JsonDocument::as_str)
+        .unwrap_or_default();
+    release_iron_law_marker(session_id);
+    // An unresolved gate denial is an unknown outcome: consume it, score nothing.
+    if let Ok(claude_home) = resolve_claude_home("") {
+        let consumed =
+            crate::utility::decision::discard_staged_gate_denials(&claude_home, session_id);
+        if consumed > 0 {
+            let _ = writeln!(
+                standard_error,
+                "keel gate: consumed {consumed} unresolved denial stage(s)"
+            );
+        }
+    }
     maybe_capture_session_summary_from_payload(payload.as_ref(), standard_error);
     run_hook_lifecycle("session-end", standard_output, standard_error)
 }
@@ -268,6 +278,14 @@ pub(crate) fn run_bridge_session_end(
     // The bridge passes the session id directly, so release here too rather
     // than depending on any adapter to do it.
     release_iron_law_marker(session_id);
+    // An unresolved gate denial is an unknown outcome: consume it, score nothing.
+    let consumed = crate::utility::decision::discard_staged_gate_denials(claude_home, session_id);
+    if consumed > 0 {
+        let _ = writeln!(
+            standard_error,
+            "keel gate: consumed {consumed} unresolved denial stage(s)"
+        );
+    }
     run_session_end_learning(standard_error);
 }
 

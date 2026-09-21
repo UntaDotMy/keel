@@ -245,6 +245,208 @@ pub fn get_calibrated_confidence(
     calibration_detail(claude_home, skill_name, computed_confidence).calibrated
 }
 
+// ============================================================================
+// Gate Outcomes: three-state evidence behind gate denial confidence
+// ============================================================================
+
+/// Namespace prefix for gate records in the shared calibration store. Gate
+/// evidence reuses the store's epoch and decay discipline, while readers that
+/// enumerate skills (`calibration-report`) skip the prefix so a gate is never
+/// reported as a skill.
+pub const GATE_CALIBRATION_PREFIX: &str = "gate:";
+
+fn gate_calibration_key(gate_name: &str) -> String {
+    format!("{GATE_CALIBRATION_PREFIX}{gate_name}")
+}
+
+/// Outcome of a gate decision. `Unknown` is a first-class state, not a failure:
+/// a gate that denied and was never revisited leaves no evidence, and scoring
+/// that silence as the gate being wrong is the same false-negative trap the
+/// routing loop already fixed (`RoutingOutcome`). Only `Upheld` and `Overridden`
+/// carry evidence and may be recorded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GateOutcome {
+    /// The blocked action was satisfied after the denial: the gate was right.
+    Upheld,
+    /// The gate was waived or disabled via env while a gated action ran.
+    Overridden,
+    /// No evidence either way; excluded from confidence, calibration, priors.
+    Unknown,
+}
+
+/// Evidence-derived confidence that the gate's denial is correct. Cold start
+/// returns `declared_confidence` exactly; recorded outcomes shrink the estimate
+/// away from it, so a repeatedly overridden gate crosses the escalation
+/// threshold on evidence instead of a constant.
+pub fn gate_confidence(claude_home: &Path, gate_name: &str, declared_confidence: f64) -> f64 {
+    load_skill_calibration(claude_home, &gate_calibration_key(gate_name))
+        .calibrated_confidence(declared_confidence, 0, 0)
+        .calibrated
+}
+
+/// Record one gate outcome under the declared confidence in force when it was
+/// observed. An unknown outcome writes nothing and returns the current
+/// estimate: silence must never move a prior.
+pub fn record_gate_outcome(
+    claude_home: &Path,
+    gate_name: &str,
+    outcome: GateOutcome,
+    declared_confidence: f64,
+) -> Result<f64, String> {
+    if outcome == GateOutcome::Unknown {
+        return Ok(gate_confidence(claude_home, gate_name, declared_confidence));
+    }
+    let mut record = load_skill_calibration(claude_home, &gate_calibration_key(gate_name));
+    record.record(declared_confidence, outcome == GateOutcome::Upheld);
+    let calibrated = record
+        .calibrated_confidence(declared_confidence, 0, 0)
+        .calibrated;
+    save_skill_calibration(claude_home, &record)?;
+    Ok(calibrated)
+}
+
+fn gate_outcomes_dir(claude_home: &Path) -> PathBuf {
+    state_directory(claude_home).join("gate-outcomes")
+}
+
+fn session_key(session_id: &str) -> String {
+    let session = sanitize_key(session_id);
+    if session.is_empty() {
+        "no-session".to_string()
+    } else {
+        session
+    }
+}
+
+fn gate_session_key(gate_name: &str, session_id: &str) -> String {
+    format!("{}-{}", sanitize_key(gate_name), session_key(session_id))
+}
+
+/// Pending-denial ledger path. An unresolved stage IS the unknown-outcome state
+/// made durable: it holds the gate, the session, and the declared confidence
+/// the denial was issued under.
+fn gate_denial_stage_file(claude_home: &Path, gate_name: &str, session_id: &str) -> PathBuf {
+    gate_outcomes_dir(claude_home)
+        .join("pending")
+        .join(gate_session_key(gate_name, session_id))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StagedGateDenial {
+    gate: String,
+    session: String,
+    declared_confidence: f64,
+}
+
+fn staged_gate_denial_at(path: &Path) -> Option<StagedGateDenial> {
+    let text = fs::read_to_string(path).ok()?; // why: no readable stage means none
+    serde_json::from_str::<StagedGateDenial>(&text).ok() // why: a corrupt stage reads as none
+}
+
+/// Stage that the gate denied this session. The outcome stays unresolved
+/// until the gate's satisfaction path runs (→ `Upheld`) or the session ends
+/// and the stage is consumed unscored.
+pub fn stage_gate_denial(
+    claude_home: &Path,
+    gate_name: &str,
+    session_id: &str,
+    declared_confidence: f64,
+) -> Result<(), String> {
+    let path = gate_denial_stage_file(claude_home, gate_name, session_id);
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let staged = StagedGateDenial {
+        gate: gate_name.to_string(),
+        session: session_id.to_string(),
+        declared_confidence,
+    };
+    let text = serde_json::to_string_pretty(&staged)
+        .map_err(|e| format!("serialize staged gate denial: {e}"))?;
+    fs::write(&path, text).map_err(|e| format!("write staged gate denial: {e}"))
+}
+
+/// Resolve a staged denial once the gate's requirement was satisfied: record
+/// `Upheld` and clear the stage. `None` means nothing was staged — the gate
+/// never denied this session, so there is no evidence to score.
+pub fn resolve_staged_gate_denial(
+    claude_home: &Path,
+    gate_name: &str,
+    session_id: &str,
+) -> Result<Option<f64>, String> {
+    let path = gate_denial_stage_file(claude_home, gate_name, session_id);
+    let Some(staged) = staged_gate_denial_at(&path) else {
+        return Ok(None);
+    };
+    let _ = fs::remove_file(&path); // why: consumed once; cleanup is best-effort
+    record_gate_outcome(
+        claude_home,
+        &staged.gate,
+        GateOutcome::Upheld,
+        staged.declared_confidence,
+    )
+    .map(Some)
+}
+
+/// Consume this session's unresolved stages at session end. An unresolved
+/// denial is `Unknown` — the gate may have been right, but the session left no
+/// evidence — so the recorder scores nothing and the pending ledger does not
+/// grow forever. Returns how many stages were consumed.
+pub fn discard_staged_gate_denials(claude_home: &Path, session_id: &str) -> usize {
+    let Ok(entries) = fs::read_dir(gate_outcomes_dir(claude_home).join("pending")) else {
+        return 0;
+    };
+    let mut consumed = 0usize;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(staged) = staged_gate_denial_at(&path) else {
+            continue;
+        };
+        if staged.session != session_id {
+            continue;
+        }
+        let _ = fs::remove_file(&path); // why: consumed once; cleanup is best-effort
+                                        // why: the recorder leaves an unknown outcome unscored.
+        let _ = record_gate_outcome(
+            claude_home,
+            &staged.gate,
+            GateOutcome::Unknown,
+            staged.declared_confidence,
+        );
+        consumed += 1;
+    }
+    consumed
+}
+
+/// Record that the operator explicitly disabled `gate_name` while a gated
+/// action ran: the denial was overridden. Bounded to one override per session
+/// per gate, so a disabled gate contributes once per session rather than once
+/// per call.
+pub fn record_gate_override(
+    claude_home: &Path,
+    gate_name: &str,
+    session_id: &str,
+    declared_confidence: f64,
+) -> Result<Option<f64>, String> {
+    let path = gate_outcomes_dir(claude_home)
+        .join("overrides")
+        .join(gate_session_key(gate_name, session_id));
+    if path.exists() {
+        return Ok(None);
+    }
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::write(&path, current_time_ms().to_string());
+    record_gate_outcome(
+        claude_home,
+        gate_name,
+        GateOutcome::Overridden,
+        declared_confidence,
+    )
+    .map(Some)
+}
+
 /// Cross-skill aggregate feeding the global prior for skills with no data.
 /// Best-effort file; a missing or corrupt file reads as empty history.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
@@ -2273,6 +2475,10 @@ pub fn handle_decision_tool(arguments: &Value) -> Result<String, String> {
                     }
                     if let Ok(text) = fs::read_to_string(&path) {
                         if let Ok(record) = serde_json::from_str::<SkillCalibrationRecord>(&text) {
+                            // Gate records share the store but are not skills.
+                            if record.skill_name.starts_with(GATE_CALIBRATION_PREFIX) {
+                                continue;
+                            }
                             let (total, correct) = record.skill_totals();
                             skills.push(serde_json::json!({
                                 "skill": record.skill_name,
@@ -2893,6 +3099,170 @@ mod tests {
         let (total, correct) = load_skill_calibration(&home, "reviewer").skill_totals();
         assert_eq!((total, correct), (4, 4));
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// Gate names shared by the gate-outcome tests, so each literal has one
+    /// owner.
+    const IRON_LAW_GATE: &str = "iron_law";
+    const ANVIL_GATE: &str = "anvil";
+    const PLAN_GATE: &str = "plan";
+
+    fn gate_outcome_test_home(label: &str) -> PathBuf {
+        let home =
+            std::env::temp_dir().join(format!("keel-gate-outcome-{label}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        home
+    }
+
+    fn drop_gate_home(home: &Path) {
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    fn gate_totals(home: &Path, gate: &str) -> (usize, usize) {
+        load_skill_calibration(home, &gate_calibration_key(gate)).skill_totals()
+    }
+
+    #[test]
+    fn gate_confidence_cold_start_returns_declared() {
+        let home = gate_outcome_test_home("cold");
+        assert_eq!(gate_confidence(&home, IRON_LAW_GATE, 0.95), 0.95);
+        drop_gate_home(&home);
+    }
+
+    /// The D4 discipline on the gate path: silence is never scored, so an
+    /// unknown outcome writes no evidence and cannot move the prior.
+    #[test]
+    fn gate_unknown_outcome_is_never_scored() {
+        let home = gate_outcome_test_home("unknown");
+        let recorded = record_gate_outcome(&home, ANVIL_GATE, GateOutcome::Unknown, 0.95)
+            .expect("unknown must not fail");
+        assert_eq!(recorded, 0.95);
+        assert_eq!(
+            gate_totals(&home, ANVIL_GATE),
+            (0, 0),
+            "silence must not write calibration evidence"
+        );
+        drop_gate_home(&home);
+    }
+
+    /// D2b acceptance: enough overridden denials drive a real gate below the
+    /// escalation threshold, so escalation fires on evidence, not a constant.
+    #[test]
+    fn gate_overrides_shrink_confidence_below_the_escalation_threshold() {
+        let home = gate_outcome_test_home("overrides");
+        let mut confidence = 0.95;
+        let mut overrides = 0;
+        while confidence >= PreToolGateDecision::ESCALATION_CONFIDENCE_THRESHOLD && overrides < 20 {
+            confidence = record_gate_outcome(&home, IRON_LAW_GATE, GateOutcome::Overridden, 0.95)
+                .expect("record override");
+            overrides += 1;
+        }
+        assert_eq!(
+            overrides, 6,
+            "prior strength 10 at 0.95 must cross 0.6 on the sixth override"
+        );
+        assert!(PreToolGateDecision::deny_with_confidence(
+            "blocked",
+            confidence,
+            true,
+            IRON_LAW_GATE
+        )
+        .needs_escalation());
+        drop_gate_home(&home);
+    }
+
+    /// Mixed evidence must not blanket-tank a gate: upholds recover the estimate.
+    #[test]
+    fn gate_upheld_outcomes_recover_confidence() {
+        let home = gate_outcome_test_home("upheld");
+        for _ in 0..6 {
+            record_gate_outcome(&home, IRON_LAW_GATE, GateOutcome::Overridden, 0.95)
+                .expect("record override");
+        }
+        assert!(
+            gate_confidence(&home, IRON_LAW_GATE, 0.95)
+                < PreToolGateDecision::ESCALATION_CONFIDENCE_THRESHOLD
+        );
+        for _ in 0..6 {
+            record_gate_outcome(&home, IRON_LAW_GATE, GateOutcome::Upheld, 0.95)
+                .expect("record uphold");
+        }
+        let recovered = gate_confidence(&home, IRON_LAW_GATE, 0.95);
+        assert!(
+            recovered > PreToolGateDecision::ESCALATION_CONFIDENCE_THRESHOLD,
+            "6/12 outcomes at a 0.95 prior must recover above threshold, got {recovered}"
+        );
+        drop_gate_home(&home);
+    }
+
+    /// A staged denial resolves to exactly one uphold on the satisfaction path;
+    /// a stage that is never revisited stays unknown and unscored.
+    #[test]
+    fn staged_gate_denials_resolve_once_on_satisfaction() {
+        let home = gate_outcome_test_home("staged");
+        let session = "sess-a";
+        stage_gate_denial(&home, IRON_LAW_GATE, session, 0.95).expect("stage a denial");
+        let resolved =
+            resolve_staged_gate_denial(&home, IRON_LAW_GATE, session).expect("resolve a stage");
+        assert!(
+            resolved.is_some(),
+            "a satisfied requirement upholds the denial"
+        );
+        assert!(
+            resolve_staged_gate_denial(&home, IRON_LAW_GATE, session)
+                .expect("re-resolve")
+                .is_none(),
+            "a resolved stage must not score twice"
+        );
+        assert_eq!(gate_totals(&home, IRON_LAW_GATE), (1, 1));
+
+        stage_gate_denial(&home, ANVIL_GATE, "sess-b", 0.95).expect("stage a denial");
+        assert_eq!(
+            gate_totals(&home, ANVIL_GATE),
+            (0, 0),
+            "an unresolved stage stays unknown"
+        );
+        assert_eq!(gate_confidence(&home, ANVIL_GATE, 0.95), 0.95);
+        drop_gate_home(&home);
+    }
+
+    /// An env-disabled gate contributes one override per session, not one per
+    /// call.
+    #[test]
+    fn gate_overrides_are_bounded_per_session() {
+        let home = gate_outcome_test_home("override-dedup");
+        assert!(record_gate_override(&home, ANVIL_GATE, "sess-c", 0.95)
+            .expect("first override")
+            .is_some());
+        assert!(record_gate_override(&home, ANVIL_GATE, "sess-c", 0.95)
+            .expect("same-session override")
+            .is_none());
+        assert!(record_gate_override(&home, ANVIL_GATE, "sess-d", 0.95)
+            .expect("new-session override")
+            .is_some());
+        assert_eq!(gate_totals(&home, ANVIL_GATE), (2, 0));
+        drop_gate_home(&home);
+    }
+
+    /// Session end consumes unresolved stages without scoring them: the gate may
+    /// have been right, but silence is not evidence.
+    #[test]
+    fn unresolved_stages_are_discarded_at_session_end_without_scoring() {
+        let home = gate_outcome_test_home("discard");
+        let session = "sess-x";
+        stage_gate_denial(&home, IRON_LAW_GATE, session, 0.95).expect("stage an iron-law denial");
+        stage_gate_denial(&home, PLAN_GATE, session, 0.9).expect("stage a plan denial");
+        stage_gate_denial(&home, IRON_LAW_GATE, "sess-other", 0.95).expect("stage an older denial");
+        assert_eq!(discard_staged_gate_denials(&home, session), 2);
+        assert_eq!(
+            gate_totals(&home, IRON_LAW_GATE),
+            (0, 0),
+            "an unknown outcome must not be scored"
+        );
+        // Another session's stage survives until its own teardown.
+        assert_eq!(discard_staged_gate_denials(&home, "sess-other"), 1);
+        assert_eq!(discard_staged_gate_denials(&home, session), 0);
+        drop_gate_home(&home);
     }
 
     #[test]

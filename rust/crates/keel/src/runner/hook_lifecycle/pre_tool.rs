@@ -1,6 +1,9 @@
 //! Hook lifecycle pre_tool responsibility split.
 
 use super::*;
+use crate::utility::decision::{
+    resolve_staged_gate_denial as resolve_denial, stage_gate_denial as stage_denial,
+};
 
 pub(super) const IRON_LAW_GATE_DENIAL_STRICT: &str =
     "[keel] Iron Law gate (STRICT): Edit/Write/Bash (non-keel) and Agent/Task are \
@@ -417,6 +420,8 @@ pub(crate) fn mark_iron_law_satisfied(session_id: &str) {
         let _ = fs::create_dir_all(parent);
     }
     let _ = fs::write(&path, "satisfied");
+    // Satisfaction is the uphold signal: a denial staged this session was right.
+    resolve_staged_gate_denial(Some(claude_home.as_path()), GATE_NAME_IRON_LAW, session_id);
 }
 
 /// Whether the session already has a satisfaction marker (or legacy clear).
@@ -787,6 +792,16 @@ pub(crate) fn tool_is_iron_law_gated(tool_name: &str, command: Option<&str>) -> 
 pub(crate) fn iron_law_gate_decision(session_id: &str) -> PreToolGateDecision {
     let mode = iron_law_gate_mode();
     if mode == IronLawGateMode::Off {
+        // Explicit env disable while a gated action runs: the operator waived
+        // the gate, so record it as overridden evidence (once per session).
+        if let Ok(claude_home) = crate::runtime::resolve_claude_home("") {
+            let _ = crate::utility::decision::record_gate_override(
+                &claude_home,
+                GATE_NAME_IRON_LAW,
+                session_id,
+                IRON_LAW_DENIAL_CONFIDENCE,
+            );
+        }
         return PreToolGateDecision::allow();
     }
 
@@ -812,8 +827,8 @@ pub(crate) fn iron_law_gate_decision(session_id: &str) -> PreToolGateDecision {
         return PreToolGateDecision::allow();
     }
 
-    // Denial with high confidence — no marker present means definitive evidence of no research.
-    // The confidence reflects certainty that the denial is correct (0.95 for marker-based).
+    // No marker present means definitive evidence of no research; the declared
+    // confidence is the cold-start value the recorder shrinks with evidence.
     let (reason, escalate) = match mode {
         IronLawGateMode::Strict => (IRON_LAW_GATE_DENIAL_STRICT, false),
         IronLawGateMode::Balanced => (IRON_LAW_GATE_DENIAL_BALANCED, false),
@@ -821,7 +836,18 @@ pub(crate) fn iron_law_gate_decision(session_id: &str) -> PreToolGateDecision {
         IronLawGateMode::Off => return PreToolGateDecision::allow(),
     };
 
-    PreToolGateDecision::deny_with_confidence(reason, 0.95, escalate, "iron_law")
+    let confidence = gate_denial_confidence(
+        Some(claude_home.as_path()),
+        GATE_NAME_IRON_LAW,
+        IRON_LAW_DENIAL_CONFIDENCE,
+    );
+    stage_gate_denial(
+        Some(claude_home.as_path()),
+        GATE_NAME_IRON_LAW,
+        session_id,
+        IRON_LAW_DENIAL_CONFIDENCE,
+    );
+    PreToolGateDecision::deny_with_confidence(reason, confidence, escalate, GATE_NAME_IRON_LAW)
 }
 
 /// Canonical path fields emitted by the host adapters. Keep this list narrow:
@@ -892,12 +918,44 @@ pub(super) fn markdown_only_edit_targets(input: &JsonDocument, tool_name: &str) 
 pub(crate) fn markdown_only_edit_path(path: &str, tool_name: &str) -> bool {
     is_edit_class_tool(tool_name) && is_explicit_markdown_path(path)
 }
-/// Iron Law gate name constant - kept for API completeness even though iron_law
-/// gate doesn't use the cache (state can change between calls).
-#[allow(dead_code)] // gate identifier retained for API completeness
+/// Gate identifiers. `iron_law` never uses the decision cache (state can change
+/// between calls) but still owns its name for outcome recording.
 pub(crate) const GATE_NAME_IRON_LAW: &str = "iron_law";
 pub(crate) const GATE_NAME_PLAN: &str = "plan";
 pub(crate) const GATE_NAME_ANVIL: &str = "anvil";
+
+/// Declared cold-start denial confidence per gate: what the escalation path
+/// reports before any recorded evidence, and the value the calibration store
+/// shrinks away from as upheld/overridden outcomes arrive. Marker-based denials
+/// are near-certain (0.95); the not-ready plan denial is slightly softer (0.9).
+pub(super) const IRON_LAW_DENIAL_CONFIDENCE: f64 = 0.95;
+pub(super) const PLAN_DENIAL_CONFIDENCE: f64 = 0.95;
+pub(super) const PLAN_READY_DENIAL_CONFIDENCE: f64 = 0.9;
+pub(super) const ANVIL_DENIAL_CONFIDENCE: f64 = 0.95;
+
+/// Evidence-derived denial confidence for a declared gate, falling back to the
+/// declared cold-start value when the keel home cannot be resolved.
+fn gate_denial_confidence(claude_home: Option<&Path>, gate_name: &str, declared: f64) -> f64 {
+    match claude_home {
+        Some(home) => crate::utility::decision::gate_confidence(home, gate_name, declared),
+        None => declared,
+    }
+}
+
+/// Stage a denial so a later satisfaction resolves it into upheld evidence.
+/// Without a resolvable home the gate still denies; it just carries no evidence.
+fn stage_gate_denial(claude_home: Option<&Path>, gate_name: &str, session_id: &str, declared: f64) {
+    if let Some(home) = claude_home {
+        let _ = stage_denial(home, gate_name, session_id, declared); // why: best-effort evidence
+    }
+}
+
+/// Resolve a staged denial on the gate's satisfaction path (`Upheld` evidence).
+fn resolve_staged_gate_denial(claude_home: Option<&Path>, gate_name: &str, session_id: &str) {
+    if let Some(home) = claude_home {
+        let _ = resolve_denial(home, gate_name, session_id); // why: best-effort evidence
+    }
+}
 /// Decide whether to allow a tool call based on all applicable gates.
 /// Returns `GateDecision` with explicit confidence and escalation flags.
 ///
@@ -915,6 +973,8 @@ pub(crate) fn evaluate_plan_gate(
     {
         let plan = plan_id.trim();
         if !plan.is_empty() && is_edit_class_tool(tool_name) {
+            // why: no resolvable home means no recorded evidence; declared governs.
+            let claude_home = crate::runtime::resolve_claude_home("").ok();
             let plan_cache_key = &format!("{}:{}", tool_name, plan);
             let plan_cached = cached_gate_decision(GATE_NAME_PLAN, plan_cache_key, session_id);
             if let Some(cached) = plan_cached {
@@ -928,9 +988,19 @@ pub(crate) fn evaluate_plan_gate(
             if blocked {
                 let decision = PreToolGateDecision::deny_with_confidence(
                     PLAN_TASK_BLOCKED_DENIAL,
-                    0.95,
+                    gate_denial_confidence(
+                        claude_home.as_deref(),
+                        GATE_NAME_PLAN,
+                        PLAN_DENIAL_CONFIDENCE,
+                    ),
                     false,
                     GATE_NAME_PLAN,
+                );
+                stage_gate_denial(
+                    claude_home.as_deref(),
+                    GATE_NAME_PLAN,
+                    session_id,
+                    PLAN_DENIAL_CONFIDENCE,
                 );
                 cache_gate_decision(GATE_NAME_PLAN, plan_cache_key, session_id, &decision);
                 return decision;
@@ -941,13 +1011,25 @@ pub(crate) fn evaluate_plan_gate(
             if !ready {
                 let decision = PreToolGateDecision::deny_with_confidence(
                     PLAN_READY_GATE_DENIAL,
-                    0.9,
+                    gate_denial_confidence(
+                        claude_home.as_deref(),
+                        GATE_NAME_PLAN,
+                        PLAN_READY_DENIAL_CONFIDENCE,
+                    ),
                     true,
                     GATE_NAME_PLAN,
+                );
+                stage_gate_denial(
+                    claude_home.as_deref(),
+                    GATE_NAME_PLAN,
+                    session_id,
+                    PLAN_READY_DENIAL_CONFIDENCE,
                 );
                 cache_gate_decision(GATE_NAME_PLAN, plan_cache_key, session_id, &decision);
                 return decision;
             }
+            // The plan gate's requirements are met: a staged denial is upheld.
+            resolve_staged_gate_denial(claude_home.as_deref(), GATE_NAME_PLAN, session_id);
         }
     }
     PreToolGateDecision::allow()
@@ -958,28 +1040,57 @@ pub(crate) fn evaluate_anvil_gate(
     tool_name: &str,
     cwd: &str,
 ) -> PreToolGateDecision {
-    if anvil_gate_enabled() && is_edit_class_tool(tool_name) {
-        let anvil_cached = cached_gate_decision(GATE_NAME_ANVIL, tool_name, session_id);
-        if let Some(cached) = anvil_cached {
-            if cached.is_denied() {
-                return cached;
-            }
-        }
-
-        let satisfied = resolve_claude_home("")
-            .ok()
-            .is_some_and(|home| anvil_satisfied_this_session(&home, session_id, cwd));
-        if !satisfied {
-            let decision = PreToolGateDecision::deny_with_confidence(
-                ANVIL_GATE_DENIAL,
-                0.95,
-                false,
+    if !is_edit_class_tool(tool_name) {
+        return PreToolGateDecision::allow();
+    }
+    // why: no resolvable home means no recorded evidence; declared governs.
+    let claude_home = resolve_claude_home("").ok();
+    if !anvil_gate_enabled() {
+        // Explicit env disable while an edit runs: the operator waived the gate,
+        // so record it as overridden evidence (once per session).
+        if let Some(home) = claude_home.as_deref() {
+            let _ = crate::utility::decision::record_gate_override(
+                home,
                 GATE_NAME_ANVIL,
+                session_id,
+                ANVIL_DENIAL_CONFIDENCE,
             );
-            cache_gate_decision(GATE_NAME_ANVIL, tool_name, session_id, &decision);
-            return decision;
+        }
+        return PreToolGateDecision::allow();
+    }
+
+    let anvil_cached = cached_gate_decision(GATE_NAME_ANVIL, tool_name, session_id);
+    if let Some(cached) = anvil_cached {
+        if cached.is_denied() {
+            return cached;
         }
     }
+
+    let satisfied = claude_home
+        .as_deref()
+        .is_some_and(|home| anvil_satisfied_this_session(home, session_id, cwd));
+    if !satisfied {
+        let decision = PreToolGateDecision::deny_with_confidence(
+            ANVIL_GATE_DENIAL,
+            gate_denial_confidence(
+                claude_home.as_deref(),
+                GATE_NAME_ANVIL,
+                ANVIL_DENIAL_CONFIDENCE,
+            ),
+            false,
+            GATE_NAME_ANVIL,
+        );
+        stage_gate_denial(
+            claude_home.as_deref(),
+            GATE_NAME_ANVIL,
+            session_id,
+            ANVIL_DENIAL_CONFIDENCE,
+        );
+        cache_gate_decision(GATE_NAME_ANVIL, tool_name, session_id, &decision);
+        return decision;
+    }
+    // The Anvil requirement is met: a staged denial is upheld.
+    resolve_staged_gate_denial(claude_home.as_deref(), GATE_NAME_ANVIL, session_id);
     PreToolGateDecision::allow()
 }
 
