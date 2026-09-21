@@ -2250,7 +2250,7 @@ pub fn handle_decision_tool(arguments: &Value) -> Result<String, String> {
         .get("action")
         .and_then(Value::as_str)
         .ok_or_else(|| {
-            "decision: 'action' is required (score, noul, choice, calibrate, review-feedback, noul-feedback, calibration-report, conformal, samples)"
+            "decision: 'action' is required (score, noul, choice, calibrate, review-feedback, noul-feedback, calibration-report, conformal, samples, train, model)"
                 .to_string()
         })?;
 
@@ -2607,6 +2607,47 @@ pub fn handle_decision_tool(arguments: &Value) -> Result<String, String> {
             serde_json::to_string_pretty(&out)
                 .map_err(|e| format!("serialize decision samples: {e}"))
         }
+        "train" => {
+            let home = crate::runtime::resolve_claude_home("")
+                .map_err(|e| format!("resolve home: {e}"))?;
+            let days = arguments.get("days").and_then(Value::as_u64).unwrap_or(30);
+            let model = crate::utility::decision_model::train_decision_model(&home, days);
+            crate::utility::decision_model::save_decision_model(&home, &model)?;
+            serde_json::to_string_pretty(&crate::utility::decision_model::summary_value(&model))
+                .map_err(|e| format!("serialize trained decision model: {e}"))
+        }
+        "model" => {
+            let home = crate::runtime::resolve_claude_home("")
+                .map_err(|e| format!("resolve home: {e}"))?;
+            let Some(model) = crate::utility::decision_model::load_decision_model(&home) else {
+                return Err(
+                    "decision model: no trained model yet; run `keel decision train`".to_string(),
+                );
+            };
+            let surface = arguments
+                .get("surface")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            if let Some(raw) = arguments.get("signal").and_then(Value::as_f64) {
+                if !surface.is_empty() {
+                    let calibrated = model
+                        .surfaces
+                        .get(surface)
+                        .map(|expert| crate::utility::decision_model::predict_surface(expert, raw))
+                        .unwrap_or_else(|| raw.clamp(0.0, 1.0));
+                    let out = serde_json::json!({
+                        "surface": surface,
+                        "signal": raw,
+                        "calibrated": calibrated,
+                        "expert": model.surfaces.get(surface),
+                    });
+                    return serde_json::to_string_pretty(&out)
+                        .map_err(|e| format!("serialize decision model prediction: {e}"));
+                }
+            }
+            serde_json::to_string_pretty(&crate::utility::decision_model::summary_value(&model))
+                .map_err(|e| format!("serialize decision model: {e}"))
+        }
         "conformal" => {
             let home = crate::runtime::resolve_claude_home("")
                 .map_err(|e| format!("resolve home: {e}"))?;
@@ -2731,7 +2772,7 @@ pub fn handle_decision_tool(arguments: &Value) -> Result<String, String> {
             serde_json::to_string_pretty(&res)
                 .map_err(|e| format!("serialize conformal set result: {e}"))
         }
-        unknown => Err(format!("Unknown decision action: '{unknown}'. Supported: score, noul, choice, calibrate, review-feedback, noul-feedback, calibration-report, conformal, classify, priors, conformal-set, samples")),
+        unknown => Err(format!("Unknown decision action: '{unknown}'. Supported: score, noul, choice, calibrate, review-feedback, noul-feedback, calibration-report, conformal, classify, priors, conformal-set, samples, train, model")),
     }
 }
 
@@ -2757,6 +2798,8 @@ pub fn run_decision_command(
                 review-feedback     Record review accuracy outcome and inspect calibration error\n  \
                 noul-feedback       Record a human allow/deny verdict on a shell command\n  \
                 samples             Show labeled decision samples collected for offline training\n  \
+                train               Fit the per-surface calibration experts over the sample corpus\n  \
+                model               Show the trained decision model or calibrate one signal\n  \
                 calibration-report  Show calibration health across routing, review, composition, shell, conformal"
         );
         return 0;
@@ -2815,6 +2858,13 @@ pub fn run_decision_command(
         "calibration-report" => {}
         "samples" => {
             flag_set.string_flag("days", "30");
+        }
+        "train" => {
+            flag_set.string_flag("days", "30");
+        }
+        "model" => {
+            flag_set.string_flag("surface", "");
+            flag_set.string_flag("signal", "");
         }
         other => {
             let _ = writeln!(
@@ -2952,6 +3002,22 @@ pub fn run_decision_command(
                 .parse::<u64>()
                 .unwrap_or(30);
             serde_json::json!({ "action": "samples", "days": days })
+        }
+        "train" => {
+            let days = flag_set
+                .string_value("days")
+                .trim()
+                .parse::<u64>()
+                .unwrap_or(30);
+            serde_json::json!({ "action": "train", "days": days })
+        }
+        "model" => {
+            let surface = flag_set.string_value("surface").trim().to_string();
+            let mut payload = serde_json::json!({ "action": "model", "surface": surface });
+            if let Ok(signal) = flag_set.string_value("signal").trim().parse::<f64>() {
+                payload["signal"] = serde_json::json!(signal);
+            }
+            payload
         }
         "conformal" => {
             let conf = flag_set
