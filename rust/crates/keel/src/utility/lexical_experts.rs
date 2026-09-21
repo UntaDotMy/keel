@@ -97,6 +97,23 @@ struct Fitted {
     idf: Vec<(String, f64)>,
 }
 
+/// Label support per class, so a training run shows which skills have evidence
+/// and which are running on fumes.
+pub fn class_balance(rows: &RawRows) -> Vec<(String, usize)> {
+    let mut counts: Vec<(String, usize)> = Vec::new();
+    for (_, skill) in rows {
+        let Some(skill) = skill else {
+            continue;
+        };
+        match counts.iter().position(|(name, _)| name == skill) {
+            Some(index) => counts[index].1 += 1,
+            None => counts.push((skill.clone(), 1)),
+        }
+    }
+    counts.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
+    counts
+}
+
 /// Train the experts. Returns `None` when the corpus cannot support a model at
 /// all: a held-out score over a handful of rows would be a guess.
 pub fn train(rows: &RawRows) -> Option<LexicalModel> {

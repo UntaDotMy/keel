@@ -2749,9 +2749,11 @@ pub fn handle_decision_tool(arguments: &Value) -> Result<String, String> {
             };
             let (rows, dropped_ambiguous) =
                 crate::utility::lexical_experts::drop_ambiguous_tags(&rows);
+            let started = std::time::Instant::now();
             let model = crate::utility::lexical_experts::train(&rows).ok_or_else(|| {
                 "decision train-lexical: the corpus carried no labelled rows".to_string()
             })?;
+            let elapsed = started.elapsed();
             let artifact = crate::utility::lexical_experts::artifact_path(&home);
             crate::utility::lexical_experts::save(&artifact, &model)?;
             let out = serde_json::json!({
@@ -2762,6 +2764,9 @@ pub fn handle_decision_tool(arguments: &Value) -> Result<String, String> {
                 "skills": model.skills,
                 "usable": model.usable,
                 "held_out": model.held_out,
+                "elapsed_ms": elapsed.as_millis() as u64,
+                "rows_per_second": rows.len() as f64 / elapsed.as_secs_f64().max(1e-6),
+                "class_balance": crate::utility::lexical_experts::class_balance(&rows),
                 "artifact": artifact.display().to_string(),
             });
             serde_json::to_string_pretty(&out)
