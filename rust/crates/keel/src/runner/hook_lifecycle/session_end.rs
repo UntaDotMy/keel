@@ -161,16 +161,40 @@ pub(super) fn prune_dir_files_older_than(dir: &Path, cutoff_ms: u64) -> std::io:
     Ok(())
 }
 
-/// Run the autonomous learning cycle at session end: distill the session's
-/// observations into instincts and evolve trusted clusters into generated
-/// skills. Fully automatic — no slash command. Set
-/// `CLAUDE_SKILLS_LEARNING=off` to disable. Errors are swallowed so a learning
-/// failure can never fail the SessionEnd hook.
-pub(crate) fn run_session_end_learning(standard_error: &mut dyn Write) {
-    if std::env::var("CLAUDE_SKILLS_LEARNING")
+/// Whether the autonomous learning cycle is switched off.
+fn learning_disabled() -> bool {
+    std::env::var("CLAUDE_SKILLS_LEARNING")
         .map(|value| value.trim().eq_ignore_ascii_case("off"))
         .unwrap_or(false)
-    {
+}
+
+/// Reinforce the lessons this session cited. Runs at session end only: a
+/// mid-session compact must not consume the session's citations early.
+fn reconcile_session_lessons(
+    claude_home: &std::path::Path,
+    session_id: &str,
+    standard_error: &mut dyn Write,
+) {
+    if learning_disabled() {
+        return;
+    }
+    let reinforced =
+        crate::utility::memory_families::reconcile_lesson_outcomes(claude_home, session_id);
+    if reinforced > 0 {
+        let _ = writeln!(
+            standard_error,
+            "keel learn: reinforced {reinforced} lesson(s) cited this session"
+        );
+    }
+}
+
+/// Run the autonomous learning cycle at session end: distill the session's
+/// observations into instincts and evolve trusted clusters into generated
+/// skills. Fully automatic, no slash command; `CLAUDE_SKILLS_LEARNING=off`
+/// disables it. Errors are swallowed so a learning failure can never fail the
+/// SessionEnd hook.
+pub(crate) fn run_session_end_learning(standard_error: &mut dyn Write) {
+    if learning_disabled() {
         return;
     }
     let claude_home = match resolve_claude_home("") {
@@ -260,6 +284,7 @@ pub(super) fn run_hook_session_end(
                 "keel gate: consumed {consumed} unresolved denial stage(s)"
             );
         }
+        reconcile_session_lessons(&claude_home, session_id, standard_error);
     }
     maybe_capture_session_summary_from_payload(payload.as_ref(), standard_error);
     run_hook_lifecycle("session-end", standard_output, standard_error)
@@ -286,6 +311,7 @@ pub(crate) fn run_bridge_session_end(
             "keel gate: consumed {consumed} unresolved denial stage(s)"
         );
     }
+    reconcile_session_lessons(claude_home, session_id, standard_error);
     run_session_end_learning(standard_error);
 }
 

@@ -2469,6 +2469,85 @@ enum LessonMutation {
     Demote,
 }
 
+/// The lowercased signature+detail text of one session's observation rows.
+fn session_observation_text(claude_home: &Path, session_id: &str) -> Option<String> {
+    let rows = crate::runner::observation::iter_recent_rows_at(claude_home, 1).ok()?;
+    let mut text = String::new();
+    for row in rows {
+        if row.session_id != session_id {
+            continue;
+        }
+        text.push_str(&row.signature);
+        text.push('\n');
+        text.push_str(&row.detail);
+        text.push('\n');
+    }
+    (!text.is_empty()).then(|| text.to_ascii_lowercase())
+}
+
+/// Reinforce the lessons a session actually cited: a lesson id appearing in
+/// that session's observation rows, the same convention skill routing uses. A
+/// candidate that reaches the promotion threshold becomes active; an uncited
+/// lesson is silence and is never scored. A per-session marker keeps one
+/// reconcile per session so a retry cannot double-count the same citation.
+pub fn reconcile_lesson_outcomes(claude_home: &Path, session_id: &str) -> usize {
+    if session_id.trim().is_empty() {
+        return 0;
+    }
+    let Some(session_key) = crate::runtime::safe_path_segment(session_id) else {
+        return 0;
+    };
+    let marker = claude_home
+        .join("state")
+        .join("lessons-reconciled")
+        .join(session_key);
+    if marker.exists() {
+        return 0;
+    }
+    let mut reinforced = 0usize;
+    if let Some(haystack) = session_observation_text(claude_home, session_id) {
+        let store = family_store(claude_home, "memory", "lessons");
+        if let Ok(records) = store.list_records() {
+            for (id, mut record) in records {
+                let status = field(&record, "status").unwrap_or("candidate").to_string();
+                if !matches!(status.as_str(), "candidate" | "active") {
+                    continue;
+                }
+                if !haystack.contains(&id.to_ascii_lowercase()) {
+                    continue;
+                }
+                let confidence: i64 = field(&record, "confidence")
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(0)
+                    + 1;
+                let observations: i64 = field(&record, "observations")
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(0)
+                    + 1;
+                let (_, at) = now_id("lesson");
+                set_field(&mut record, "confidence", confidence.to_string());
+                set_field(&mut record, "observations", observations.to_string());
+                set_field(&mut record, "updatedAt", at.clone());
+                let has_evidence = field(&record, "evidence")
+                    .map(str::trim)
+                    .is_some_and(|evidence| !evidence.is_empty());
+                if status == "candidate" && has_evidence && confidence >= LESSON_PROMOTE_THRESHOLD {
+                    set_field(&mut record, "status", "active".to_string());
+                    set_field(&mut record, "lastVerified", at);
+                }
+                if store.write_record(&id, &record).is_ok() {
+                    reinforced += 1;
+                }
+            }
+        }
+    }
+    if let Some(parent) = marker.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(&marker, "reconciled");
+    reinforced
+}
+
 fn lessons_record(
     command_group: &str,
     label: &str,
@@ -4410,6 +4489,61 @@ mod tests {
             String::from_utf8_lossy(&stdout).to_string(),
             String::from_utf8_lossy(&stderr).to_string(),
         )
+    }
+
+    /// A lesson id cited in the session's observation rows is reinforced, and a
+    /// candidate that crosses the threshold becomes active without the CLI.
+    #[test]
+    fn session_citations_reinforce_and_promote_lessons() {
+        let home = temp_home("less-reconcile");
+        let h = home.to_string_lossy().to_string();
+        let (code, _, err) = run(
+            "memory",
+            "lessons",
+            &[
+                "record",
+                "--pattern",
+                "repeated failing strategy",
+                "--evidence",
+                "two runs failed with the same signature",
+                "--response",
+                "use the machine-readable output",
+                "--claude-home",
+                &h,
+            ],
+        );
+        assert_eq!(code, 0, "stderr: {err}");
+        let id = "repeated-failing-strategy";
+        let citation = format!(r#"{{"command":"keel memory lessons show {id}"}}"#);
+        crate::runner::observation::record_observation_from_parts(
+            &home,
+            "Bash",
+            &citation,
+            "/",
+            "sess-other",
+            false,
+        )
+        .expect("record observation");
+        let store = family_store(&home, "memory", "lessons");
+        // Another session's citation must never score for this one.
+        assert_eq!(reconcile_lesson_outcomes(&home, "sess-a"), 0);
+        let untouched = store.read_record(id).expect("read").expect("present");
+        assert_eq!(field(&untouched, "confidence"), Some("1"));
+
+        crate::runner::observation::record_observation_from_parts(
+            &home, "Bash", &citation, "/", "sess-b", false,
+        )
+        .expect("record observation");
+        assert_eq!(reconcile_lesson_outcomes(&home, "sess-b"), 1);
+        let record = store.read_record(id).expect("read").expect("present");
+        assert_eq!(field(&record, "status"), Some("active"));
+        assert_eq!(field(&record, "confidence"), Some("2"));
+        assert_eq!(
+            reconcile_lesson_outcomes(&home, "sess-b"),
+            0,
+            "a session is consumed once; a retry must not double-count"
+        );
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]
