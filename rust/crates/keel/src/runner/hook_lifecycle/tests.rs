@@ -1494,11 +1494,17 @@ fn grok_camel_case_session_does_not_inherit_satisfied_default_gate() {
         "sessionId": "grok-unsatisfied-session",
         "toolName": "search_replace"
     });
-    let reason = pre_tool_gate_decision(hook_session_id(&input), hook_tool_name(&input), None, "")
-        .expect("unsatisfied grok session must deny");
+    let decision = pre_tool_gate_decision_with_markdown_context(
+        hook_session_id(&input),
+        hook_tool_name(&input),
+        None,
+        "",
+        false,
+    );
+    assert!(decision.is_denied(), "unsatisfied grok session must deny");
     let mut output = Vec::new();
     let mut error = Vec::new();
-    emit_pretool_deny(reason, &mut output, &mut error);
+    emit_pretool_deny(&denial_text(&decision), &mut output, &mut error);
     let payload: serde_json::Value = serde_json::from_slice(&output).unwrap();
     assert_eq!(payload["decision"], "deny");
     assert_eq!(payload["hookSpecificOutput"]["permissionDecision"], "deny");

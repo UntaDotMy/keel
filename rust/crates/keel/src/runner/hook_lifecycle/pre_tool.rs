@@ -87,8 +87,9 @@ pub enum PreToolGateDecision {
     Allow,
     /// Tool call is denied with an explicit reason and calibrated confidence.
     Deny {
-        /// Why the tool call was denied. Static string for zero-allocation output.
-        reason: &'static str,
+        /// Why the tool call was denied. Owned so gates can build the reason from
+        /// their evidence state instead of declaring a fixed message.
+        reason: String,
         /// Calibrated confidence (0.0-1.0) that this denial is correct.
         /// Higher = more reliable denial.
         confidence: f64,
@@ -99,8 +100,8 @@ pub enum PreToolGateDecision {
     },
     /// Tool call may proceed but with a warning message.
     Warn {
-        /// Warning message to display.
-        message: &'static str,
+        /// Warning message to display. Owned for the same reason as `reason`.
+        message: String,
         /// Calibrated confidence in the warning.
         confidence: f64,
         /// Whether the tool call can proceed despite the warning.
@@ -156,9 +157,9 @@ impl PreToolGateDecision {
     }
 
     /// Returns the denial reason if this is a denial, else None.
-    pub(crate) fn denial_reason(&self) -> Option<&'static str> {
+    pub(crate) fn denial_reason(&self) -> Option<&str> {
         match self {
-            PreToolGateDecision::Deny { reason, .. } => Some(reason),
+            PreToolGateDecision::Deny { reason, .. } => Some(reason.as_str()),
             _ => None,
         }
     }
@@ -170,9 +171,9 @@ impl PreToolGateDecision {
 
     /// Creates a Deny decision with default confidence and no escalation.
     #[allow(dead_code)]
-    pub(crate) fn deny(reason: &'static str, gate_name: &'static str) -> Self {
+    pub(crate) fn deny(reason: impl Into<String>, gate_name: &'static str) -> Self {
         PreToolGateDecision::Deny {
-            reason,
+            reason: reason.into(),
             confidence: Self::DEFAULT_CONFIDENCE,
             escalate: false,
             gate_name,
@@ -181,13 +182,13 @@ impl PreToolGateDecision {
 
     /// Creates a Deny decision with explicit confidence and escalation flag.
     pub(crate) fn deny_with_confidence(
-        reason: &'static str,
+        reason: impl Into<String>,
         confidence: f64,
         escalate: bool,
         gate_name: &'static str,
     ) -> Self {
         PreToolGateDecision::Deny {
-            reason,
+            reason: reason.into(),
             confidence: confidence.clamp(0.0, 1.0),
             escalate,
             gate_name,
@@ -195,21 +196,11 @@ impl PreToolGateDecision {
     }
 
     /// Creates a Warn decision.
-    pub(crate) fn warn(message: &'static str, confidence: f64, continue_anyway: bool) -> Self {
+    pub(crate) fn warn(message: impl Into<String>, confidence: f64, continue_anyway: bool) -> Self {
         PreToolGateDecision::Warn {
-            message,
+            message: message.into(),
             confidence: confidence.clamp(0.0, 1.0),
             continue_anyway,
-        }
-    }
-
-    /// Backward-compat: converts to Option<&'static str> (None = allow, Some = deny).
-    /// Preserves existing code that pattern-matches on Option<&str>.
-    pub(crate) fn as_option(&self) -> Option<&'static str> {
-        match self {
-            PreToolGateDecision::Allow => None,
-            PreToolGateDecision::Deny { reason, .. } => Some(reason),
-            PreToolGateDecision::Warn { .. } => None,
         }
     }
 }
@@ -1054,20 +1045,6 @@ pub(crate) fn fold_gate_decisions(
     }
     PreToolGateDecision::allow()
 }
-/// Backward-compat wrapper: converts GateDecision to Option<&'static str>.
-/// New code should use pre_tool_gate_decision_with_markdown_context directly.
-#[allow(dead_code)] // backward-compat wrapper for external callers
-pub(crate) fn pre_tool_gate_decision(
-    session_id: &str,
-    tool_name: &str,
-    command: Option<&str>,
-    cwd: &str,
-) -> Option<&'static str> {
-    // Bridge callers do not pass the complete hook payload; keep them
-    // conservative and require Anvil for edit calls with unknown targets.
-    pre_tool_gate_decision_with_markdown_context(session_id, tool_name, command, cwd, false)
-        .as_option()
-}
 
 pub(super) fn run_hook_pre_tool_use(
     standard_output: &mut dyn Write,
@@ -1142,25 +1119,14 @@ pub(super) fn run_hook_pre_tool_use(
 
     // J06: Shell destructive probability & risk action via Noul evaluation
     let noul = crate::utility::decision::evaluate_shell_command_noul(effective_command);
-    match noul.action {
-        crate::utility::decision::ShellRiskAction::Block => {
-            let reason = format!(
-                "[keel] Destructive command blocked (prob: {:.2}): {}",
-                noul.probability, noul.reason
-            );
-            emit_pretool_deny(&reason, standard_output, standard_error);
-            return 0;
-        }
-        crate::utility::decision::ShellRiskAction::Escalate => {
-            let escalation = crate::utility::decision::format_gate_escalation(
-                "shell_noul",
-                &noul.reason,
-                noul.confidence,
-            );
-            emit_pretool_deny(&escalation, standard_output, standard_error);
-            return 0;
-        }
-        _ => {}
+    let noul_decision = noul.to_gate_decision();
+    if noul_decision.is_denied() {
+        emit_pretool_deny(
+            &denial_text(&noul_decision),
+            standard_output,
+            standard_error,
+        );
+        return 0;
     }
 
     // Inspect EVERY segment of a compound command, not just the first supported
@@ -1241,7 +1207,7 @@ pub(super) fn run_hook_pre_tool_use(
 
 /// Denial text for a gate decision. A low-confidence denial names its gate and
 /// confidence so a human can override it, instead of reading as a hard block.
-fn denial_text(decision: &PreToolGateDecision) -> String {
+pub(super) fn denial_text(decision: &PreToolGateDecision) -> String {
     let reason = decision.denial_reason().unwrap_or("gate denied");
     if !decision.needs_escalation() {
         return reason.to_string();
@@ -1426,6 +1392,45 @@ mod namespace_tests {
             "weak but unflagged",
             "escalation needs both the flag and low confidence"
         );
+    }
+
+    /// The shell bridge must keep the probability in the block text, and route an
+    /// uncertain command through the same denial path as every other gate.
+    #[test]
+    fn shell_bridge_carries_probability_and_escalates_when_uncertain() {
+        use crate::utility::decision::{ShellNoulDecision, ShellRiskAction, ShellRiskCategory};
+        let blocked = ShellNoulDecision {
+            command: "rm -rf /".to_string(),
+            probability: 0.97,
+            confidence: 0.95,
+            category: ShellRiskCategory::Destructive,
+            action: ShellRiskAction::Block,
+            reason: "recursive force delete of the root".to_string(),
+            family: "rm_recursive_force".to_string(),
+        };
+        let decision = blocked.to_gate_decision();
+        let text = denial_text(&decision);
+        assert!(
+            text.contains("0.97"),
+            "the probability must survive: {text}"
+        );
+        assert!(text.contains("recursive force delete"), "{text}");
+        assert!(
+            !decision.needs_escalation(),
+            "a confident block stays a plain block"
+        );
+
+        let uncertain = ShellNoulDecision {
+            action: ShellRiskAction::Escalate,
+            confidence: 0.5,
+            ..blocked
+        };
+        let escalated = uncertain.to_gate_decision();
+        assert!(
+            escalated.needs_escalation(),
+            "an uncertain shell command must escalate"
+        );
+        assert!(denial_text(&escalated).contains("KEEL_GATE_ESCALATE"));
     }
 
     #[test]

@@ -59,8 +59,7 @@ pub(crate) use pre_tool::{emit_pretool_deny, iron_law_gate_decision, is_keel_res
 #[allow(unused_imports)]
 pub(crate) use pre_tool::{
     is_host_shell_tool_name, markdown_only_edit_path, maybe_mark_iron_law_from_tool_event,
-    pre_tool_gate_decision, pre_tool_gate_decision_with_markdown_context, release_iron_law_marker,
-    tool_is_iron_law_gated,
+    pre_tool_gate_decision_with_markdown_context, release_iron_law_marker, tool_is_iron_law_gated,
 };
 use prompt_submit::run_hook_user_prompt_submit;
 pub(crate) use prompt_submit::user_prompt_submit_context;

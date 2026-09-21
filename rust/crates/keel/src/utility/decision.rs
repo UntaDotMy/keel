@@ -858,18 +858,27 @@ impl ShellNoulDecision {
         match self.action {
             ShellRiskAction::Allow => PreToolGateDecision::allow(),
             ShellRiskAction::Warn => PreToolGateDecision::warn(
-                "Command carries potential operational risk",
+                format!(
+                    "[keel] Command carries potential operational risk: {}",
+                    self.reason
+                ),
                 self.confidence,
                 true,
             ),
             ShellRiskAction::Block => PreToolGateDecision::deny_with_confidence(
-                "Shell command classified as destructive and blocked by safety policy",
+                format!(
+                    "[keel] Destructive command blocked (prob: {:.2}): {}",
+                    self.probability, self.reason
+                ),
                 self.confidence,
                 false,
                 "shell_noul",
             ),
             ShellRiskAction::Escalate => PreToolGateDecision::deny_with_confidence(
-                "Shell command safety status uncertain — human escalation required",
+                format!(
+                    "[keel] Shell command safety uncertain (prob: {:.2}): {}",
+                    self.probability, self.reason
+                ),
                 self.confidence,
                 true,
                 "shell_noul",
