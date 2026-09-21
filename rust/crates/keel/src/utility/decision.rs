@@ -29,16 +29,6 @@ pub struct CalibrationBucket {
     pub correct: usize,
 }
 
-impl CalibrationBucket {
-    pub fn empirical_accuracy(&self) -> f64 {
-        if self.total == 0 {
-            0.5
-        } else {
-            crate::utility::calibration::laplace_rate(self.total, self.correct)
-        }
-    }
-}
-
 /// Per-skill calibration record stored under `<claude_home>/state/skill-calibration/<skill>.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkillCalibrationRecord {
@@ -589,14 +579,6 @@ impl PriorStore {
             .get(skill_name)
             .map(|p| p.is_quarantined)
             .unwrap_or(false)
-    }
-
-    pub fn quarantined_skills(&self) -> Vec<String> {
-        self.skills
-            .iter()
-            .filter(|(_, p)| p.is_quarantined)
-            .map(|(name, _)| name.clone())
-            .collect()
     }
 }
 
