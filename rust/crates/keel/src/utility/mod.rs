@@ -9,6 +9,7 @@ pub mod calibration;
 pub mod classifier;
 pub mod code_graph;
 pub mod code_search;
+pub mod compute_backend;
 pub mod config_audit;
 pub mod decision;
 pub mod design_intelligence;

@@ -8,13 +8,17 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+/// One module whose presence marks a keel source checkout, shared by the
+/// module list and the doctor guard.
+const KEEL_CHECKOUT_MARKER: &str = "rust/crates/keel/src/utility/decision.rs";
+
 /// The learning-path modules the sweep owns: routing, calibration, decisions,
 /// memory families, and the learning cycle.
 pub const LEARNING_PATH_MODULES: &[&str] = &[
     "rust/crates/keel/src/utility/calibration.rs",
     "rust/crates/keel/src/utility/skill_match.rs",
     "rust/crates/keel/src/utility/skill_usage.rs",
-    "rust/crates/keel/src/utility/decision.rs",
+    KEEL_CHECKOUT_MARKER,
     "rust/crates/keel/src/utility/memory_families.rs",
     "rust/crates/keel/src/runner/learning.rs",
 ];
@@ -86,10 +90,7 @@ pub(crate) fn report_learning_path_callerless(
     repository_root: &Path,
     standard_output: &mut dyn Write,
 ) {
-    if !repository_root
-        .join("rust/crates/keel/src/utility/decision.rs")
-        .is_file()
-    {
+    if !repository_root.join(KEEL_CHECKOUT_MARKER).is_file() {
         return;
     }
     let findings = callerless_learning_path_functions(repository_root);
@@ -264,27 +265,31 @@ mod tests {
         root
     }
 
+    fn drop_fixture(root: &Path) {
+        let _ = fs::remove_dir_all(root);
+    }
+
     #[test]
     fn flags_only_the_function_without_a_caller() {
         let root = fixture_root("sweep");
         write_fixture(
             &root,
-            "rust/crates/keel/src/utility/calibration.rs",
+            LEARNING_PATH_MODULES[0],
             "pub fn orphan() {}\npub fn called() {}\n",
         );
         write_fixture(
             &root,
-            "rust/crates/keel/src/runner/learning.rs",
+            LEARNING_PATH_MODULES[5],
             "fn drive() {\n    called();\n}\n",
         );
         assert_eq!(
             callerless_learning_path_functions(&root),
             vec![CallerlessFunction {
-                file: "rust/crates/keel/src/utility/calibration.rs".to_string(),
+                file: LEARNING_PATH_MODULES[0].to_string(),
                 name: "orphan".to_string(),
             }]
         );
-        let _ = fs::remove_dir_all(&root);
+        drop_fixture(&root);
     }
 
     #[test]
@@ -292,13 +297,13 @@ mod tests {
         let root = fixture_root("tests-only");
         write_fixture(
             &root,
-            "rust/crates/keel/src/utility/calibration.rs",
+            LEARNING_PATH_MODULES[0],
             "pub fn only_tests() {}\n\n#[cfg(test)]\nmod tests {\n    fn call() { only_tests(); }\n}\n",
         );
         let findings = callerless_learning_path_functions(&root);
         assert_eq!(findings.len(), 1, "findings: {findings:?}");
         assert_eq!(findings[0].name, "only_tests");
-        let _ = fs::remove_dir_all(&root);
+        drop_fixture(&root);
     }
 
     #[test]
@@ -306,27 +311,24 @@ mod tests {
         let root = fixture_root("allowlist");
         write_fixture(
             &root,
-            "rust/crates/keel/src/utility/skill_match.rs",
+            LEARNING_PATH_MODULES[1],
             "pub fn clear_skill_routing_cache() {}\n",
         );
         assert!(callerless_learning_path_functions(&root).is_empty());
-        let _ = fs::remove_dir_all(&root);
+        drop_fixture(&root);
     }
 
     #[test]
     fn doctor_line_reports_findings_and_skips_foreign_repos() {
         let root = fixture_root("report");
-        write_fixture(
-            &root,
-            "rust/crates/keel/src/utility/decision.rs",
-            "pub fn orphan() {}\n",
-        );
+        write_fixture(&root, KEEL_CHECKOUT_MARKER, "pub fn orphan() {}\n");
         let mut output = Vec::new();
         report_learning_path_callerless(&root, &mut output);
         let rendered = String::from_utf8_lossy(&output);
         assert!(
-            rendered
-                .contains("[warn] learning path: rust/crates/keel/src/utility/decision.rs::orphan"),
+            rendered.contains(&format!(
+                "[warn] learning path: {KEEL_CHECKOUT_MARKER}::orphan"
+            )),
             "output: {rendered}"
         );
 
@@ -338,8 +340,8 @@ mod tests {
             output.is_empty(),
             "a repository without keel sources must stay untouched"
         );
-        let _ = fs::remove_dir_all(&root);
-        let _ = fs::remove_dir_all(&foreign);
+        drop_fixture(&root);
+        drop_fixture(&foreign);
     }
 
     /// The D7 invariant: no learning-path function may be callerless. This test

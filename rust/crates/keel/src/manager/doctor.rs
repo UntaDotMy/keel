@@ -106,6 +106,13 @@ pub fn run_doctor_command(
         "[ok] adapters: {}",
         crate::proxy::adapters::adapter_names()
     );
+    let compute = crate::utility::compute_backend::detect_compute_profile();
+    let _ = writeln!(
+        standard_output,
+        "[ok] compute: {} ({})",
+        compute.backend.label(),
+        compute.detail
+    );
     match crate::runtime::resolve_repository_root(repo_root).and_then(|root| {
         crate::manager::verify::write_verification_config_report(&root, standard_output)
             .map(|_| root)
