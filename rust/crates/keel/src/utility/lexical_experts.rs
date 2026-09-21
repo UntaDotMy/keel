@@ -98,12 +98,12 @@ struct Fitted {
 /// Train the experts. Returns `None` when the corpus cannot support a model at
 /// all: a held-out score over a handful of rows would be a guess.
 pub fn train(rows: &RawRows) -> Option<LexicalModel> {
-    let (train_rows, held_out_rows) = split(rows, DEFAULT_SEED);
+    let (train_rows, validation_rows, test_rows) = split(rows, DEFAULT_SEED);
     // why: community tags carry label noise, and pruning the rows the fitted
     // model confidently contradicts lifted held-out accuracy in measurement.
     let (train_rows, _) = prune_label_noise(&train_rows);
     let fitted = fit(&train_rows)?;
-    let held_out = score_held_out(&fitted, &held_out_rows);
+    let held_out = score_held_out(&fitted, &validation_rows, &test_rows);
     let usable = rows.len() >= REFUSE_BELOW_ROWS
         && held_out
             .as_ref()
@@ -146,7 +146,7 @@ pub fn drop_ambiguous_tags(rows: &RawRows) -> (Vec<(String, Option<String>)>, us
     (kept, dropped)
 }
 
-fn split(rows: &RawRows, seed: u64) -> (LabelledRows, LabelledRows) {
+fn split(rows: &RawRows, seed: u64) -> (LabelledRows, LabelledRows, LabelledRows) {
     let mut labelled: LabelledRows = rows
         .iter()
         .filter_map(|(prompt, skill)| Some((prompt.clone(), skill.clone()?)))
@@ -159,9 +159,11 @@ fn split(rows: &RawRows, seed: u64) -> (LabelledRows, LabelledRows) {
         let swap = (state >> 33) as usize % (index + 1);
         labelled.swap(index, swap);
     }
-    let held_out_count = labelled.len() / 5;
-    let held_out = labelled.split_off(labelled.len() - held_out_count);
-    (labelled, held_out)
+    let test_count = labelled.len() / 5;
+    let validation_count = labelled.len() / 10;
+    let test = labelled.split_off(labelled.len() - test_count);
+    let validation = labelled.split_off(labelled.len() - validation_count);
+    (labelled, validation, test)
 }
 
 /// Unigrams plus adjacent bigrams: a bigram is what separates `borrow checker`
@@ -539,8 +541,15 @@ fn prune_label_noise(rows: &LabelledRows) -> (LabelledRows, usize) {
     (kept, pruned)
 }
 
-fn score_held_out(fitted: &Fitted, rows: &LabelledRows) -> Option<HeldOut> {
-    if rows.is_empty() {
+/// Fit the operating point on the validation rows, then report on the test rows.
+/// They must not be the same set: a threshold chosen on the rows it is scored on
+/// picks itself, and the number that comes out is not a held-out score.
+fn score_held_out(
+    fitted: &Fitted,
+    calibration_rows: &LabelledRows,
+    test_rows: &LabelledRows,
+) -> Option<HeldOut> {
+    if test_rows.is_empty() {
         return None;
     }
     let model = LexicalModel {
@@ -553,18 +562,23 @@ fn score_held_out(fitted: &Fitted, rows: &LabelledRows) -> Option<HeldOut> {
         usable: true,
     };
     let scorer = Scorer::new(&model);
-    let documents: Vec<(String, HashMap<String, f64>)> = rows
-        .iter()
-        .map(|(prompt, skill)| (skill.clone(), scorer.vectorize(prompt)))
-        .collect();
+    let vectorize = |rows: &LabelledRows| -> Vec<(String, HashMap<String, f64>)> {
+        rows.iter()
+            .map(|(prompt, skill)| (skill.clone(), scorer.vectorize(prompt)))
+            .collect()
+    };
+    let calibration = vectorize(calibration_rows);
+    let documents = vectorize(test_rows);
     let mut best_scale = 1.0f64;
     let mut best_brier = f64::MAX;
-    for step in 1..=40 {
-        let scale = step as f64 * 0.05;
-        let brier = brier_for_documents(&scorer, &documents, scale);
-        if brier < best_brier {
-            best_scale = scale;
-            best_brier = brier;
+    if calibration.iter().any(|(_, document)| !document.is_empty()) {
+        for step in 1..=40 {
+            let scale = step as f64 * 0.05;
+            let brier = brier_for_documents(&scorer, &calibration, scale);
+            if brier < best_brier {
+                best_scale = scale;
+                best_brier = brier;
+            }
         }
     }
     let mut correct = 0usize;
@@ -590,7 +604,7 @@ fn score_held_out(fitted: &Fitted, rows: &LabelledRows) -> Option<HeldOut> {
         let threshold = step as f64 * 0.05;
         let mut answered = 0usize;
         let mut right = 0usize;
-        for (skill, document) in &documents {
+        for (skill, document) in &calibration {
             if document.is_empty() {
                 continue;
             }
@@ -603,7 +617,7 @@ fn score_held_out(fitted: &Fitted, rows: &LabelledRows) -> Option<HeldOut> {
                 right += 1;
             }
         }
-        let coverage = answered as f64 / documents.len().max(1) as f64;
+        let coverage = answered as f64 / calibration.len().max(1) as f64;
         let precision = if answered == 0 {
             0.0
         } else {
@@ -625,7 +639,7 @@ fn score_held_out(fitted: &Fitted, rows: &LabelledRows) -> Option<HeldOut> {
             let threshold = step as f64 * 0.05;
             let mut answered = 0usize;
             let mut right = 0usize;
-            for (skill, document) in &documents {
+            for (skill, document) in &calibration {
                 if document.is_empty() {
                     continue;
                 }
@@ -650,11 +664,11 @@ fn score_held_out(fitted: &Fitted, rows: &LabelledRows) -> Option<HeldOut> {
         accept_per_skill.push((name.clone(), accept_for_class));
     }
     Some(HeldOut {
-        rows: rows.len(),
+        rows: test_rows.len(),
         decided,
         correct,
-        accuracy: correct as f64 / rows.len() as f64,
-        brier: best_brier,
+        accuracy: correct as f64 / test_rows.len() as f64,
+        brier: brier_for_documents(&scorer, &documents, best_scale),
         scale: best_scale,
         accept,
         accept_per_skill,
@@ -753,13 +767,44 @@ mod tests {
         let rows = separable_rows();
         let model = train(&rows).expect("separable corpus trains");
         let held_out = model.held_out.as_ref().expect("held-out metrics");
-        assert_eq!(model.training_rows + held_out.rows, rows.len());
+        assert!(
+            model.training_rows + held_out.rows < rows.len(),
+            "train {} plus test {} leave the validation slice apart from both, of {}",
+            model.training_rows,
+            held_out.rows,
+            rows.len()
+        );
         assert!(
             held_out.accuracy > 0.9,
             "separable corpus should separate: {}",
             held_out.accuracy
         );
         assert!(model.usable, "enough rows and accuracy make it usable");
+    }
+
+    #[test]
+    fn split_keeps_three_way_disjoint_slices() {
+        let rows: Vec<(String, Option<String>)> = (0..40)
+            .map(|index| {
+                (
+                    format!("title {index}"),
+                    Some(format!("skill {}", index % 4)),
+                )
+            })
+            .collect();
+        let (train_rows, validation_rows, test_rows) = split(&rows, DEFAULT_SEED);
+        assert_eq!(
+            train_rows.len() + validation_rows.len() + test_rows.len(),
+            rows.len(),
+            "every row lands in exactly one slice"
+        );
+        assert!(!validation_rows.is_empty(), "validation fits the threshold");
+        assert!(!test_rows.is_empty(), "test is what gets reported");
+        let mut seen: Vec<&String> = Vec::new();
+        for (prompt, _) in train_rows.iter().chain(&validation_rows).chain(&test_rows) {
+            assert!(!seen.contains(&prompt), "title appears twice: {prompt}");
+            seen.push(prompt);
+        }
     }
 
     #[test]
