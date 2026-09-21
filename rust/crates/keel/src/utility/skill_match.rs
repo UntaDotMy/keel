@@ -590,13 +590,45 @@ pub fn match_skill_for_prompt_with_details(
         prompt: &str,
         claude_home: &Path,
     ) -> Option<SkillSelectionDecision> {
+        // The learned expert is the only evidence trained on real phrasing, so it
+        // speaks only where the term model and the curated tier fall silent.
+        let verdict = || -> Option<(String, f64)> {
+            const ACCEPT_CONFIDENCE: f64 = 0.80;
+            let model = crate::utility::lexical_experts::load(
+                &crate::utility::lexical_experts::artifact_path(claude_home),
+            )?;
+            let (name, confidence) = crate::utility::lexical_experts::predict(&model, prompt)?;
+            if confidence < ACCEPT_CONFIDENCE {
+                return None;
+            }
+            let path = resolve_skill_path(claude_home, &name)?;
+            path.is_file().then_some((name, confidence))
+        };
         match decision {
             Some(found) if found.confidence < 0.60 => {
                 if confirmed_by_curated_tier(prompt, &found.name, claude_home) {
-                    Some(found)
-                } else {
-                    None
+                    return Some(found);
                 }
+                let (name, confidence) = verdict()?;
+                (name == found.name).then_some(SkillSelectionDecision {
+                    confidence,
+                    ..found
+                })
+            }
+            None => {
+                let (name, confidence) = verdict()?;
+                Some(SkillSelectionDecision {
+                    name,
+                    relevance: confidence,
+                    utility: confidence,
+                    confidence,
+                    estimated_tokens: 1,
+                    activation_budget_tokens: 0,
+                    redundancy: 0.0,
+                    task_criticality: 0.5,
+                    historical_success: DEFAULT_SKILL_HISTORICAL_SUCCESS,
+                    reason: "learned lexical expert".to_string(),
+                })
             }
             gated => gated,
         }
