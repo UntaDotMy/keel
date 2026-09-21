@@ -2726,11 +2726,17 @@ pub fn handle_decision_tool(arguments: &Value) -> Result<String, String> {
             let rows = match cached {
                 Some(rows) => rows,
                 None => {
-                    // why: training reads from page two so it never learns the
-                    // rows the external benchmark scores it on.
-                    let fetched =
-                        crate::utility::decision_benchmark::fetch_external(per_tag, 2, pages)
-                            .map_err(|error| format!("decision train-lexical: {error}"))?;
+                    // why: every corpus trains, so no class is left with zero
+                    // evidence; each site's page one stays held out for scoring.
+                    let mut fetched = Vec::new();
+                    for site in crate::utility::decision_benchmark::EXTERNAL_SITES {
+                        fetched.extend(
+                            crate::utility::decision_benchmark::fetch_external_site(
+                                site, per_tag, 2, pages,
+                            )
+                            .map_err(|error| format!("decision train-lexical: {error}"))?,
+                        );
+                    }
                     let _ = crate::utility::decision_benchmark::write_external_cache(
                         &corpus, &fetched,
                     );

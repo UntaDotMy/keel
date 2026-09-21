@@ -274,6 +274,10 @@ pub const DESIGN_TAGS: &[(&str, &str)] = &[
     ("dependencies", "dependency-and-supply-chain"),
 ];
 
+/// Every corpus a model trains on, so no skill is left with zero evidence and
+/// therefore unpredictable no matter how confident the gate is.
+pub const EXTERNAL_SITES: &[&str] = &["stackoverflow", "serverfault", "softwareengineering"];
+
 /// Site plus tag map for one corpus. An unknown name falls back to the developer
 /// corpus rather than inventing a fourth.
 pub fn corpus_for(site: &str) -> (&'static str, &'static [(&'static str, &'static str)]) {
