@@ -104,6 +104,175 @@ pub fn hierarchical_blend(
     }
 }
 
+/// Outcome-semantics epoch. Records written under an older epoch measured a
+/// different quantity (silence was recorded as a routing failure), so they are
+/// ineligible for calibration rather than deleted: the audit trail stays, the
+/// estimator ignores it until fresh evidence replaces it.
+pub const OUTCOME_SEMANTICS_EPOCH: u32 = 2;
+
+/// Prior strength for m-estimate shrinkage, in pseudo-observations. Small enough
+/// that tens of real outcomes carry the estimate; the legacy N=100 reference left
+/// calibration inert for roughly 100 outcomes per skill.
+pub const SHRINKAGE_PRIOR_STRENGTH: f64 = 10.0;
+
+/// Evidence half-life in days. Calibration drifts as routing behaviour changes,
+/// so older evidence decays instead of dominating forever.
+pub const EVIDENCE_HALF_LIFE_DAYS: f64 = 30.0;
+
+/// m-estimate rate: the empirical rate shrunk toward `computed` by a fixed prior
+/// strength. With no evidence it returns `computed` exactly, so cold start stays
+/// honest rather than neutral.
+pub fn shrinkage_rate(correct: f64, total: f64, computed: f64) -> f64 {
+    let bounded_total = total.max(0.0);
+    let bounded_correct = correct.clamp(0.0, bounded_total.max(0.0));
+    ((bounded_correct + SHRINKAGE_PRIOR_STRENGTH * computed.clamp(0.0, 1.0))
+        / (bounded_total + SHRINKAGE_PRIOR_STRENGTH))
+        .clamp(0.0, 1.0)
+}
+
+/// Age weight for stored evidence: 1.0 fresh, 0.5 per half-life elapsed.
+pub fn staleness_factor(updated_at_ms: u64, now_ms: u64) -> f64 {
+    let age_days = now_ms.saturating_sub(updated_at_ms) as f64 / 86_400_000.0;
+    0.5f64.powf(age_days / EVIDENCE_HALF_LIFE_DAYS)
+}
+
+/// Shrinkage over staleness-scaled evidence: the same m-estimate, but older
+/// records carry proportionally less weight than fresh ones.
+pub fn staleness_weighted_rate(correct: f64, total: f64, computed: f64, age_weight: f64) -> f64 {
+    let weight = age_weight.clamp(0.0, 1.0);
+    shrinkage_rate(correct * weight, total * weight, computed)
+}
+
+#[cfg(test)]
+mod benchmark_tests {
+    use super::*;
+
+    /// Deterministic LCG so the published table is reproducible in CI.
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn next_f64(&mut self) -> f64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            ((self.0 >> 11) as f64) / ((1u64 << 53) as f64)
+        }
+    }
+
+    /// The routed skill is right 75% of the time; evidence appears on 25% of
+    /// decisions. Silence is the common case, which is the whole problem.
+    const ROUTE_ACCURACY: f64 = 0.75;
+    const EVIDENCE_RATE: f64 = 0.25;
+
+    /// Estimates both pipelines from one stream and prints the comparison table.
+    /// The legacy pipeline scores silence as failure; the new one scores only
+    /// evidence-bearing decisions, so their estimands differ by construction.
+    #[test]
+    fn silence_poisoning_benchmark_table() {
+        println!("\n| decisions | estimator | estimand | estimate | truth | bias | scorable |");
+        println!("|---|---|---|---|---|---|---|");
+        for decisions in [10usize, 50, 200, 2000] {
+            let mut rng = Lcg(0x5eed);
+            let (mut legacy_total, mut legacy_correct) = (0usize, 0usize);
+            let (mut new_total, mut new_correct) = (0usize, 0usize);
+            for _ in 0..decisions {
+                let right = rng.next_f64() < ROUTE_ACCURACY;
+                let evidenced = rng.next_f64() < EVIDENCE_RATE;
+                // Legacy: every decision is scored, silence counts as a miss.
+                legacy_total += 1;
+                if right && evidenced {
+                    legacy_correct += 1;
+                }
+                // New: only an evidenced decision carries a usable outcome.
+                if evidenced {
+                    new_total += 1;
+                    if right {
+                        new_correct += 1;
+                    }
+                }
+            }
+            let legacy = laplace_rate(legacy_total, legacy_correct);
+            let new = laplace_rate(new_total, new_correct);
+            let scorable = new_total as f64 / decisions as f64;
+            println!(
+                "| {decisions} | legacy | routing accuracy | {legacy:.3} | {ROUTE_ACCURACY:.3} | {:.3} | 1.000 |",
+                legacy - ROUTE_ACCURACY
+            );
+            println!(
+                "| {decisions} | new | P(right \\| evidence) | {new:.3} | {ROUTE_ACCURACY:.3} | {:.3} | {scorable:.3} |",
+                new - ROUTE_ACCURACY
+            );
+            assert!(
+                (legacy - ROUTE_ACCURACY).abs() > 0.30,
+                "the legacy estimand must stay badly biased at n={decisions}"
+            );
+        }
+        let mut rng = Lcg(0x5eed);
+        let (mut total, mut correct) = (0usize, 0usize);
+        for _ in 0..2000 {
+            let right = rng.next_f64() < ROUTE_ACCURACY;
+            let evidenced = rng.next_f64() < EVIDENCE_RATE;
+            if evidenced {
+                total += 1;
+                if right {
+                    correct += 1;
+                }
+            }
+        }
+        let converged = laplace_rate(total, correct) - ROUTE_ACCURACY;
+        assert!(
+            converged.abs() < 0.10,
+            "the new estimand must converge on the truth, got bias {converged:.3}"
+        );
+    }
+
+    /// Evidence arrives in tens, not hundreds: the legacy reference weighting
+    /// barely moves at n=20, while shrinkage has already taken the evidence.
+    #[test]
+    fn shrinkage_authority_table() {
+        let computed = 0.60;
+        let at_n20 = laplace_rate(20, 18);
+        let legacy = blend(at_n20, computed, 20);
+        let shrunk = shrinkage_rate(18.0, 20.0, computed);
+        println!("\n| estimator | prior strength | estimate at n=20 | distance from computed |");
+        println!("|---|---|---|---|");
+        println!(
+            "| legacy blend | {BLEND_REFERENCE_SAMPLES:.0} | {legacy:.3} | {:.3} |",
+            legacy - computed
+        );
+        println!(
+            "| shrinkage | {SHRINKAGE_PRIOR_STRENGTH:.0} | {shrunk:.3} | {:.3} |",
+            shrunk - computed
+        );
+        assert!(
+            shrunk - computed > (legacy - computed) * 2.0,
+            "shrinkage must take the evidence faster: legacy {legacy:.3} vs shrunk {shrunk:.3}"
+        );
+        assert!(
+            (shrinkage_rate(0.0, 0.0, computed) - computed).abs() < f64::EPSILON,
+            "cold start must return the computed value unchanged"
+        );
+    }
+
+    /// Age decays evidence rather than letting stale outcomes dominate forever.
+    #[test]
+    fn staleness_decays_old_evidence() {
+        let now = 1_800_000_000_000u64;
+        let fresh = staleness_factor(now, now);
+        let one_half_life =
+            staleness_factor(now - (EVIDENCE_HALF_LIFE_DAYS as u64) * 86_400_000, now);
+        assert!((fresh - 1.0).abs() < f64::EPSILON);
+        assert!((one_half_life - 0.5).abs() < 0.01);
+        let stale = staleness_weighted_rate(20.0, 20.0, 0.5, one_half_life);
+        let fresh_rate = staleness_weighted_rate(20.0, 20.0, 0.5, fresh);
+        assert!(
+            (stale - 0.5).abs() < (fresh_rate - 0.5).abs(),
+            "older evidence must pull the estimate less: stale {stale:.3} vs fresh {fresh_rate:.3}"
+        );
+    }
+}
+
 /// Default significance / error level for Conformal Risk Control (CRC): 5% miscoverage.
 pub const DEFAULT_CONFORMAL_ALPHA: f64 = 0.05;
 

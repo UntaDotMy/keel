@@ -45,6 +45,11 @@ pub struct SkillCalibrationRecord {
     pub skill_name: String,
     pub buckets: [CalibrationBucket; CALIBRATION_BINS],
     pub updated_at_ms: u64,
+    /// Outcome-semantics epoch the evidence was written under. Absent in records
+    /// written before the three-state outcome fix, which deserialize as 0 and are
+    /// therefore ineligible for calibration.
+    #[serde(default)]
+    pub epoch: u32,
 }
 
 impl SkillCalibrationRecord {
@@ -53,6 +58,7 @@ impl SkillCalibrationRecord {
             skill_name: skill_name.to_string(),
             buckets: [CalibrationBucket::default(); CALIBRATION_BINS],
             updated_at_ms: current_time_ms(),
+            epoch: crate::utility::calibration::OUTCOME_SEMANTICS_EPOCH,
         }
     }
 
@@ -63,6 +69,7 @@ impl SkillCalibrationRecord {
             self.buckets[bin].correct = self.buckets[bin].correct.saturating_add(1);
         }
         self.updated_at_ms = current_time_ms();
+        self.epoch = crate::utility::calibration::OUTCOME_SEMANTICS_EPOCH;
     }
 
     pub fn skill_totals(&self) -> (usize, usize) {
@@ -80,19 +87,31 @@ impl SkillCalibrationRecord {
         global_total: usize,
         global_correct: usize,
     ) -> crate::utility::calibration::TieredEstimate {
-        use crate::utility::calibration::hierarchical_blend;
-        let bin = confidence_to_bin(computed_confidence);
-        let bucket = self.buckets[bin];
-        let (parent_total, parent_correct) = self.skill_totals();
-        hierarchical_blend(
-            bucket.total,
-            bucket.correct,
-            parent_total,
-            parent_correct,
-            global_total,
-            global_correct,
-            computed_confidence,
-        )
+        use crate::utility::calibration::{
+            laplace_rate, staleness_factor, staleness_weighted_rate, TieredEstimate,
+            OUTCOME_SEMANTICS_EPOCH, SHRINKAGE_PRIOR_STRENGTH,
+        };
+        let (total, correct) = self.skill_totals();
+        if self.epoch < OUTCOME_SEMANTICS_EPOCH {
+            // Pre-epoch evidence measured silence as failure, so it carries no
+            // authority; the computed value stands until fresh outcomes arrive.
+            return TieredEstimate {
+                calibrated: computed_confidence.clamp(0.0, 1.0),
+                total_samples: 0,
+                prior_dominated: true,
+            };
+        }
+        let prior = if total == 0 && global_total > 0 {
+            laplace_rate(global_total, global_correct)
+        } else {
+            computed_confidence
+        };
+        let age_weight = staleness_factor(self.updated_at_ms, current_time_ms());
+        TieredEstimate {
+            calibrated: staleness_weighted_rate(correct as f64, total as f64, prior, age_weight),
+            total_samples: total as u64,
+            prior_dominated: (total as f64 * age_weight) < SHRINKAGE_PRIOR_STRENGTH,
+        }
     }
 }
 
