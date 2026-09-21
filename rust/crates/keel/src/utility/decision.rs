@@ -245,7 +245,6 @@ pub fn get_calibrated_confidence(
     calibration_detail(claude_home, skill_name, computed_confidence).calibrated
 }
 
-// ============================================================================
 // Gate Outcomes: three-state evidence behind gate denial confidence
 // ============================================================================
 
@@ -350,7 +349,7 @@ pub fn stage_gate_denial(
     claude_home: &Path,
     gate_name: &str,
     session_id: &str,
-    declared_confidence: f64,
+    prior_confidence: f64,
 ) -> Result<(), String> {
     let path = gate_denial_stage_file(claude_home, gate_name, session_id);
     if let Some(parent) = path.parent() {
@@ -359,7 +358,7 @@ pub fn stage_gate_denial(
     let staged = StagedGateDenial {
         gate: gate_name.to_string(),
         session: session_id.to_string(),
-        declared_confidence,
+        declared_confidence: prior_confidence,
     };
     let text = serde_json::to_string_pretty(&staged)
         .map_err(|e| format!("serialize staged gate denial: {e}"))?;
@@ -367,8 +366,8 @@ pub fn stage_gate_denial(
 }
 
 /// Resolve a staged denial once the gate's requirement was satisfied: record
-/// `Upheld` and clear the stage. `None` means nothing was staged — the gate
-/// never denied this session, so there is no evidence to score.
+/// `Upheld` and clear the stage. `None` means nothing was staged, so the gate
+/// never denied this session and there is no evidence to score.
 pub fn resolve_staged_gate_denial(
     claude_home: &Path,
     gate_name: &str,
@@ -389,8 +388,8 @@ pub fn resolve_staged_gate_denial(
 }
 
 /// Consume this session's unresolved stages at session end. An unresolved
-/// denial is `Unknown` — the gate may have been right, but the session left no
-/// evidence — so the recorder scores nothing and the pending ledger does not
+/// denial is `Unknown`: the gate may have been right, but the session left no
+/// evidence, so the recorder scores nothing and the pending ledger does not
 /// grow forever. Returns how many stages were consumed.
 pub fn discard_staged_gate_denials(claude_home: &Path, session_id: &str) -> usize {
     let Ok(entries) = fs::read_dir(gate_outcomes_dir(claude_home).join("pending")) else {
@@ -426,7 +425,7 @@ pub fn record_gate_override(
     claude_home: &Path,
     gate_name: &str,
     session_id: &str,
-    declared_confidence: f64,
+    prior_confidence: f64,
 ) -> Result<Option<f64>, String> {
     let path = gate_outcomes_dir(claude_home)
         .join("overrides")
@@ -442,7 +441,7 @@ pub fn record_gate_override(
         claude_home,
         gate_name,
         GateOutcome::Overridden,
-        declared_confidence,
+        prior_confidence,
     )
     .map(Some)
 }
@@ -519,15 +518,6 @@ pub fn record_conformal_outcome(
     fs::write(conformal_history_file(claude_home), text)
         .map_err(|e| format!("write conformal history: {e}"))?;
     Ok(())
-}
-
-pub fn evaluate_conformal_confidence(
-    claude_home: &Path,
-    confidence: f64,
-    alpha: f64,
-) -> crate::utility::calibration::ConformalEvaluation {
-    let calibrator = load_conformal_calibrator(claude_home, alpha);
-    calibrator.evaluate_prediction(confidence)
 }
 
 // K-Native-4: Closed-Loop Local Prior Self-Tuning & Quarantine
