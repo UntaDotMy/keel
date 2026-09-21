@@ -541,6 +541,10 @@ fn run_latency_benchmark(
         )
     };
     let _warm_projection = firewall.project(projection("warm-up payload"));
+    // why: recall opens (and may rebuild) its FTS index on first use; warm the
+    // owner here so index construction is not charged to the retrieval stage.
+    let _warm_recall =
+        crate::utility::recall::search_recall_index(&claude_home, "latency probe", 5, None);
     let store = crate::proxy::raw_store::RawStore::new();
     // why: an empty or unreadable store only means there is no recovery pointer to
     // time; the stage reports zero rather than failing the whole benchmark.

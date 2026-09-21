@@ -335,6 +335,34 @@ fn pack_catalog_page(
     spec_default: bool,
     all_tools: Vec<Value>,
 ) -> Result<Value, String> {
+    pack_catalog_page_at(
+        profile,
+        level,
+        budget,
+        cursor,
+        context,
+        compact_default,
+        spec_default,
+        all_tools,
+        now_unix_seconds(),
+    )
+}
+
+/// [`pack_catalog_page`] with the request instant pinned. A fresh walk buckets
+/// its cursor deadline from this value, so pinning it keeps two immediate calls
+/// byte-identical instead of racing a TTL window boundary (§34).
+#[allow(clippy::too_many_arguments)]
+fn pack_catalog_page_at(
+    profile: super::McpCatalogProfile,
+    level: u64,
+    budget: usize,
+    cursor: Option<&str>,
+    context: &super::McpRequestContext,
+    compact_default: bool,
+    spec_default: bool,
+    all_tools: Vec<Value>,
+    now_seconds: u64,
+) -> Result<Value, String> {
     let expected = all_tools.len();
     let fingerprint = catalog_snapshot_fingerprint(profile, &all_tools, level, budget);
     let start = match cursor {
@@ -360,7 +388,7 @@ fn pack_catalog_page(
     // let the clock change which tools a page packs. One TTL window, one deadline.
     let expiry = match cursor {
         Some(value) => peek_catalog_cursor(value)?.expires_at,
-        None => catalog_cursor_expiry_at(now_unix_seconds(), mcp_cursor_ttl_seconds()),
+        None => catalog_cursor_expiry_at(now_seconds, mcp_cursor_ttl_seconds()),
     };
     let mut page_tools = Vec::new();
     let mut offset = start;
@@ -7497,7 +7525,8 @@ mod tests {
     }
 
     /// §34 through the real packer: two fresh identical requests must select the
-    /// same tools at the same measured cost, with no allowance for the clock.
+    /// same tools at the same measured cost. The request instant is pinned so the
+    /// TTL bucket cannot roll between the two calls and make the pair differ.
     #[test]
     fn repeated_identical_requests_pack_the_same_page() {
         let _env_guard = crate::test_support::ENV_LOCK
@@ -7510,9 +7539,20 @@ mod tests {
         let profile = crate::mcp::McpCatalogProfile::Tiered;
         let tools = synthetic_paging_tools("repeat-tool");
         let context = crate::mcp::McpRequestContext::authoritative(Some("repeat-session"));
+        const PINNED_NOW_SECONDS: u64 = 1_789_000_000;
         let pack = || {
-            pack_catalog_page(profile, 2, 600, None, &context, false, false, tools.clone())
-                .expect("a valid budget must produce a page")
+            pack_catalog_page_at(
+                profile,
+                2,
+                600,
+                None,
+                &context,
+                false,
+                false,
+                tools.clone(),
+                PINNED_NOW_SECONDS,
+            )
+            .expect("a valid budget must produce a page")
         };
 
         let first = pack();
