@@ -61,6 +61,9 @@ pub struct BenchmarkReport {
     pub local_brier: Option<f64>,
     pub local_ece: Option<f64>,
     pub local_confidence_rows: usize,
+    /// Rows where the local column made a decision at all. Silence is not a
+    /// wrong answer, and reporting them together would hide which one happened.
+    pub local_decided: usize,
     /// Where the prompts came from. Keel's own fixtures and a fetched public
     /// corpus must never read as the same result.
     pub source: String,
@@ -82,10 +85,36 @@ pub fn build_cases() -> Vec<(String, Option<String>)> {
 }
 
 pub fn run(home: Option<&std::path::Path>, remote: bool) -> BenchmarkReport {
-    let cases = build_cases();
+    score_cases(
+        home,
+        &build_cases(),
+        CONTROL_PROMPTS.len(),
+        SOURCE_FIXTURES,
+        remote,
+    )
+}
+
+/// Score a corpus fetched from outside keel through the same path as the
+/// fixtures, so the two numbers stay comparable and the source label keeps them
+/// from being quoted as one result.
+pub fn run_external(
+    home: Option<&std::path::Path>,
+    cases: &[(String, Option<String>)],
+    remote: bool,
+) -> BenchmarkReport {
+    score_cases(home, cases, 0, SOURCE_EXTERNAL, remote)
+}
+
+fn score_cases(
+    home: Option<&std::path::Path>,
+    cases: &[(String, Option<String>)],
+    controls: usize,
+    source: &str,
+    remote: bool,
+) -> BenchmarkReport {
     let prompts: Vec<String> = cases.iter().map(|(prompt, _)| prompt.clone()).collect();
     let remote_batch = if remote {
-        run_remote(&prompts, REMOTE_ENDPOINT)
+        run_remote(&prompts, &expected_labels(cases), REMOTE_ENDPOINT)
     } else {
         None
     };
@@ -145,9 +174,11 @@ pub fn run(home: Option<&std::path::Path>, remote: bool) -> BenchmarkReport {
     let local_brier = brier_score(&local_pairs);
     let local_ece = ece_score(&local_pairs);
 
+    let local_decided = rows.iter().filter(|row| row.local.is_some()).count();
+
     BenchmarkReport {
         cases: cases.len(),
-        controls: CONTROL_PROMPTS.len(),
+        controls,
         local_correct,
         remote_available: remote_batch.is_some(),
         remote_correct,
@@ -158,7 +189,8 @@ pub fn run(home: Option<&std::path::Path>, remote: bool) -> BenchmarkReport {
         local_brier,
         local_ece,
         local_confidence_rows: local_pairs.len(),
-        source: SOURCE_FIXTURES.to_string(),
+        local_decided,
+        source: source.to_string(),
         rows,
     }
 }
@@ -196,24 +228,134 @@ fn ece_score(pairs: &[(f64, bool)]) -> Option<f64> {
     Some(expected_calibration_error(pairs))
 }
 
+/// Where a fetched corpus came from, kept distinct from the fixtures so a
+/// self-referential run can never be quoted as a real-world result.
+pub const SOURCE_EXTERNAL: &str = "stackoverflow tags (external ground truth)";
+
+const EXTERNAL_ENDPOINT: &str = "https://api.stackexchange.com/2.3/questions";
+const EXTERNAL_TIMEOUT_SECS: &str = "20";
+
+/// Community tags mapped to the keel skill that owns that work. The mapping is
+/// mechanical: the tag names the domain and the skill owns the domain, so the
+/// labels are the community's, not keel's own vocabulary.
+pub const EXTERNAL_TAGS: &[(&str, &str)] = &[
+    ("rust", "rust"),
+    ("unit-testing", "test-driven-development"),
+    ("debugging", "systematic-debugging"),
+    ("security", "adversarial-security-review"),
+    ("postgresql", "postgres-migration-safety"),
+    ("websocket", "websocket-realtime-design"),
+    (
+        "internationalization",
+        "internationalization-and-localization",
+    ),
+    ("kubernetes", "cloud-and-devops-expert"),
+];
+
+/// Fetch recent question titles per tag from the public Stack Exchange API. The
+/// keyless quota is 300 requests a day and each tag costs one request, so the
+/// caller caches the corpus instead of refetching it.
+pub fn fetch_external(per_tag: usize) -> Result<Vec<(String, Option<String>)>, String> {
+    let mut cases = Vec::new();
+    for (tag, skill) in EXTERNAL_TAGS {
+        let url = format!(
+            "{EXTERNAL_ENDPOINT}?order=desc&sort=activity&site=stackoverflow&pagesize={per_tag}&tagged={tag}"
+        );
+        let output = Command::new("curl")
+            .args([
+                "-s",
+                "--compressed",
+                "--max-time",
+                EXTERNAL_TIMEOUT_SECS,
+                &url,
+            ])
+            .output()
+            .map_err(|error| format!("curl failed for {tag}: {error}"))?;
+        let parsed: serde_json::Value = serde_json::from_slice(&output.stdout)
+            .map_err(|error| format!("stackexchange {tag}: unreadable response: {error}"))?;
+        if let Some(message) = parsed
+            .get("error_message")
+            .and_then(serde_json::Value::as_str)
+        {
+            return Err(format!("stackexchange {tag}: {message}"));
+        }
+        // The API requires a caller to wait when it sets backoff, and a spent
+        // quota would fail every later tag too.
+        if let Some(seconds) = parsed.get("backoff").and_then(serde_json::Value::as_u64) {
+            std::thread::sleep(std::time::Duration::from_secs(seconds));
+        }
+        if parsed
+            .get("quota_remaining")
+            .and_then(serde_json::Value::as_u64)
+            == Some(0)
+        {
+            return Err(format!("stackexchange quota spent while reading {tag}"));
+        }
+        let items = parsed
+            .get("items")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| format!("stackexchange {tag}: no items array"))?;
+        for item in items {
+            let title = item
+                .get("title")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .unwrap_or_default();
+            if !title.is_empty() {
+                cases.push((title.to_string(), Some((*skill).to_string())));
+            }
+        }
+    }
+    if cases.is_empty() {
+        return Err("stackexchange returned no question titles".to_string());
+    }
+    Ok(cases)
+}
+
+/// Cache location for a fetched corpus: refetching would spend the keyless quota
+/// again and would make one run incomparable with the next.
+pub fn external_cache_path(claude_home: &std::path::Path) -> std::path::PathBuf {
+    crate::runtime::state_directory(claude_home)
+        .join("benchmarks")
+        .join("stackoverflow-corpus.json")
+}
+
+pub fn read_external_cache(path: &std::path::Path) -> Option<Vec<(String, Option<String>)>> {
+    let text = std::fs::read_to_string(path).ok()?; // why: an absent cache means fetch
+    let cases: Vec<(String, Option<String>)> = serde_json::from_str(&text).ok()?; // why: an unreadable cache means fetch
+    (!cases.is_empty()).then_some(cases)
+}
+
+pub fn write_external_cache(
+    path: &std::path::Path,
+    cases: &[(String, Option<String>)],
+) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| format!("create cache dir: {error}"))?;
+    }
+    let text =
+        serde_json::to_string(cases).map_err(|error| format!("serialize corpus: {error}"))?;
+    std::fs::write(path, text).map_err(|error| format!("write corpus cache: {error}"))
+}
+
 struct RemoteBatch {
     model: Option<String>,
     items: Vec<(String, Option<f64>, u64)>,
 }
 
-/// One request carries every case, so the label set is the deduped skill list
-/// plus the none-of-the-above option the service documents for that case.
-fn remote_labels() -> Vec<String> {
-    let labels: Vec<String> = curated_skill_cases()
-        .into_iter()
-        .map(|(_, skill)| skill)
+/// One request carries every case, so the label set is the corpus's own expected
+/// skills plus the none-of-the-above option the service documents for that case.
+fn expected_labels(cases: &[(String, Option<String>)]) -> Vec<String> {
+    let labels: Vec<String> = cases
+        .iter()
+        .filter_map(|(_, skill)| skill.clone())
         .chain(std::iter::once(REMOTE_NONE_LABEL.to_string()))
         .collect();
     unique_labels(&labels)
 }
 
-fn run_remote(prompts: &[String], endpoint: &str) -> Option<RemoteBatch> {
-    let body = json!({ "inputs": prompts, "labels": remote_labels() }).to_string();
+fn run_remote(prompts: &[String], labels: &[String], endpoint: &str) -> Option<RemoteBatch> {
+    let body = json!({ "inputs": prompts, "labels": labels }).to_string();
     let output = Command::new("curl")
         .args([
             "-s",
@@ -290,14 +432,15 @@ pub fn render(report: &BenchmarkReport) -> String {
     let mut out = String::new();
     out.push_str(&format!("KEEL DECISION BENCHMARK   {}\n", report.source));
     out.push_str(&format!(
-        "cases: {} ({} curated prompts, {} controls)\n",
-        report.cases,
-        report.cases.saturating_sub(report.controls),
-        report.controls
+        "cases: {} ({} controls)\n",
+        report.cases, report.controls
     ));
     out.push_str(&format!(
-        "keel local       correct {}/{}\n",
-        report.local_correct, report.cases
+        "keel local       correct {}/{}   decided {}   silent {}\n",
+        report.local_correct,
+        report.cases,
+        report.local_decided,
+        report.cases.saturating_sub(report.local_decided)
     ));
     if report.remote_available {
         out.push_str(&format!(
@@ -379,6 +522,7 @@ pub fn to_json(report: &BenchmarkReport) -> serde_json::Value {
         "local_brier": report.local_brier,
         "local_ece": report.local_ece,
         "local_confidence_rows": report.local_confidence_rows,
+        "local_decided": report.local_decided,
         "source": report.source,
         "remote_available": report.remote_available,
         "remote_correct": report.remote_correct,
@@ -405,10 +549,80 @@ mod tests {
     use super::*;
 
     #[test]
+    fn external_tag_map_is_mechanical_and_unique() {
+        let mut tags: Vec<&str> = Vec::new();
+        for (tag, skill) in EXTERNAL_TAGS {
+            assert!(
+                !tag.is_empty() && !skill.is_empty(),
+                "{tag} maps to nothing"
+            );
+            assert!(!tags.contains(tag), "{tag} appears twice");
+            tags.push(tag);
+        }
+        assert!(
+            tags.len() >= 8,
+            "a real benchmark needs breadth, not one tag"
+        );
+        assert_ne!(
+            SOURCE_EXTERNAL, SOURCE_FIXTURES,
+            "an external run must not read as a self-referential one"
+        );
+    }
+
+    #[test]
+    fn external_corpus_scores_through_the_same_path() {
+        let cases = vec![
+            (
+                "fix the borrow checker error".to_string(),
+                Some("rust".to_string()),
+            ),
+            (
+                "why is my unit test flaky".to_string(),
+                Some("test-driven-development".to_string()),
+            ),
+        ];
+        let report = run_external(None, &cases, false);
+        assert_eq!(report.cases, 2);
+        assert_eq!(report.controls, 0);
+        assert_eq!(report.source, SOURCE_EXTERNAL);
+        assert!(!report.remote_available);
+        assert_eq!(
+            report.local_confidence_rows, 0,
+            "no home means no calibrated column, and the count must say so"
+        );
+        assert_eq!(
+            report.local_decided, 0,
+            "question-shaped titles route to nothing, and silence must be counted as silence"
+        );
+        assert_eq!(report.rows.len(), 2);
+    }
+
+    #[test]
+    fn external_cache_round_trips_and_rejects_empty() {
+        let dir = std::env::temp_dir().join(format!("keel-external-cache-{}", std::process::id()));
+        let path = dir.join("corpus.json");
+        let cases = vec![("title".to_string(), Some("rust".to_string()))];
+        write_external_cache(&path, &cases).unwrap();
+        assert_eq!(read_external_cache(&path), Some(cases));
+        write_external_cache(&path, &[]).unwrap();
+        assert_eq!(
+            read_external_cache(&path),
+            None,
+            "an empty cache is not a corpus"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn curated_cases_route_locally() {
         let report = run(None, false);
         assert_eq!(report.cases, build_cases().len());
         assert_eq!(report.local_correct, report.cases);
+        assert_eq!(
+            report.local_decided,
+            report.cases - report.controls,
+            "the control prompts are correctly silent, everything else decides"
+        );
         assert!(!report.remote_available);
         assert!(report.remote_brier.is_none());
         assert!(report.remote_ece.is_none());
@@ -452,7 +666,7 @@ mod tests {
 
     #[test]
     fn labels_are_unique_and_cover_controls() {
-        let labels = remote_labels();
+        let labels = expected_labels(&build_cases());
         let mut sorted = labels.clone();
         sorted.sort();
         sorted.dedup();

@@ -2708,7 +2708,48 @@ pub fn handle_decision_tool(arguments: &Value) -> Result<String, String> {
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
             let home = crate::runtime::resolve_claude_home("").ok(); // why: no home means no calibrated column
-            let report = crate::utility::decision_benchmark::run(home.as_deref(), remote);
+            let external = arguments
+                .get("external")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let report = if external {
+                let refresh = arguments
+                    .get("refresh")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let per_tag = arguments
+                    .get("per_tag")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(25) as usize;
+                let cache = home
+                    .as_deref()
+                    .map(crate::utility::decision_benchmark::external_cache_path);
+                let cached = if refresh {
+                    None
+                } else {
+                    cache
+                        .as_deref()
+                        .and_then(crate::utility::decision_benchmark::read_external_cache)
+                };
+                let cases = match cached {
+                    Some(cases) => cases,
+                    None => {
+                        let fetched = crate::utility::decision_benchmark::fetch_external(per_tag)
+                            .map_err(|error| format!("decision benchmark: {error}"))?;
+                        if let Some(path) = cache.as_deref() {
+                            // why: a cache that cannot be written must not fail a
+                            // run that already fetched its corpus.
+                            let _ = crate::utility::decision_benchmark::write_external_cache(
+                                path, &fetched,
+                            );
+                        }
+                        fetched
+                    }
+                };
+                crate::utility::decision_benchmark::run_external(home.as_deref(), &cases, remote)
+            } else {
+                crate::utility::decision_benchmark::run(home.as_deref(), remote)
+            };
             if arguments.get("json").and_then(Value::as_bool).unwrap_or(false) {
                 return serde_json::to_string_pretty(
                     &crate::utility::decision_benchmark::to_json(&report),
@@ -2873,7 +2914,7 @@ pub fn run_decision_command(
                 samples             Show labeled decision samples collected for offline training\n  \
                 train               Fit the per-surface calibration experts over the sample corpus\n  \
                 model               Show the trained decision model or calibrate one signal\n  \
-                benchmark           Score keel routing against a remote zero-shot API (--remote)\n  \
+                benchmark           Score routing: keel fixtures, or the --external stackoverflow corpus, against classifier.dev (--remote, --per-tag N, --refresh)\n  \
                 calibration-report  Show calibration health across routing, review, composition, shell, conformal"
         );
         return 0;
@@ -2942,6 +2983,9 @@ pub fn run_decision_command(
         }
         "benchmark" => {
             flag_set.bool_flag("remote", false);
+            flag_set.bool_flag("external", false);
+            flag_set.bool_flag("refresh", false);
+            flag_set.string_flag("per-tag", "25");
             flag_set.bool_flag("json", false);
         }
         other => {
@@ -3103,6 +3147,9 @@ pub fn run_decision_command(
         "benchmark" => serde_json::json!({
             "action": "benchmark",
             "remote": flag_set.bool_value("remote"),
+            "external": flag_set.bool_value("external"),
+            "refresh": flag_set.bool_value("refresh"),
+            "per_tag": flag_set.string_value("per-tag").trim().parse::<u64>().unwrap_or(25),
             "json": flag_set.bool_value("json"),
         }),
         "conformal" => {
