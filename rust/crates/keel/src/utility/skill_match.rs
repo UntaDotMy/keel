@@ -158,6 +158,20 @@ struct PendingSkillMatch {
     matched_at_secs: u64,
 }
 
+/// Outcome of a staged routing decision. `Unknown` is a first-class state rather
+/// than a failure: a skill that was used silently leaves no citation, and
+/// recording that silence as a mis-route is what taught this loop false
+/// negatives. Only `Used` and `Unused` carry evidence and may be recorded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoutingOutcome {
+    /// Positive evidence the routed skill was followed.
+    Used,
+    /// Positive evidence a competing candidate was followed instead.
+    Unused,
+    /// No evidence either way; excluded from success rate, calibration, priors.
+    Unknown,
+}
+
 fn skill_match_pending_path(claude_home: &Path) -> PathBuf {
     state_directory(claude_home).join(SKILL_MATCH_PENDING_FILE)
 }
@@ -201,13 +215,25 @@ pub fn reconcile_skill_match_outcomes(claude_home: &Path) -> usize {
         .map(|entry| entry.skill_name.clone())
         .collect();
     let cited = cited_skill_names(claude_home, &candidates);
+    // A citation for any candidate is evidence the session followed one routing
+    // decision; the rest of that batch are misses, and silence is still unknown.
+    let any_cited = !cited.is_empty();
     let mut reconciled = 0usize;
     for entry in &pending {
-        let helpful = cited.contains(&entry.skill_name);
+        let outcome = if cited.contains(&entry.skill_name) {
+            RoutingOutcome::Used
+        } else if any_cited {
+            RoutingOutcome::Unused
+        } else {
+            RoutingOutcome::Unknown
+        };
+        if outcome == RoutingOutcome::Unknown {
+            continue;
+        }
         if crate::utility::decision::record_skill_session_outcome(
             claude_home,
             &entry.skill_name,
-            helpful,
+            outcome == RoutingOutcome::Used,
             entry.predicted_confidence,
         )
         .is_ok()
@@ -3781,21 +3807,66 @@ mod tests {
         let _ = fs::remove_dir_all(&home);
     }
 
+    /// Skill names shared by the reconcile tests, so each name has one owner.
+    const REVIEWER_SKILL: &str = "reviewer";
+    const CRITIC_SKILL: &str = "critic";
+
     #[test]
-    fn reconcile_skill_match_outcomes_records_failure_when_uncited() {
-        let home = home_with_skills("reconcile", &[("reviewer", "review code diffs")]);
-        record_pending_skill_match(&home, "reviewer", 0.8);
-        assert_eq!(reconcile_skill_match_outcomes(&home), 1);
-        let rate = crate::utility::skill_usage::skill_success_rate(&home, "reviewer");
+    fn reconcile_skill_match_outcomes_treats_silence_as_unknown() {
+        let home = home_with_skills("reconcile", &[(REVIEWER_SKILL, "review code diffs")]);
+        record_pending_skill_match(&home, REVIEWER_SKILL, 0.8);
+        assert_eq!(
+            reconcile_skill_match_outcomes(&home),
+            0,
+            "a silently used skill leaves no citation, so no outcome may be recorded"
+        );
+        let rate = crate::utility::skill_usage::skill_success_rate(&home, REVIEWER_SKILL);
         assert!(
-            rate < 0.5,
-            "uncited routing must record failure, got {rate}"
+            rate >= 0.5,
+            "an unknown outcome must not move the success rate, got {rate}"
         );
         assert_eq!(
             reconcile_skill_match_outcomes(&home),
             0,
             "the pending ledger is consumed"
         );
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    /// A citation for one candidate is positive evidence the session followed a
+    /// different routing decision, so the rest of that batch is a real miss.
+    #[test]
+    fn reconcile_skill_match_outcomes_records_failure_for_an_uncited_peer() {
+        let home = home_with_skills(
+            "reconcile-peer",
+            &[
+                (REVIEWER_SKILL, "review code diffs"),
+                (CRITIC_SKILL, "critique an implementation"),
+            ],
+        );
+        record_pending_skill_match(&home, CRITIC_SKILL, 0.8);
+        record_pending_skill_match(&home, REVIEWER_SKILL, 0.8);
+        crate::runner::observation::record_observation_from_parts(
+            &home,
+            "Bash",
+            r#"{"command":"keel skill_get reviewer"}"#,
+            "/",
+            "sess-peer",
+            false,
+        )
+        .expect("record observation");
+        assert_eq!(
+            reconcile_skill_match_outcomes(&home),
+            2,
+            "both peers are resolved when one of them is cited"
+        );
+        let missed = crate::utility::skill_usage::skill_success_rate(&home, CRITIC_SKILL);
+        assert!(
+            missed < 0.5,
+            "the uncited peer must record a miss, got {missed}"
+        );
+        let hit = crate::utility::skill_usage::skill_success_rate(&home, REVIEWER_SKILL);
+        assert!(hit > 0.5, "the cited skill must record a hit, got {hit}");
         let _ = fs::remove_dir_all(&home);
     }
 

@@ -177,7 +177,8 @@ pub(crate) fn run_session_end_learning(standard_error: &mut dyn Write) {
         Ok(path) => path,
         Err(_) => return,
     };
-    // J08: reconcile staged routing outcomes (cited = helpful). Fail-open.
+    // J08: reconcile staged routing outcomes. A citation is evidence of use, a
+    // cited peer is evidence of a miss, and silence stays unknown. Fail-open.
     let outcomes_reconciled =
         crate::utility::skill_match::reconcile_skill_match_outcomes(&claude_home);
     if outcomes_reconciled > 0 {
