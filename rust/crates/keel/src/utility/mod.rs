@@ -12,6 +12,7 @@ pub mod code_search;
 pub mod compute_backend;
 pub mod config_audit;
 pub mod decision;
+pub mod decision_benchmark;
 pub mod decision_model;
 pub mod decision_samples;
 pub mod design_intelligence;

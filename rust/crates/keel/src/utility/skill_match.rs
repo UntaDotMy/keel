@@ -1649,6 +1649,19 @@ const CURATED_SKILL_TRIGGERS: &[(&str, &[&str])] = &[
     ),
 ];
 
+/// Every curated trigger phrase paired with the skill it must route to, in
+/// table order. Shape: (prompt, expected skill). Owner of the benchmark cases.
+pub fn curated_skill_cases() -> Vec<(String, String)> {
+    CURATED_SKILL_TRIGGERS
+        .iter()
+        .flat_map(|(skill, phrases)| {
+            phrases
+                .iter()
+                .map(move |phrase| ((*phrase).to_string(), (*skill).to_string()))
+        })
+        .collect()
+}
+
 /// Pure curated-tier lookup (no IO) so the trigger phrases are unit-testable.
 /// Returns the first curated skill whose trigger phrase appears in the
 /// lowercased prompt, or `None`. Conservative by construction: it errs toward

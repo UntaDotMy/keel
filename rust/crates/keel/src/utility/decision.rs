@@ -2250,7 +2250,7 @@ pub fn handle_decision_tool(arguments: &Value) -> Result<String, String> {
         .get("action")
         .and_then(Value::as_str)
         .ok_or_else(|| {
-            "decision: 'action' is required (score, noul, choice, calibrate, review-feedback, noul-feedback, calibration-report, conformal, samples, train, model)"
+            "decision: 'action' is required (score, noul, choice, calibrate, review-feedback, noul-feedback, calibration-report, conformal, samples, train, model, benchmark)"
                 .to_string()
         })?;
 
@@ -2648,6 +2648,20 @@ pub fn handle_decision_tool(arguments: &Value) -> Result<String, String> {
             serde_json::to_string_pretty(&crate::utility::decision_model::summary_value(&model))
                 .map_err(|e| format!("serialize decision model: {e}"))
         }
+        "benchmark" => {
+            let remote = arguments
+                .get("remote")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let report = crate::utility::decision_benchmark::run(remote);
+            if arguments.get("json").and_then(Value::as_bool).unwrap_or(false) {
+                return serde_json::to_string_pretty(
+                    &crate::utility::decision_benchmark::to_json(&report),
+                )
+                .map_err(|e| format!("serialize decision benchmark: {e}"));
+            }
+            Ok(crate::utility::decision_benchmark::render(&report))
+        }
         "conformal" => {
             let home = crate::runtime::resolve_claude_home("")
                 .map_err(|e| format!("resolve home: {e}"))?;
@@ -2772,7 +2786,7 @@ pub fn handle_decision_tool(arguments: &Value) -> Result<String, String> {
             serde_json::to_string_pretty(&res)
                 .map_err(|e| format!("serialize conformal set result: {e}"))
         }
-        unknown => Err(format!("Unknown decision action: '{unknown}'. Supported: score, noul, choice, calibrate, review-feedback, noul-feedback, calibration-report, conformal, classify, priors, conformal-set, samples, train, model")),
+        unknown => Err(format!("Unknown decision action: '{unknown}'. Supported: score, noul, choice, calibrate, review-feedback, noul-feedback, calibration-report, conformal, classify, priors, conformal-set, samples, train, model, benchmark")),
     }
 }
 
@@ -2800,6 +2814,7 @@ pub fn run_decision_command(
                 samples             Show labeled decision samples collected for offline training\n  \
                 train               Fit the per-surface calibration experts over the sample corpus\n  \
                 model               Show the trained decision model or calibrate one signal\n  \
+                benchmark           Score keel routing against a remote zero-shot API (--remote)\n  \
                 calibration-report  Show calibration health across routing, review, composition, shell, conformal"
         );
         return 0;
@@ -2865,6 +2880,10 @@ pub fn run_decision_command(
         "model" => {
             flag_set.string_flag("surface", "");
             flag_set.string_flag("signal", "");
+        }
+        "benchmark" => {
+            flag_set.bool_flag("remote", false);
+            flag_set.bool_flag("json", false);
         }
         other => {
             let _ = writeln!(
@@ -3019,6 +3038,11 @@ pub fn run_decision_command(
             }
             payload
         }
+        "benchmark" => serde_json::json!({
+            "action": "benchmark",
+            "remote": flag_set.bool_value("remote"),
+            "json": flag_set.bool_value("json"),
+        }),
         "conformal" => {
             let conf = flag_set
                 .string_value("confidence")
