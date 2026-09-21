@@ -935,7 +935,7 @@ fn zcode_hook_group(binary: &Path, subcommand: &str) -> serde_json::Value {
         "hooks": [{
             "type": "process",
             "command": display_path(binary),
-            "args": ["hook", subcommand],
+            "args": ["hook", subcommand, "--host", "zcode"],
             "enabled": true,
             "timeoutMs": EXTENDED_HOOK_TIMEOUT_MS,
             "statusMessage": status_message
@@ -1151,11 +1151,13 @@ fn windows_short_path(path: &Path) -> Option<PathBuf> {
 /// quotes; if the executable path contains spaces, convert to an 8.3 short path
 /// so `cmd.exe` can execute it without quotes.
 fn muse_hook_command(binary: &Path, subcommand: &str) -> String {
+    // Muse exports no variable keel recognises, so the command itself carries
+    // the host marker that `keel hook` absorbs into KEEL_HOST_SIGNAL.
     if cfg!(windows) {
         let path = windows_short_path(binary)
             .map(|p| display_path(&p))
             .unwrap_or_else(|| display_path(binary));
-        format!("{path} hook {subcommand}")
+        format!("{path} hook {subcommand} --host muse")
     } else {
         crate::runner::shell_rewrite::bash_command_for_executable_args(
             binary,

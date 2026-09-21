@@ -11,12 +11,37 @@ pub fn run_hook_command(
     run_hook_command_with_stdin(arguments, &mut stdin, standard_output, standard_error)
 }
 
+/// Hosts whose runtime exports no variable keel recognises carry the marker on
+/// keel's own hook command line instead: `keel hook <event> --host <name>`. The
+/// flag is read once here and exported, so every downstream gate and the
+/// capture path see the same signal a Claude or Codex environment provides.
+fn absorb_host_signal(arguments: &[String]) -> Vec<String> {
+    let mut cleaned = Vec::with_capacity(arguments.len());
+    let mut index = 0;
+    while index < arguments.len() {
+        if arguments[index] == "--host" {
+            if let Some(host) = arguments.get(index + 1) {
+                let trimmed = host.trim();
+                if !trimmed.is_empty() {
+                    std::env::set_var("KEEL_HOST_SIGNAL", trimmed);
+                }
+                index += 2;
+                continue;
+            }
+        }
+        cleaned.push(arguments[index].clone());
+        index += 1;
+    }
+    cleaned
+}
+
 pub fn run_hook_command_with_stdin(
     arguments: &[String],
     standard_input: &mut dyn Read,
     standard_output: &mut dyn Write,
     standard_error: &mut dyn Write,
 ) -> u8 {
+    let arguments = absorb_host_signal(arguments);
     if arguments.is_empty() || is_help_argument(&arguments[0]) {
         render_hook_help(standard_output);
 
@@ -297,4 +322,40 @@ pub(super) fn run_hook_cwd_changed(
     standard_error: &mut dyn Write,
 ) -> u8 {
     run_hook_lifecycle("cwd-changed", standard_output, standard_error)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::ENV_LOCK;
+
+    const SIGNAL: &str = "KEEL_HOST_SIGNAL";
+
+    #[test]
+    fn host_flag_becomes_the_session_signal_and_is_stripped() {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous = std::env::var(SIGNAL).ok(); // why: absent means it was unset
+
+        let arguments = vec![
+            "pre-tool-use".to_string(),
+            "--host".to_string(),
+            "muse".to_string(),
+        ];
+        let cleaned = absorb_host_signal(&arguments);
+        assert_eq!(cleaned, vec!["pre-tool-use".to_string()]);
+        assert_eq!(std::env::var(SIGNAL).as_deref(), Ok("muse"));
+
+        std::env::remove_var(SIGNAL);
+        let stop = vec!["stop".to_string()];
+        let untouched = absorb_host_signal(&stop);
+        assert_eq!(untouched, vec!["stop".to_string()]);
+        assert!(std::env::var(SIGNAL).is_err(), "no flag means no signal");
+
+        match previous {
+            Some(value) => std::env::set_var(SIGNAL, value),
+            None => std::env::remove_var(SIGNAL),
+        }
+    }
 }
