@@ -61,6 +61,26 @@ lands at 91.2% on 260 short prompts with 22 candidate labels.
 - No JevBench Score is claimed here. Scoring keel on that axis set needs its
   task set and its calibration measurement; this page reports one task only.
 
+## Calibration head-to-head (measured 2026-09-21)
+
+Accuracy alone hides whether a confidence means anything, so the benchmark now
+reports the remote service's calibration over the same 260 cases (its confidence
+versus whether that answer was right), and the model benchmark reports keel's on
+generated corpora built from a known reliability curve `P(right) = signal^k`.
+
+| System | Accuracy | Brier | ECE | Cost |
+|---|---|---|---|---|
+| keel curated tier, local (emits a decision, no confidence) | 260/260 | not applicable | not applicable | under 1 ms |
+| classifier.dev on jev-1.13.0 | 237/260 (91.2%) | 0.0510 | 0.0473 | 267 ms p50, free tier |
+| keel calibrated expert, routing / gate / shell | held-out folds | 0.199 / 0.201 / 0.189 | 0.043 / 0.051 / 0.051 | 53 ns per call |
+| keel raw signal, same three surfaces | same rows | 0.264 / 0.226 / 0.281 | 0.240 / 0.147 / 0.285 | no fit needed |
+
+Reading: the remote model's confidence is a good forecast (ECE 0.047), and keel's
+fit reaches the same band on surfaces whose declared confidence starts far worse
+(ECE 0.147 to 0.285 raw). On a surface that was already calibrated, the conformal
+control at ECE 0.034, the trust gate refuses the fit instead of letting it touch a
+live decision: it did not earn the right to override.
+
 ## Reproduce
 
 ```

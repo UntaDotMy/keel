@@ -8,6 +8,7 @@ use std::process::Command;
 use serde::Serialize;
 use serde_json::json;
 
+use crate::utility::decision_model::expected_calibration_error;
 use crate::utility::skill_match::{curated_skill_cases, curated_skill_for_prompt};
 
 /// Public zero-shot classifier. Free, no key, POST with text plus labels.
@@ -48,6 +49,8 @@ pub struct BenchmarkReport {
     pub remote_correct: usize,
     pub remote_model: Option<String>,
     pub remote_p50_ms: Option<u64>,
+    pub remote_brier: Option<f64>,
+    pub remote_ece: Option<f64>,
     pub rows: Vec<BenchmarkRow>,
 }
 
@@ -106,6 +109,30 @@ pub fn run(remote: bool) -> BenchmarkReport {
         });
     }
 
+    // The service reports a confidence per answer, so its calibration is
+    // comparable to a keel expert's: confidence versus correctness.
+    let remote_pairs: Vec<(f64, bool)> = rows
+        .iter()
+        .filter_map(|row| match (row.remote_confidence, row.remote_correct) {
+            (Some(confidence), Some(correct)) => Some((confidence, correct)),
+            _ => None,
+        })
+        .collect();
+    let remote_brier = if remote_pairs.is_empty() {
+        None
+    } else {
+        let sum: f64 = remote_pairs
+            .iter()
+            .map(|(confidence, correct)| (confidence - if *correct { 1.0 } else { 0.0 }).powi(2))
+            .sum();
+        Some(sum / remote_pairs.len() as f64)
+    };
+    let remote_ece = if remote_pairs.is_empty() {
+        None
+    } else {
+        Some(expected_calibration_error(&remote_pairs))
+    };
+
     BenchmarkReport {
         cases: cases.len(),
         controls: CONTROL_PROMPTS.len(),
@@ -114,6 +141,8 @@ pub fn run(remote: bool) -> BenchmarkReport {
         remote_correct,
         remote_model: remote_batch.and_then(|batch| batch.model),
         remote_p50_ms: percentile_ms(&rows, 50),
+        remote_brier,
+        remote_ece,
         rows,
     }
 }
@@ -232,6 +261,11 @@ pub fn render(report: &BenchmarkReport) -> String {
     } else {
         out.push_str("classifier.dev   not run (pass --remote to spend one live call)\n");
     }
+    if let (Some(brier), Some(ece)) = (report.remote_brier, report.remote_ece) {
+        out.push_str(&format!(
+            "classifier.dev   confidence vs correctness: brier {brier:.4}   ece {ece:.4}\n"
+        ));
+    }
     out.push('\n');
     out.push_str(&format!(
         "{:<PROMPT_WIDTH$}  {:<CELL_WIDTH$}  {:<CELL_WIDTH$}  {}\n",
@@ -290,6 +324,8 @@ pub fn to_json(report: &BenchmarkReport) -> serde_json::Value {
         "remote_correct": report.remote_correct,
         "remote_model": report.remote_model,
         "remote_p50_ms": report.remote_p50_ms,
+        "remote_brier": report.remote_brier,
+        "remote_ece": report.remote_ece,
         "endpoint": REMOTE_ENDPOINT,
         "rows": rows,
     })
@@ -314,6 +350,8 @@ mod tests {
         assert_eq!(report.cases, build_cases().len());
         assert_eq!(report.local_correct, report.cases);
         assert!(!report.remote_available);
+        assert!(report.remote_brier.is_none());
+        assert!(report.remote_ece.is_none());
     }
 
     #[test]

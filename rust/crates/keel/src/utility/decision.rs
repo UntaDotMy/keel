@@ -2234,12 +2234,40 @@ fn sanitize_key(value: &str) -> String {
     }
 }
 
-/// Three-state read of a boolean flag from the raw argument vector: `None` when
-/// the flag is absent, `Some(true)` when it is bare or carries a true word, and
-/// `Some(false)` when it carries a false word. A registered bool flag cannot
-/// express false, so a negative outcome used to be unreachable from the CLI and
-/// recorded as true.
-fn explicit_bool_flag(arguments: &[String], name: &str) -> Option<bool> {
+/// The one owner of outcome vocabulary: the words a recorder accepts for a true
+/// or false label. An unknown word is an error, never a default, because a
+/// silent default stores a wrong label somewhere downstream.
+const TRUE_WORDS: &[&str] = &[
+    "true", "yes", "1", "allow", "allowed", "success", "correct", "pass",
+];
+const FALSE_WORDS: &[&str] = &[
+    "false",
+    "no",
+    "0",
+    "deny",
+    "denied",
+    "failure",
+    "incorrect",
+    "fail",
+];
+
+fn parse_outcome_word(word: &str) -> Option<bool> {
+    let normalized = word.trim().to_ascii_lowercase();
+    if TRUE_WORDS.contains(&normalized.as_str()) {
+        return Some(true);
+    }
+    if FALSE_WORDS.contains(&normalized.as_str()) {
+        return Some(false);
+    }
+    None
+}
+
+/// Three-state read of an outcome flag from the raw argument vector: `None` when
+/// the flag is absent, `Some(true)` for a bare flag or a true word, `Some(false)`
+/// for a false word, and an error for anything else. A registered bool flag
+/// cannot express false, so a negative outcome used to record as true, and a
+/// lenient parser would store a typo as a label.
+fn explicit_outcome_flag(arguments: &[String], name: &str) -> Result<Option<bool>, String> {
     let spelled = format!("--{name}");
     let prefixed = format!("{spelled}=");
     for (index, token) in arguments.iter().enumerate() {
@@ -2250,13 +2278,14 @@ fn explicit_bool_flag(arguments: &[String], name: &str) -> Option<bool> {
         } else {
             continue;
         };
-        let word = value.map(str::trim).map(str::to_ascii_lowercase);
-        return Some(!matches!(
-            word.as_deref(),
-            Some("false") | Some("no") | Some("0") | Some("deny")
-        ));
+        return match value {
+            None => Ok(Some(true)),
+            Some(word) => parse_outcome_word(word)
+                .map(Some)
+                .ok_or_else(|| format!("--{name} must be a true or false word (got '{word}')")),
+        };
     }
-    None
+    Ok(None)
 }
 
 fn current_time_ms() -> u64 {
@@ -2757,10 +2786,14 @@ pub fn handle_decision_tool(arguments: &Value) -> Result<String, String> {
             let outcome = arguments.get("outcome").and_then(Value::as_str);
 
             if let (Some(s), Some(o)) = (skill, outcome) {
-                let success = matches!(
-                    o.to_ascii_lowercase().as_str(),
-                    "success" | "correct" | "true" | "pass"
-                );
+                let success = match parse_outcome_word(o) {
+                    Some(parsed) => parsed,
+                    None => {
+                        return Err(format!(
+                            "decision priors: --outcome must be a success or failure word (got '{o}')"
+                        ));
+                    }
+                };
                 let updated = record_skill_prior_outcome(&home, s, success)?;
                 let out = serde_json::json!({
                     "action": "record",
@@ -2980,8 +3013,13 @@ pub fn run_decision_command(
                 "skill": skill,
                 "confidence": conf,
             });
-            if let Some(was_correct) = explicit_bool_flag(arguments, "was-correct") {
-                payload["was_correct"] = serde_json::json!(was_correct);
+            match explicit_outcome_flag(arguments, "was-correct") {
+                Ok(Some(was_correct)) => payload["was_correct"] = serde_json::json!(was_correct),
+                Ok(None) => {}
+                Err(message) => {
+                    let _ = writeln!(standard_error, "decision calibrate: {message}");
+                    return 2;
+                }
             }
             payload
         }
@@ -3014,19 +3052,17 @@ pub fn run_decision_command(
         }
         "noul-feedback" => {
             let cmd = flag_set.string_value("command");
-            let allowed = match flag_set
-                .string_value("allowed")
-                .trim()
-                .to_ascii_lowercase()
-                .as_str()
-            {
-                "allow" | "allowed" | "true" | "1" | "yes" => true,
-                "deny" | "denied" | "false" | "0" | "no" => false,
-                other => {
+            let allowed = match explicit_outcome_flag(arguments, "allowed") {
+                Ok(Some(allowed)) => allowed,
+                Ok(None) => {
                     let _ = writeln!(
                         standard_error,
-                        "decision noul-feedback: --allowed must be allow/deny (got '{other}')"
+                        "decision noul-feedback: --allowed is required (allow or deny)"
                     );
+                    return 2;
+                }
+                Err(message) => {
+                    let _ = writeln!(standard_error, "decision noul-feedback: {message}");
                     return 2;
                 }
             };
@@ -3083,8 +3119,16 @@ pub fn run_decision_command(
                 "alpha": alpha,
             });
             if flag_set.bool_value("record") {
-                let was_correct = explicit_bool_flag(arguments, "was-correct").unwrap_or(false);
-                payload["was_correct"] = serde_json::json!(was_correct);
+                match explicit_outcome_flag(arguments, "was-correct") {
+                    Ok(Some(was_correct)) => {
+                        payload["was_correct"] = serde_json::json!(was_correct)
+                    }
+                    Ok(None) => payload["was_correct"] = serde_json::json!(false),
+                    Err(message) => {
+                        let _ = writeln!(standard_error, "decision conformal: {message}");
+                        return 2;
+                    }
+                }
             }
             payload
         }
@@ -3821,11 +3865,19 @@ mod tests {
         let bare = vec![format!("--{FLAG}")];
         let spelled_false = vec![format!("--{FLAG}"), "false".to_string()];
         let equals_false = vec![format!("--{FLAG}=false")];
+        let typo = vec![format!("--{FLAG}"), "maybe".to_string()];
         let absent = vec!["--other".to_string()];
-        assert_eq!(explicit_bool_flag(&bare, FLAG), Some(true));
-        assert_eq!(explicit_bool_flag(&spelled_false, FLAG), Some(false));
-        assert_eq!(explicit_bool_flag(&equals_false, FLAG), Some(false));
-        assert_eq!(explicit_bool_flag(&absent, FLAG), None);
+        assert_eq!(explicit_outcome_flag(&bare, FLAG), Ok(Some(true)));
+        assert_eq!(explicit_outcome_flag(&spelled_false, FLAG), Ok(Some(false)));
+        assert_eq!(explicit_outcome_flag(&equals_false, FLAG), Ok(Some(false)));
+        assert_eq!(explicit_outcome_flag(&absent, FLAG), Ok(None));
+        assert!(
+            explicit_outcome_flag(&typo, FLAG).is_err(),
+            "an unknown word must never become a label"
+        );
+        assert_eq!(parse_outcome_word("pass"), Some(true));
+        assert_eq!(parse_outcome_word("failure"), Some(false));
+        assert_eq!(parse_outcome_word("maybe"), None);
     }
 
     #[test]

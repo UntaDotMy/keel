@@ -38,6 +38,9 @@ const CONVERGENCE_EPSILON: f64 = 1e-12;
 const SIGNAL_QUANTUM: f64 = 1000.0;
 /// Reliability bins for the expected calibration error.
 const ECE_BINS: usize = 10;
+/// Rows an expert needs before it may drive a live decision, together with a
+/// held-out fold estimate that did not lose to the raw signal.
+const MIN_TRUSTED_SAMPLES: usize = 100;
 
 /// One surface's expert: Platt scaling over the signal's logit, so the raw
 /// signal is the starting point and the fit learns a monotone correction.
@@ -94,6 +97,15 @@ fn sigmoid(value: f64) -> f64 {
 /// The expert's calibrated probability for one raw signal.
 pub fn predict_surface(expert: &SurfaceExpert, signal: f64) -> f64 {
     sigmoid(expert.scale * logit(signal) + expert.bias)
+}
+
+/// Whether an expert's held-out evidence justifies letting it drive a live
+/// decision: enough rows, a real fold estimate, and no loss against the raw
+/// signal. Consumers must gate on this instead of trusting a fresh fit.
+pub fn expert_is_usable(expert: &SurfaceExpert) -> bool {
+    expert.samples >= MIN_TRUSTED_SAMPLES
+        && expert.folds >= 2
+        && expert.brier_fitted <= expert.brier_raw
 }
 
 /// Signals collapsed to their distinct values with positive counts: the
@@ -154,7 +166,7 @@ fn fit_params(pairs: &[(f64, bool)], allow_bias: bool) -> (f64, f64) {
 
 /// Expected calibration error over fixed reliability bins. Brier stays the
 /// primary score because it needs no binning; ECE reads the shape of the gap.
-fn expected_calibration_error(probabilities: &[(f64, bool)]) -> f64 {
+pub(crate) fn expected_calibration_error(probabilities: &[(f64, bool)]) -> f64 {
     if probabilities.is_empty() {
         return 0.0;
     }
@@ -349,6 +361,7 @@ pub fn summary_value(model: &DecisionModel) -> serde_json::Value {
                 "ece_raw": expert.ece_raw,
                 "ece_fitted": expert.ece_fitted,
                 "log_loss_fitted": expert.log_loss_fitted,
+                "usable": expert_is_usable(expert),
                 "scale": expert.scale,
                 "bias": expert.bias,
             })
@@ -617,24 +630,73 @@ mod tests {
         let _ = fs::remove_dir_all(&copied);
     }
 
-    /// Perf check, not a gate: `cargo test -p keel --lib decision_model_bench
-    /// -- --ignored --nocapture`.
+    /// Generated-corpus benchmark, not a gate. It builds a labeled corpus from a
+    /// known miscalibration curve, trains it from disk through the real store, and
+    /// prints what each expert recovered. Run with:
+    /// `cargo test -p keel --lib decision_model_bench -- --ignored --nocapture`.
     #[test]
-    #[ignore = "perf check, run explicitly with --ignored --nocapture"]
+    #[ignore = "benchmark, run explicitly with --ignored --nocapture"]
     fn decision_model_bench() {
-        let surfaces = [ROUTING, "gate", "shell"];
-        let mut samples = Vec::with_capacity(60_000);
-        for (surface_index, surface) in surfaces.iter().enumerate() {
-            for index in 0..20_000 {
-                let signal = 0.55 + 0.4 * ((index % 37) as f64 / 37.0);
-                let label = ((index * 7919 + surface_index) % 100) as f64 / 100.0 < signal;
-                samples.push(sample(surface, signal, label));
+        // True reliability per surface is P(right) = signal^k: k above one
+        // over-declares, and k of one is the control the fit should leave alone.
+        let curves = [
+            (ROUTING, 2.5),
+            ("gate", 1.8),
+            ("shell", 3.0),
+            ("conformal", 1.0),
+        ];
+        let rows_per_surface = 5_000;
+        let mut samples = Vec::with_capacity(curves.len() * rows_per_surface);
+        let mut seed = 0x5eed_u64;
+        for (surface, exponent) in curves {
+            for _ in 0..rows_per_surface {
+                seed = splitmix64(seed);
+                let signal = 0.5 + 0.49 * ((seed % 1000) as f64 / 1000.0);
+                seed = splitmix64(seed);
+                let draw = (seed % 1000) as f64 / 1000.0;
+                samples.push(sample(surface, signal, draw < signal.powf(exponent)));
             }
         }
+
+        let home = std::env::temp_dir().join(format!("keel-model-bench-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&home);
+        let samples_dir = crate::runtime::state_directory(&home).join("decision-samples");
+        fs::create_dir_all(&samples_dir).expect("samples dir");
+        let mut body = String::new();
+        for entry in &samples {
+            body.push_str(&serde_json::to_string(entry).expect("serialize sample"));
+            body.push('\n');
+        }
+        fs::write(samples_dir.join("bench.jsonl"), &body).expect("write corpus");
+
         let start = std::time::Instant::now();
-        let experts = fit_surface_experts(&samples);
-        let fit_ms = start.elapsed().as_secs_f64() * 1000.0;
-        let expert = experts.get(ROUTING).expect("routing expert");
+        let model = train_decision_model(&home, 30);
+        let train_ms = start.elapsed().as_secs_f64() * 1000.0;
+        println!(
+            "decision model bench: {} rows generated, {} grouped, train from disk {:.1} ms",
+            samples.len(),
+            model.samples,
+            train_ms
+        );
+        println!(
+            "{:<12} {:>6} {:>6} {:>10} {:>10} {:>10} {:>10} {:>7}",
+            "surface", "rows", "folds", "brier_raw", "brier_fit", "ece_raw", "ece_fit", "usable"
+        );
+        for (surface, expert) in &model.surfaces {
+            println!(
+                "{:<12} {:>6} {:>6} {:>10.5} {:>10.5} {:>10.5} {:>10.5} {:>7}",
+                surface,
+                expert.samples,
+                expert.folds,
+                expert.brier_raw,
+                expert.brier_fitted,
+                expert.ece_raw,
+                expert.ece_fitted,
+                expert_is_usable(expert)
+            );
+        }
+
+        let expert = model.surfaces.get(ROUTING).expect("routing expert");
         let start = std::time::Instant::now();
         let mut checksum = 0.0;
         for index in 0..100_000 {
@@ -642,24 +704,46 @@ mod tests {
         }
         let predict_ms = start.elapsed().as_secs_f64() * 1000.0;
         println!(
-            "decision model bench: {} samples, fit {:.1} ms, 100k predictions {:.2} ms ({:.1} ns per call), checksum {:.1}",
-            samples.len(),
-            fit_ms,
+            "predict: 100k calls {:.2} ms ({:.1} ns per call), checksum {:.1}",
             predict_ms,
             predict_ms * 1.0e6 / 100_000.0,
             checksum
         );
-        println!(
-            "routing expert: folds {}, brier {:.6} -> {:.6}, ece {:.6} -> {:.6}",
-            expert.folds, expert.brier_raw, expert.brier_fitted, expert.ece_raw, expert.ece_fitted
+
+        for surface in [ROUTING, "gate", "shell"] {
+            let miscalibrated = model.surfaces.get(surface).expect("surface expert");
+            assert!(
+                miscalibrated.brier_fitted < miscalibrated.brier_raw,
+                "{surface}: fitted {} must beat raw {}",
+                miscalibrated.brier_fitted,
+                miscalibrated.brier_raw
+            );
+            assert!(
+                miscalibrated.ece_fitted < miscalibrated.ece_raw,
+                "{surface}: ece {} must beat raw {}",
+                miscalibrated.ece_fitted,
+                miscalibrated.ece_raw
+            );
+            assert!(
+                expert_is_usable(miscalibrated),
+                "{surface}: should be usable"
+            );
+        }
+        let control = model.surfaces.get("conformal").expect("control expert");
+        assert!(
+            control.brier_fitted <= control.brier_raw + 0.01,
+            "a calibrated control must not degrade: {} vs {}",
+            control.brier_fitted,
+            control.brier_raw
         );
         assert!(
-            fit_ms < 5_000.0,
-            "the fit must stay interactive: {fit_ms} ms"
+            train_ms < 5_000.0,
+            "the fit must stay interactive: {train_ms} ms"
         );
         assert!(
             predict_ms < 1_000.0,
             "predictions must stay trivial: {predict_ms} ms"
         );
+        let _ = fs::remove_dir_all(&home);
     }
 }
