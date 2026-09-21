@@ -357,6 +357,38 @@ fn fit(rows: &LabelledRows, validation_rows: &LabelledRows) -> Option<Fitted> {
     } else {
         (best_weights, best_biases)
     };
+    // Logit adjustment for imbalance: how much the priors should count is fitted
+    // on validation instead of assumed, since the thin classes are what it moves.
+    let priors: Vec<f64> = classes
+        .iter()
+        .map(|name| {
+            (rows.iter().filter(|(_, skill)| skill == name).count() as f64 / rows.len() as f64)
+                .max(1e-6)
+                .ln()
+        })
+        .collect();
+    let mut best_alpha = 0.0f64;
+    if !validation.is_empty() {
+        let mut best = f64::MAX;
+        for step in 0..=8 {
+            let alpha = step as f64 * 0.125;
+            let adjusted: Vec<f64> = (0..classes.len())
+                .map(|class| biases[class] + alpha * priors[class])
+                .collect();
+            let brier = validation_brier(&validation, &weights, &adjusted, classes.len());
+            if brier < best {
+                best = brier;
+                best_alpha = alpha;
+            }
+        }
+    }
+    let biases: Vec<f64> = if validation.is_empty() {
+        biases
+    } else {
+        (0..classes.len())
+            .map(|class| biases[class] + best_alpha * priors[class])
+            .collect()
+    };
 
     let experts = classes
         .iter()
