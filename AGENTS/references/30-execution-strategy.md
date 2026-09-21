@@ -126,6 +126,10 @@ If any of those fails, dispatch sequentially. The cost of one wasted agent run i
 
 **Mandatory external research law.** Every fix, problem trace, or implementation MUST begin with external research against current sources: a live web search / WebFetch / context7 lookup, plus Stack Overflow or vendor docs as fitting the task. Model memory is stale by cutoff; the internet moves forward. `recall`, memory, `system_map`, and host reads are a hypothesis, never proof, and never satisfy this law on their own. The requirement is **per problem, not per session**: a new problem needs new evidence. Reuse is allowed only when a fresh, matching `research-cache` entry already answers the problem, record/reward it instead of re-browsing. On any error, web search the exact error text before patching. An unresearched fix or trace is a guess.
 
+**Recency.** Prefer sources published in 2025-2026. An older work is the right source when it is the primary reference for the mechanism (the original paper, the vendor spec, the language reference, the changelog that introduced the behavior), and say why it outranks something newer. Undated pages, listicles, and SEO summaries do not count.
+
+**Specificity.** One generic page is not research. Tune the query (exact version, exact error text, `site:` filters) and iterate until it names the mechanism, its owner in this codebase, and the exact edit. If the evidence is not there, say the answer is unknown instead of filling the gap.
+
 **When to research:**
 - Always, before any fix, trace, or implementation. The triggers below are examples of the rule, not the boundary of it:
 - Before any non-trivial technical guidance, design decision, or implementation plan

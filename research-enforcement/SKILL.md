@@ -90,6 +90,37 @@ Proceed with implementation using the researched, verified API surface. Referenc
 the source URL in code comments when the API behavior is non-obvious or likely
 to change.
 
+## Source Recency
+
+Prefer material published in 2025-2026. Library APIs, model line-ups, prices, and
+best practice move faster than model memory, so the current window is the default.
+
+An older source is the right source, and wins, when it is the primary reference for
+the mechanism you are touching:
+
+- The original paper for the algorithm (Platt 1999, Shazeer 2017, Vaswani 2017).
+- The vendor spec, RFC, language reference, or release notes for the exact version.
+- The changelog or pull request that introduced the behavior.
+
+Say which it is and why it outranks something newer. Reject undated pages, listicles,
+SEO summaries, and any source that does not name the version or the date it describes.
+
+## Search Until It Answers
+
+One result is a lead, not research. Iterate the query until it answers the exact
+question, then stop:
+
+- Name the artifact: exact function, flag, error text, crate or package, version, model id.
+- Constrain the engine: quoted error text, `site:docs.rs`, `site:github.com`, `site:developer.mozilla.org`, `-site:medium.com`.
+- Chase the primary source: release notes, changelog, spec, the project's own repo, the model card.
+- Cross-check two independent sources whenever the claim changes code.
+- Read the failure signal: too many hits means the query is too broad; zero hits usually means the terms are wrong, not that the answer is missing.
+- Answer test: can you name the mechanism, its owner in this codebase, and the exact edit? If not, keep searching; if the evidence is not there, say the answer is unknown rather than filling the gap.
+
+A result is generic and does not count when it names no version or date, shows no code
+for the API you will call, hedges with "it depends", restates your question, or would
+read identically for every project in the world.
+
 ## Staleness Rules
 
 - Set freshness from volatility and risk: current service APIs, security guidance,
@@ -165,6 +196,11 @@ not assume the signature verification algorithm or header names have not changed
 - Implementing first, researching when tests fail — research is cheaper than
   debugging a stale-API failure.
 - Storing research without a timestamp so staleness cannot be checked.
+- Accepting the first result because it mentions the topic.
+- Citing an undated page, a listicle, or an SEO summary for a behavior claim.
+- Preferring a 2019 blog post over the 2025-2026 release notes for the version in use.
+- Stopping after one weak query instead of narrowing it (version, exact error text, site: filter).
+- Calling a generic answer sufficient when the question was specific: if it names no mechanism and no version, it did not answer.
 
 ## Validation
 

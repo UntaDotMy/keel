@@ -2234,6 +2234,31 @@ fn sanitize_key(value: &str) -> String {
     }
 }
 
+/// Three-state read of a boolean flag from the raw argument vector: `None` when
+/// the flag is absent, `Some(true)` when it is bare or carries a true word, and
+/// `Some(false)` when it carries a false word. A registered bool flag cannot
+/// express false, so a negative outcome used to be unreachable from the CLI and
+/// recorded as true.
+fn explicit_bool_flag(arguments: &[String], name: &str) -> Option<bool> {
+    let spelled = format!("--{name}");
+    let prefixed = format!("{spelled}=");
+    for (index, token) in arguments.iter().enumerate() {
+        let value = if *token == spelled {
+            arguments.get(index + 1).map(String::as_str)
+        } else if let Some(rest) = token.strip_prefix(&prefixed) {
+            Some(rest)
+        } else {
+            continue;
+        };
+        let word = value.map(str::trim).map(str::to_ascii_lowercase);
+        return Some(!matches!(
+            word.as_deref(),
+            Some("false") | Some("no") | Some("0") | Some("deny")
+        ));
+    }
+    None
+}
+
 fn current_time_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2803,7 +2828,7 @@ pub fn run_decision_command(
                 score               Score review findings or plan readiness against rubrics\n  \
                 noul                Evaluate shell command danger probability and risk action\n  \
                 choice              Evaluate skill composition choice for multi-domain prompt\n  \
-                calibrate           Get or update calibrated confidence for skill routing\n  \
+                calibrate           Get or update calibrated confidence for skill routing (--was-correct true|false)\n  \
                 conformal           Evaluate conformal risk control and (1 - alpha) error coverage\n  \
                 classify            Multi-dimensional zero-shot classification and semantic matching\n  \
                 priors              Inspect or record closed-loop skill priors and quarantine state\n  \
@@ -2955,8 +2980,8 @@ pub fn run_decision_command(
                 "skill": skill,
                 "confidence": conf,
             });
-            if flag_set.bool_value("was-correct") {
-                payload["was_correct"] = serde_json::json!(true);
+            if let Some(was_correct) = explicit_bool_flag(arguments, "was-correct") {
+                payload["was_correct"] = serde_json::json!(was_correct);
             }
             payload
         }
@@ -3058,7 +3083,8 @@ pub fn run_decision_command(
                 "alpha": alpha,
             });
             if flag_set.bool_value("record") {
-                payload["was_correct"] = serde_json::json!(flag_set.bool_value("was-correct"));
+                let was_correct = explicit_bool_flag(arguments, "was-correct").unwrap_or(false);
+                payload["was_correct"] = serde_json::json!(was_correct);
             }
             payload
         }
@@ -3787,6 +3813,19 @@ mod tests {
             let decision = evaluate_shell_command_noul(command);
             assert_eq!(decision.family, family, "{command}");
         }
+    }
+
+    #[test]
+    fn a_bare_bool_flag_is_true_and_a_spelled_false_is_false() {
+        const FLAG: &str = "was-correct";
+        let bare = vec![format!("--{FLAG}")];
+        let spelled_false = vec![format!("--{FLAG}"), "false".to_string()];
+        let equals_false = vec![format!("--{FLAG}=false")];
+        let absent = vec!["--other".to_string()];
+        assert_eq!(explicit_bool_flag(&bare, FLAG), Some(true));
+        assert_eq!(explicit_bool_flag(&spelled_false, FLAG), Some(false));
+        assert_eq!(explicit_bool_flag(&equals_false, FLAG), Some(false));
+        assert_eq!(explicit_bool_flag(&absent, FLAG), None);
     }
 
     #[test]

@@ -418,8 +418,8 @@ pub(super) fn research_evidence_is_current(
 
 pub(super) fn research_gate_message(decision: GateDecision) -> String {
     match decision {
-        GateDecision::Block => "Research gate (CLAUDE_SKILLS_RESEARCH_GATE): this change has no fresh external research — escalated (imperative, still feed-forward — not a turn halt). Do a WebSearch/WebFetch or context7 lookup for this problem, or record/reuse a fresh `keel memory research-cache` entry. Recall and memory alone do not count. Bounded per session, then lets the turn through so it cannot loop. Set CLAUDE_SKILLS_RESEARCH_GATE=nudge, =block, =off.".to_string(),
-        _ => "Research gate (CLAUDE_SKILLS_RESEARCH_GATE): this change has no fresh external research. Do a WebSearch/WebFetch or context7 lookup for this problem, or record/reuse a fresh `keel memory research-cache` entry. Recall and memory alone do not count. This first reminder does not stop the turn, but will escalate. Set CLAUDE_SKILLS_RESEARCH_GATE=nudge, =block, =off.".to_string(),
+        GateDecision::Block => "Research gate (CLAUDE_SKILLS_RESEARCH_GATE): this change has no fresh external research — escalated (imperative, still feed-forward — not a turn halt). Do a WebSearch/WebFetch or context7 lookup for this problem, or record/reuse a fresh `keel memory research-cache` entry. Recall and memory alone do not count. Prefer 2025-2026 sources, and keep tuning the query until it names the mechanism and the version; one generic page is not research. Bounded per session, then lets the turn through so it cannot loop. Set CLAUDE_SKILLS_RESEARCH_GATE=nudge, =block, =off.".to_string(),
+        _ => "Research gate (CLAUDE_SKILLS_RESEARCH_GATE): this change has no fresh external research. Do a WebSearch/WebFetch or context7 lookup for this problem, or record/reuse a fresh `keel memory research-cache` entry. Recall and memory alone do not count. Prefer 2025-2026 sources, and keep tuning the query until it names the mechanism and the version; one generic page is not research. This first reminder does not stop the turn, but will escalate. Set CLAUDE_SKILLS_RESEARCH_GATE=nudge, =block, =off.".to_string(),
     }
 }
 

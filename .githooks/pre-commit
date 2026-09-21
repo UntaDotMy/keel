@@ -146,10 +146,12 @@ echo "✓ All pre-commit checks passed."
 if ! keel review pre-commit --repo-root "$(pwd)" 2>/dev/null; then
     echo ""
     echo "✗ Preserve-existing-flow gate failed"
-    echo "  Before editing existing source files, run:"
-    echo "    keel flow start --target <file_or_function>"
-    echo "  Then complete your changes and run:"
+    echo "  Before editing existing source files, run one of:"
+    echo "    keel flow start --target-file <path> --target-files <csv>"
+    echo "    keel flow start --target-file <path> --target-function <name>"
+    echo "  Fill the owner path it asks for, then after the last edit run:"
     echo "    keel flow finish"
+    echo "  Full flag list: keel flow start --help"
     exit 1
 fi
 echo "✓ Preserve-existing-flow gate passed"

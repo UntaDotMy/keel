@@ -179,7 +179,8 @@ pub fn run_proxy(
         }
         let _ = writeln!(
             standard_error,
-            "[keel] execution not intercepted: host session signal is absent"
+            "[keel] run: no host session signal here, so the command ran unmodified \
+             (nothing to intercept or compact). This is informational."
         );
         return run_proxy_passthrough(&command_arguments, standard_error);
     }
