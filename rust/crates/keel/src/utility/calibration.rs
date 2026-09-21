@@ -14,30 +14,6 @@ pub fn laplace_rate(total: usize, correct: usize) -> f64 {
     (correct as f64 + 1.0) / (total as f64 + 2.0)
 }
 
-/// Brier score for one probabilistic prediction: squared error against the
-/// binary outcome. Lower is better; 0 is perfect, 1 is maximally wrong.
-pub fn brier_score(confidence: f64, outcome: bool) -> f64 {
-    let actual = if outcome { 1.0 } else { 0.0 };
-    (confidence.clamp(0.0, 1.0) - actual).powi(2)
-}
-
-/// Mean absolute calibration error over (confidence, outcome) pairs:
-/// how far stated confidence strays from reality on average.
-pub fn mean_absolute_calibration_error(pairs: &[(f64, bool)]) -> f64 {
-    if pairs.is_empty() {
-        return 0.0;
-    }
-
-    let total: f64 = pairs
-        .iter()
-        .map(|(confidence, outcome)| {
-            let actual = if *outcome { 1.0 } else { 0.0 };
-            (confidence.clamp(0.0, 1.0) - actual).abs()
-        })
-        .sum();
-    total / pairs.len() as f64
-}
-
 /// Result of hierarchical blending: the calibrated value plus how much data
 /// stands behind it. `prior_dominated` is true while the computed fallback
 /// still carries the estimate, so callers can report honest uncertainty.
@@ -379,10 +355,6 @@ impl ConformalCalibrator {
             p_value: p_val,
         }
     }
-
-    pub fn sample_count(&self) -> usize {
-        self.nonconformity_scores.len()
-    }
 }
 
 #[cfg(test)]
@@ -394,26 +366,6 @@ mod tests {
         assert_eq!(laplace_rate(0, 0), 0.5);
         assert!((laplace_rate(8, 7) - (8.0 / 10.0)).abs() < 1e-12);
         assert!((laplace_rate(998, 698) - (699.0 / 1000.0)).abs() < 1e-12);
-    }
-
-    #[test]
-    fn calibration_brier_vectors() {
-        assert_eq!(brier_score(1.0, true), 0.0);
-        assert_eq!(brier_score(0.0, false), 0.0);
-        assert_eq!(brier_score(1.0, false), 1.0);
-        assert!((brier_score(0.85, true) - 0.0225).abs() < 1e-12);
-    }
-
-    #[test]
-    fn calibration_mean_error_vectors() {
-        assert_eq!(mean_absolute_calibration_error(&[]), 0.0);
-        assert_eq!(
-            mean_absolute_calibration_error(&[(1.0, true), (0.0, false)]),
-            0.0
-        );
-        assert!(
-            (mean_absolute_calibration_error(&[(0.8, true), (0.8, false)]) - 0.5).abs() < 1e-12
-        );
     }
 
     #[test]
@@ -487,7 +439,7 @@ mod tests {
     #[test]
     fn conformal_calibrator_stateful_evaluation() {
         let mut calibrator = ConformalCalibrator::new(0.05);
-        assert_eq!(calibrator.sample_count(), 0);
+        assert_eq!(calibrator.nonconformity_scores.len(), 0);
         assert_eq!(calibrator.quantile_threshold(), 1.0);
 
         // Record 100 actions: 96 high-confidence safe actions (confidence 0.95, outcome true -> score 0.05)
@@ -499,7 +451,7 @@ mod tests {
             calibrator.record(0.95, false);
         }
 
-        assert_eq!(calibrator.sample_count(), 100);
+        assert_eq!(calibrator.nonconformity_scores.len(), 100);
         let q_hat = calibrator.quantile_threshold();
         // rank = ceil(101 * 0.95) = 96. sorted[95] is 0.05 because 96 items are 0.05.
         assert!((q_hat - 0.05).abs() < 1e-12, "q_hat was {q_hat}");

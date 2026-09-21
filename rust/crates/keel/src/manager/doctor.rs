@@ -110,7 +110,10 @@ pub fn run_doctor_command(
         crate::manager::verify::write_verification_config_report(&root, standard_output)
             .map(|_| root)
     }) {
-        Ok(_) => {}
+        Ok(root) => crate::manager::learning_path_audit::report_learning_path_callerless(
+            &root,
+            standard_output,
+        ),
         Err(error) => {
             let _ = writeln!(
                 standard_output,

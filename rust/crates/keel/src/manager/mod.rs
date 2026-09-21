@@ -7,6 +7,7 @@
 pub mod agent_config;
 pub mod doctor;
 pub mod install;
+pub mod learning_path_audit;
 pub mod mcp_register;
 pub mod platform_detect;
 pub mod repair;

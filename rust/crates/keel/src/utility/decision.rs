@@ -887,12 +887,6 @@ pub struct PlanScoreDecision {
     pub suggestions: Vec<String>,
 }
 
-impl PlanScoreDecision {
-    pub fn is_ready(&self) -> bool {
-        self.verdict == PlanScoreVerdict::Ready
-    }
-}
-
 pub const PLAN_CRITERIA: &[&str] = &[
     "has_acceptance_criteria",
     "has_validation_plan",
@@ -3394,7 +3388,6 @@ mod tests {
         }
         let decision = evaluate_plan_scores(&scores, 0.85, vec![], vec![]);
         assert_eq!(decision.verdict, PlanScoreVerdict::Ready);
-        assert!(decision.is_ready());
     }
 
     #[test]
