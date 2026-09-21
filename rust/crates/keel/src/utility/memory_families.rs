@@ -2376,9 +2376,12 @@ fn instincts_promote(
 // Candidates require evidence to promote; regressions demote active lessons.
 
 const LESSON_PROMOTE_THRESHOLD: i64 = 2;
+/// The two statuses the automatic session loop keeps score for.
+const LESSON_STATUS_CANDIDATE: &str = "candidate";
+const LESSON_STATUS_ACTIVE: &str = "active";
 const LESSON_STATES: &[&str] = &[
-    "candidate",
-    "active",
+    LESSON_STATUS_CANDIDATE,
+    LESSON_STATUS_ACTIVE,
     "questioned",
     "quarantined",
     "superseded",
@@ -2509,8 +2512,13 @@ pub fn reconcile_lesson_outcomes(claude_home: &Path, session_id: &str) -> usize 
         let store = family_store(claude_home, "memory", "lessons");
         if let Ok(records) = store.list_records() {
             for (id, mut record) in records {
-                let status = field(&record, "status").unwrap_or("candidate").to_string();
-                if !matches!(status.as_str(), "candidate" | "active") {
+                let status = field(&record, "status")
+                    .unwrap_or(LESSON_STATUS_CANDIDATE)
+                    .to_string();
+                if !matches!(
+                    status.as_str(),
+                    LESSON_STATUS_CANDIDATE | LESSON_STATUS_ACTIVE
+                ) {
                     continue;
                 }
                 if !haystack.contains(&id.to_ascii_lowercase()) {
@@ -2531,8 +2539,11 @@ pub fn reconcile_lesson_outcomes(claude_home: &Path, session_id: &str) -> usize 
                 let has_evidence = field(&record, "evidence")
                     .map(str::trim)
                     .is_some_and(|evidence| !evidence.is_empty());
-                if status == "candidate" && has_evidence && confidence >= LESSON_PROMOTE_THRESHOLD {
-                    set_field(&mut record, "status", "active".to_string());
+                if status == LESSON_STATUS_CANDIDATE
+                    && has_evidence
+                    && confidence >= LESSON_PROMOTE_THRESHOLD
+                {
+                    set_field(&mut record, "status", LESSON_STATUS_ACTIVE.to_string());
                     set_field(&mut record, "lastVerified", at);
                 }
                 if store.write_record(&id, &record).is_ok() {
@@ -4530,16 +4541,17 @@ mod tests {
         let untouched = store.read_record(id).expect("read").expect("present");
         assert_eq!(field(&untouched, "confidence"), Some("1"));
 
+        let session = "sess-b";
         crate::runner::observation::record_observation_from_parts(
-            &home, "Bash", &citation, "/", "sess-b", false,
+            &home, "Bash", &citation, "/", session, false,
         )
         .expect("record observation");
-        assert_eq!(reconcile_lesson_outcomes(&home, "sess-b"), 1);
+        assert_eq!(reconcile_lesson_outcomes(&home, session), 1);
         let record = store.read_record(id).expect("read").expect("present");
         assert_eq!(field(&record, "status"), Some("active"));
         assert_eq!(field(&record, "confidence"), Some("2"));
         assert_eq!(
-            reconcile_lesson_outcomes(&home, "sess-b"),
+            reconcile_lesson_outcomes(&home, session),
             0,
             "a session is consumed once; a retry must not double-count"
         );
