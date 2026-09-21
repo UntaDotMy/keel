@@ -606,6 +606,84 @@ fn percentile_ms(rows: &[BenchmarkRow], percentile: usize) -> Option<u64> {
 const PROMPT_WIDTH: usize = 38;
 const CELL_WIDTH: usize = 34;
 
+/// Per-class confusion, computed from the rows themselves so the table can never
+/// disagree with the headline counts above it.
+pub struct ClassScore {
+    pub expected: String,
+    pub rows: usize,
+    pub decided: usize,
+    pub correct: usize,
+    pub precision: f64,
+}
+
+pub fn class_scores(report: &BenchmarkReport) -> Vec<ClassScore> {
+    let mut scores: Vec<ClassScore> = Vec::new();
+    for row in &report.rows {
+        let Some(expected) = row.expected.as_deref() else {
+            continue;
+        };
+        let index = match scores.iter().position(|score| score.expected == expected) {
+            Some(index) => index,
+            None => {
+                scores.push(ClassScore {
+                    expected: expected.to_string(),
+                    rows: 0,
+                    decided: 0,
+                    correct: 0,
+                    precision: 0.0,
+                });
+                scores.len() - 1
+            }
+        };
+        scores[index].rows += 1;
+        if row.local.is_some() {
+            scores[index].decided += 1;
+        }
+        if row.local_correct {
+            scores[index].correct += 1;
+        }
+    }
+    for score in scores.iter_mut() {
+        score.precision = if score.decided > 0 {
+            score.correct as f64 / score.decided as f64
+        } else {
+            0.0
+        };
+    }
+    scores.sort_by_key(|score| std::cmp::Reverse(score.rows));
+    scores
+}
+
+/// Reliability data: one bucket per tenth of confidence, so the stated confidence
+/// can be checked against what actually happened inside each band.
+pub fn reliability_bins(report: &BenchmarkReport) -> Vec<(f64, f64, usize, f64, f64)> {
+    let mut bins: Vec<(usize, f64, usize)> = vec![(0, 0.0, 0); 10];
+    for row in &report.rows {
+        let Some(confidence) = row.local_confidence else {
+            continue;
+        };
+        let index = ((confidence * 10.0) as usize).min(9);
+        bins[index].0 += 1;
+        bins[index].1 += confidence;
+        if row.local_correct {
+            bins[index].2 += 1;
+        }
+    }
+    bins.iter()
+        .enumerate()
+        .filter(|(_, (count, _, _))| *count > 0)
+        .map(|(index, (count, sum, correct))| {
+            (
+                index as f64 / 10.0,
+                (index + 1) as f64 / 10.0,
+                *count,
+                sum / *count as f64,
+                *correct as f64 / *count as f64,
+            )
+        })
+        .collect()
+}
+
 pub fn render(report: &BenchmarkReport) -> String {
     let mut out = String::new();
     out.push_str(&format!("KEEL DECISION BENCHMARK   {}\n", report.source));
@@ -640,6 +718,21 @@ pub fn render(report: &BenchmarkReport) -> String {
     if let (Some(brier), Some(ece)) = (report.remote_brier, report.remote_ece) {
         out.push_str(&format!(
             "classifier.dev   confidence vs correctness: brier {brier:.4}   ece {ece:.4}\n"
+        ));
+    }
+    for score in class_scores(report) {
+        out.push_str(&format!(
+            "class {:38} rows {:3}  decided {:3}  correct {:3}  precision {:3.0}%\n",
+            score.expected,
+            score.rows,
+            score.decided,
+            score.correct,
+            score.precision * 100.0
+        ));
+    }
+    for (low, high, rows, stated, actual) in reliability_bins(report) {
+        out.push_str(&format!(
+            "confidence {low:.1}-{high:.1}  rows {rows:3}  stated {stated:.3}  actual {actual:.3}\n"
         ));
     }
     out.push('\n');
