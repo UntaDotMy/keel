@@ -3134,7 +3134,7 @@ mod tests {
         assert_noul_action("git add .", ShellRiskAction::Allow);
         assert_noul_action("git add -A", ShellRiskAction::Allow);
         assert_noul_action(
-            "$msg = 'Add : REFACTOR : centralize file-lock bounds and contention check'",
+            "$msg = 'Add : REFACTOR : example subject line'",
             ShellRiskAction::Allow,
         );
         assert_noul_action(
@@ -3697,7 +3697,7 @@ mod tests {
 
     #[test]
     fn shell_noul_allows_windows_paths_with_backslashes() {
-        let cmd = r#""C:\Users\Administrator\.keel\keel.exe" run -- cargo test"#;
+        let cmd = r#""C:\tools\keel\keel.exe" run -- cargo test"#;
         let decision = evaluate_shell_command_noul(cmd);
         assert_eq!(decision.action, ShellRiskAction::Allow);
         assert_eq!(decision.category, ShellRiskCategory::Safe);

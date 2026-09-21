@@ -414,14 +414,7 @@ pub(crate) fn comment_style_gate(
         let base = if base.is_empty() { "origin/main" } else { base };
         crate::comment_lint::lint_added_comments(repository_root, base)
     };
-    let blocking = crate::comment_lint::has_blocking(&findings);
-    let status = if findings.is_empty() {
-        GateStatus::Pass
-    } else if blocking {
-        GateStatus::Fail
-    } else {
-        GateStatus::Warn
-    };
+    let (status, blocking) = findings_gate_status(!findings.is_empty());
     let details = if findings.is_empty() {
         "no added-comment style issues".to_string()
     } else {
@@ -1251,14 +1244,7 @@ pub(crate) fn prose_style_gate(
         let base = if base.is_empty() { "origin/main" } else { base };
         crate::comment_lint::lint_added_prose(repository_root, base)
     };
-    let blocking = crate::comment_lint::has_blocking_prose(&findings);
-    let status = if findings.is_empty() {
-        GateStatus::Pass
-    } else if blocking {
-        GateStatus::Fail
-    } else {
-        GateStatus::Warn
-    };
+    let (status, blocking) = findings_gate_status(!findings.is_empty());
     let details = if findings.is_empty() {
         "no prose-style issues in added markdown/doc lines".to_string()
     } else {
@@ -1305,13 +1291,9 @@ pub(crate) fn slop_gate(
         });
         findings
     };
-    // Warn-level by design: heuristic findings must surface, never strand a
-    // commit on a false positive.
-    let status = if findings.is_empty() {
-        GateStatus::Pass
-    } else {
-        GateStatus::Warn
-    };
+    // Production policy: a heuristic finding still blocks. The detector is the
+    // enforcement point, so an unreviewed duplicate literal cannot ship.
+    let (status, blocking) = findings_gate_status(!findings.is_empty());
     let details = if findings.is_empty() {
         "no AI-slop patterns detected".to_string()
     } else {
@@ -1330,7 +1312,18 @@ pub(crate) fn slop_gate(
     GateResult {
         name: "slop_detector".to_string(),
         status,
-        blocking: false,
+        blocking,
         details: Some(details),
+    }
+}
+
+/// Production policy: a review gate never passes with outstanding findings.
+/// Warnings are failures here, so a surfaced issue is either fixed or the gate
+/// fails; nothing ships acknowledged-but-unfixed.
+fn findings_gate_status(has_findings: bool) -> (GateStatus, bool) {
+    if has_findings {
+        (GateStatus::Fail, true)
+    } else {
+        (GateStatus::Pass, false)
     }
 }

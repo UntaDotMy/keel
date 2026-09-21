@@ -86,6 +86,25 @@ fn lock_record_store(directory: &Path) -> io::Result<RecordStoreLock> {
     }
 }
 
+/// The one phrasing for the `MAX_RECORD_BYTES` bound, shared by the metadata
+/// pre-check and the bounded reader's post-check so the two cannot describe the
+/// same limit differently.
+fn record_too_large(path: &Path) -> String {
+    format!(
+        "record {} exceeds maximum size of {MAX_RECORD_BYTES} bytes",
+        display_path(path)
+    )
+}
+
+/// The skip-log variant of [`record_too_large`] for the list paths, which name
+/// the record and then continue instead of returning the bound as an error.
+fn skipped_oversized_record(path: &Path) -> String {
+    format!(
+        "skip {}: record exceeds maximum size of {MAX_RECORD_BYTES} bytes",
+        display_path(path)
+    )
+}
+
 fn read_record_text_bounded(path: &Path) -> Result<Option<String>, String> {
     let file =
         fs::File::open(path).map_err(|error| format!("read {}: {error}", display_path(path)))?;
@@ -207,20 +226,11 @@ impl RecordStore {
             .into());
         }
         if metadata.len() > MAX_RECORD_BYTES as u64 {
-            return Err(format!(
-                "record {} exceeds maximum size of {MAX_RECORD_BYTES} bytes",
-                display_path(&path)
-            )
-            .into());
+            return Err(record_too_large(&path).into());
         }
         let text = read_record_text_bounded(&path)
             .map_err(KeelError::Custom)?
-            .ok_or_else(|| {
-                KeelError::Custom(format!(
-                    "record {} exceeds maximum size of {MAX_RECORD_BYTES} bytes",
-                    display_path(&path)
-                ))
-            })?;
+            .ok_or_else(|| KeelError::Custom(record_too_large(&path)))?;
         let fields = parse_object_of_strings(&text)
             .map_err(|error| format!("parse {}: {error}", display_path(&path)))?;
         Ok(Some(fields))
@@ -307,19 +317,13 @@ impl RecordStore {
                 }
             };
             if metadata.len() > MAX_RECORD_BYTES as u64 {
-                eprintln!(
-                    "skip {}: record exceeds maximum size of {MAX_RECORD_BYTES} bytes",
-                    display_path(&path)
-                );
+                eprintln!("{}", skipped_oversized_record(&path));
                 continue;
             }
             let text = match read_record_text_bounded(&path) {
                 Ok(Some(text)) => text,
                 Ok(None) => {
-                    eprintln!(
-                        "skip {}: record exceeds maximum size of {MAX_RECORD_BYTES} bytes",
-                        display_path(&path)
-                    );
+                    eprintln!("{}", skipped_oversized_record(&path));
                     continue;
                 }
                 Err(error) => {
@@ -392,10 +396,7 @@ fn read_records_unlocked(directory: &Path) -> Result<Vec<(String, Record)>, Keel
             }
         };
         if metadata.len() > MAX_RECORD_BYTES as u64 {
-            eprintln!(
-                "skip {}: record exceeds maximum size of {MAX_RECORD_BYTES} bytes",
-                display_path(&path)
-            );
+            eprintln!("{}", skipped_oversized_record(&path));
             continue;
         }
         let id = match path.file_stem().and_then(|stem| stem.to_str()) {
@@ -405,10 +406,7 @@ fn read_records_unlocked(directory: &Path) -> Result<Vec<(String, Record)>, Keel
         let text = match read_record_text_bounded(&path) {
             Ok(Some(text)) => text,
             Ok(None) => {
-                eprintln!(
-                    "skip {}: record exceeds maximum size of {MAX_RECORD_BYTES} bytes",
-                    display_path(&path)
-                );
+                eprintln!("{}", skipped_oversized_record(&path));
                 continue;
             }
             Err(error) => {

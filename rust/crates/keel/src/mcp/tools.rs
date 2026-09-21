@@ -874,7 +874,7 @@ fn tools_list_catalog() -> Value {
                     "type": "object",
                     "properties": {
                         "query": { "type": "string", "description": "Search terms; punctuation is stripped and tokens are AND-ed with prefix match." },
-                        "limit": { "type": "integer", "minimum": 1, "maximum": MAX_RECALL_LIMIT, "description": "Maximum hits (default 20)." },
+                        "limit": { "type": "integer", "minimum": 1, "maximum": MAX_RECALL_LIMIT, "description": format!("Maximum hits (default {DEFAULT_RECALL_LIMIT}).") },
                         "workspace": { "type": "string", "description": "Workspace scope to boost (and, with local_only, filter) in ranking. Auto-derived from cwd when omitted; pass a canonical workspace key or explicit scope to force." },
                         "local_only": { "type": "boolean", "description": "Apply workspace and current-branch eligibility in SQLite before result limits; stale/expired research, quarantined/superseded lessons, and superseded entities stay excluded. Default false." }
                     },
@@ -2231,8 +2231,6 @@ const MCP_RECALL_HOME_CHARS: usize = 512;
 const MCP_RECALL_WORKSPACE_CHARS: usize = 512;
 const MCP_RECALL_FTS_CHARS: usize = 512;
 const MCP_RECALL_EXCERPT_CHARS: usize = 600;
-const MCP_RECALL_MAX_BYTES: usize = crate::utility::recall::MAX_RECALL_RESULT_BYTES;
-const MCP_RECALL_MAX_TOKENS: usize = crate::utility::recall::MAX_RECALL_RESULT_TOKENS;
 
 /// Build the model-visible recall envelope after all filtering. Every
 /// candidate is measured as the complete serialized response, not only as a
@@ -2428,8 +2426,8 @@ fn mcp_recall_within_budget(payload: &Value) -> bool {
     let Ok(rendered) = serde_json::to_string(payload) else {
         return false;
     };
-    rendered.len() <= MCP_RECALL_MAX_BYTES
-        && TokenMeter::count_text(&rendered) <= MCP_RECALL_MAX_TOKENS
+    rendered.len() <= crate::utility::recall::MAX_RECALL_RESULT_BYTES
+        && TokenMeter::count_text(&rendered) <= crate::utility::recall::MAX_RECALL_RESULT_TOKENS
 }
 
 fn relative_to_home(claude_home: &Path, absolute_path: &Path) -> String {
@@ -2822,6 +2820,22 @@ fn command_requires_confirmation_depth(
         );
     }
 
+    if base == "gh" {
+        // Only the bare `gh <command> <subcommand>` shape is provably read-only;
+        // every other form, including all of `gh api`, needs the explicit opt-in.
+        let command = arguments.first().map(String::as_str);
+        let subcommand = arguments.get(1).map(String::as_str);
+        if command == Some(GH_READ_ONLY_FREE_FORM) {
+            return subcommand.is_none();
+        }
+        let operation = match (command, subcommand) {
+            (Some(command), Some(subcommand)) => format!("{command} {subcommand}"),
+            (Some(command), None) => command.to_string(),
+            _ => return true,
+        };
+        return !GH_READ_ONLY_OPERATIONS.contains(&operation.as_str());
+    }
+
     if base == "rg"
         && arguments
             .iter()
@@ -2902,6 +2916,35 @@ fn command_requires_confirmation_depth(
 
     !is_known_safe_tool
 }
+/// Read-only `gh` operations, one entry per trusted command and subcommand pair.
+/// Anything absent needs the explicit opt-in. `gh api` is absent by design: it
+/// can POST, PATCH, DELETE, or send a GraphQL mutation, so it is never provably
+/// read-only.
+const GH_READ_ONLY_OPERATIONS: &[&str] = &[
+    "status",
+    "pr list",
+    "pr view",
+    "pr status",
+    "pr diff",
+    "pr checks",
+    "issue list",
+    "issue view",
+    "issue status",
+    "run list",
+    "run view",
+    "release list",
+    "release view",
+    "workflow list",
+    "workflow view",
+    "label list",
+    "repo view",
+    "auth status",
+];
+
+/// `gh search <type> <query>` is read-only for every type, so the policy trusts
+/// the command without enumerating its types.
+const GH_READ_ONLY_FREE_FORM: &str = "search";
+
 fn enforce_run_command_policy(
     program: &str,
     arguments: &[String],
@@ -4665,10 +4708,6 @@ fn tool_context_brief(arguments: &Value) -> Result<String, String> {
     mcp_json_compact(&payload).map_err(|error| format!("context_brief: {error}"))
 }
 
-/// Per-probe kill budget for the repository-truth git fields. Four probes run
-/// back to back inside one tool body, so this must leave room under the outer
-/// MCP deadline (`mcp_child_timeout`, 25s default): four 5s tries still return
-/// before the deadline that would abandon the worker. A healthy probe is
 use crate::runner::shared_constants::GIT_FIELD_TIMEOUT;
 
 /// Compact current-checkout truth for plan §46: branch, commit, dirty state,
@@ -8037,6 +8076,14 @@ mod tests {
         }
     }
 
+    /// The one spelling of the GitHub CLI program name used by the policy tests.
+    const GH: &str = "gh";
+    /// Shared `gh` subcommand words for the policy matrix, so the vocabulary
+    /// exists once instead of once per case.
+    const GH_PR: &str = "pr";
+    const GH_LIST: &str = "list";
+    const GH_VIEW: &str = "view";
+
     #[test]
     fn run_command_policy_requires_explicit_unsafe_opt_in() {
         let _env_guard = crate::test_support::ENV_LOCK
@@ -8093,6 +8140,19 @@ mod tests {
             ),
             ("rg", vec!["--pre", "processor", "pattern"]),
             ("find", vec![".", "-exec", "sh", "-c", "echo pwn", ";"]),
+            (GH, vec![GH_PR, "merge", "289"]),
+            (GH, vec![GH_PR, "create", "--fill"]),
+            (GH, vec!["release", "create", "v1"]),
+            (GH, vec!["repo", "delete", "owner/repo"]),
+            (GH, vec!["auth", "login"]),
+            (GH, vec!["extension", "install", "owner/ext"]),
+            (GH, vec!["api", "-X", "DELETE", "/repos/owner/repo"]),
+            (
+                GH,
+                vec!["api", "graphql", "-f", "query=mutation{deleteIssue}"],
+            ),
+            (GH, vec!["-R", "owner/repo", GH_PR, GH_LIST]),
+            (GH, vec!["search"]),
         ] {
             let arguments = arguments
                 .into_iter()
@@ -8109,6 +8169,17 @@ mod tests {
             ("cargo", vec!["check"]),
             ("rg", vec!["pattern", "."]),
             ("find", vec!["needle.txt"]),
+            (GH, vec!["status"]),
+            (GH, vec![GH_PR, GH_LIST, "--limit", "5"]),
+            (GH, vec![GH_PR, GH_VIEW, "289", "--json", "title"]),
+            (GH, vec![GH_PR, "checks", "289"]),
+            (GH, vec!["issue", GH_LIST]),
+            (GH, vec!["run", GH_VIEW, "35556776068"]),
+            (GH, vec!["release", GH_VIEW]),
+            (GH, vec!["workflow", GH_LIST]),
+            (GH, vec!["repo", GH_VIEW]),
+            (GH, vec!["auth", "status"]),
+            (GH, vec!["search", "prs", "deflake"]),
         ] {
             if which::which(program).is_err() {
                 continue;
@@ -8362,8 +8433,10 @@ mod tests {
             crate::utility::recall::RecallReplay::default(),
         );
         let rendered = serde_json::to_string(&payload).expect("serialize bounded recall");
-        assert!(rendered.len() <= MCP_RECALL_MAX_BYTES);
-        assert!(TokenMeter::count_text(&rendered) <= MCP_RECALL_MAX_TOKENS);
+        assert!(rendered.len() <= crate::utility::recall::MAX_RECALL_RESULT_BYTES);
+        assert!(
+            TokenMeter::count_text(&rendered) <= crate::utility::recall::MAX_RECALL_RESULT_TOKENS
+        );
         assert!(rendered.contains("provenanceId"));
         assert!(rendered.contains("retrievalRef"));
         assert!(rendered.contains("prov-sha256:"));

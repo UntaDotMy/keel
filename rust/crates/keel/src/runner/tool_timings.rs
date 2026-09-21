@@ -917,11 +917,10 @@ mod tests {
         });
     }
 
-    /// Sentinel env var name for the SessionEnd timings prune retention.
-    /// Hard-coded here so a rename in `hook_lifecycle.rs` would break this
-    /// test instead of silently disabling the env override at the wiring
-    /// layer.
-    const TIMINGS_RETENTION_ENV_VAR: &str = "CLAUDE_SKILLS_TIMINGS_RETENTION_DAYS";
+    /// Sentinel env var name for the SessionEnd timings prune retention. It is
+    /// imported rather than re-declared, so a rename in shared_constants.rs
+    /// cannot silently disable the env override at the wiring layer.
+    use crate::runner::shared_constants::TIMINGS_RETENTION_ENV_VAR;
 
     /// Set `TIMINGS_RETENTION_ENV_VAR`, run the closure, restore prior
     /// state. Pairs with `with_isolated_claude_home` which already holds

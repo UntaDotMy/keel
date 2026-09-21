@@ -24,22 +24,22 @@ pub(crate) fn gate_status_rows() -> Vec<GateStatusRow> {
             max_blocks: review_gate_max_blocks(),
         },
         GateStatusRow {
-            dir: "brief-gate-blocks",
+            dir: BRIEF_GATE_BLOCKS_DIR,
             label: "working-brief",
             max_blocks: brief_gate_max_blocks(),
         },
         GateStatusRow {
-            dir: "memory-gate-blocks",
+            dir: MEMORY_GATE_BLOCKS_DIR,
             label: "memory",
             max_blocks: memory_gate_max_blocks(),
         },
         GateStatusRow {
-            dir: "learned-skill-gate-blocks",
+            dir: LEARNED_SKILL_GATE_BLOCKS_DIR,
             label: "learned-skill",
             max_blocks: learned_skill_gate_max_blocks(),
         },
         GateStatusRow {
-            dir: "research-gate-blocks",
+            dir: RESEARCH_GATE_BLOCKS_DIR,
             label: "research",
             max_blocks: research_gate_max_blocks(),
         },
@@ -331,7 +331,7 @@ pub(super) fn research_gate_blocks_path(claude_home: &Path, session_id: &str) ->
     };
     claude_home
         .join("state")
-        .join("research-gate-blocks")
+        .join(RESEARCH_GATE_BLOCKS_DIR)
         .join(key)
 }
 
@@ -462,7 +462,7 @@ pub(super) fn brief_gate_blocks_path(claude_home: &Path, session_id: &str) -> Pa
     };
     claude_home
         .join("state")
-        .join("brief-gate-blocks")
+        .join(BRIEF_GATE_BLOCKS_DIR)
         .join(key)
 }
 
@@ -498,7 +498,7 @@ pub(super) fn memory_gate_blocks_path(claude_home: &Path, session_id: &str) -> P
     };
     claude_home
         .join("state")
-        .join("memory-gate-blocks")
+        .join(MEMORY_GATE_BLOCKS_DIR)
         .join(key)
 }
 
@@ -533,7 +533,7 @@ pub(super) fn learned_skill_gate_blocks_path(claude_home: &Path, session_id: &st
     };
     claude_home
         .join("state")
-        .join("learned-skill-gate-blocks")
+        .join(LEARNED_SKILL_GATE_BLOCKS_DIR)
         .join(key)
 }
 

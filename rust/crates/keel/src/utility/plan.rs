@@ -95,6 +95,7 @@ enum PlanAction {
     Design,
     Tasks,
     Check,
+    Show,
     Ready,
     Done,
 }
@@ -107,6 +108,7 @@ impl PlanAction {
             Self::Design => "plan design",
             Self::Tasks => "plan tasks",
             Self::Check => "plan check",
+            Self::Show => "plan show",
             Self::Ready => "plan ready",
             Self::Done => "plan done",
         }
@@ -217,6 +219,7 @@ pub fn run_plan_command(
         "design" => PlanAction::Design,
         "tasks" => PlanAction::Tasks,
         "check" => PlanAction::Check,
+        "show" => PlanAction::Show,
         "ready" => PlanAction::Ready,
         "done" => PlanAction::Done,
         other => {
@@ -235,6 +238,7 @@ pub fn run_plan_command(
         PlanAction::Design => run_design(flags, &mut streams),
         PlanAction::Tasks => run_tasks(flags, &mut streams),
         PlanAction::Check => run_check(flags, &mut streams),
+        PlanAction::Show => run_show(flags, &mut streams),
         PlanAction::Ready => run_ready(flags, &mut streams),
         PlanAction::Done => run_done(flags, &mut streams),
     }
@@ -243,7 +247,7 @@ pub fn run_plan_command(
 fn usage(standard_error: Output<'_>) -> u8 {
     let _ = writeln!(
         standard_error,
-        "Usage: plan specify --request <text> | research --plan <id> [--claim <text> --source-url <url> --source-type <type> --retrieved-at <rfc3339> --support <text> --freshness <class> --used-by <ids>] | design --plan <id> | tasks --plan <id> | check [--rtm] --plan <id> | ready --plan <id> | done --plan <id>"
+        "Usage: plan specify --request <text> | research --plan <id> [--claim <text> --source-url <url> --source-type <type> --retrieved-at <rfc3339> --support <text> --freshness <class> --used-by <ids>] | design --plan <id> | tasks --plan <id> | check [--rtm] --plan <id> | show --plan <id> | ready --plan <id> | done --plan <id>"
     );
     1
 }
@@ -266,7 +270,11 @@ fn action_flags(action: PlanAction) -> FlagSet {
             flags.string_flag("freshness", "");
             flags.string_flag("used-by", "");
         }
-        PlanAction::Design | PlanAction::Tasks | PlanAction::Ready | PlanAction::Done => {
+        PlanAction::Design
+        | PlanAction::Tasks
+        | PlanAction::Show
+        | PlanAction::Ready
+        | PlanAction::Done => {
             flags.string_flag("plan", "");
         }
         PlanAction::Check => {
@@ -723,6 +731,66 @@ fn run_tasks(flags: FlagSet, streams: &mut CommandStreams<'_>) -> u8 {
         &format!(
             "plan tasks: id={plan_id} status=tasked tasks={}",
             parsed.requirements.len()
+        ),
+    )
+}
+
+/// Read-only plan reader. Plan artifacts live under the keel home, outside the
+/// workspace, so this is the sanctioned way to read one without a file tool that
+/// is jailed to the repository.
+fn run_show(flags: FlagSet, streams: &mut CommandStreams<'_>) -> u8 {
+    let (_context, plan_id, paths) = parsed_or_return!(existing_plan(&flags, streams.error));
+    let status = match std::fs::read_to_string(&paths.status) {
+        Ok(body) => serde_json::from_str::<Value>(&body).unwrap_or(Value::Null),
+        Err(error) => {
+            let _ = writeln!(
+                streams.error,
+                "plan show: read {}: {error}",
+                display_path(&paths.status)
+            );
+            return 1;
+        }
+    };
+    let artifacts = [
+        (SPEC_FILE, &paths.spec),
+        (RESEARCH_FILE, &paths.research),
+        (ARCHITECTURE_FILE, &paths.architecture),
+        (TASKS_FILE, &paths.tasks),
+        (RTM_FILE, &paths.rtm),
+        (STATUS_FILE, &paths.status),
+    ]
+    .into_iter()
+    .filter(|(_, path)| path.is_file())
+    .map(|(name, path)| {
+        json!({
+            "name": name,
+            "path": display_path(path),
+            "bytes": std::fs::metadata(path).map(|metadata| metadata.len()).unwrap_or(0),
+        })
+    })
+    .collect::<Vec<Value>>();
+    let stage = status
+        .get("stage")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_string();
+    let artifact_count = artifacts.len();
+    let payload = plan_payload(
+        &plan_id,
+        &paths,
+        json!({
+            "stage": stage,
+            "status": status,
+            "artifacts": artifacts,
+        }),
+    );
+    emit_success(
+        &flags,
+        streams,
+        &payload,
+        &format!(
+            "plan show: id={plan_id} stage={stage} path={} artifacts={artifact_count}",
+            display_path(&paths.directory)
         ),
     )
 }

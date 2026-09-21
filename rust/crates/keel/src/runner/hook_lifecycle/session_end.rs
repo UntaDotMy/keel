@@ -32,7 +32,7 @@ pub(super) fn prune_raw_output_store(standard_error: &mut dyn Write) {
 pub(crate) fn prune_tool_timings_store(standard_error: &mut dyn Write) {
     let retention_days = user_config_or_env_u64(
         PLUGIN_MEMORY_RETENTION_DAYS,
-        "CLAUDE_SKILLS_TIMINGS_RETENTION_DAYS",
+        TIMINGS_RETENTION_ENV_VAR,
         TIMINGS_DEFAULT_RETENTION_DAYS,
     );
     if retention_days == 0 {
@@ -49,7 +49,7 @@ pub(crate) fn prune_tool_timings_store(standard_error: &mut dyn Write) {
 pub(super) fn prune_observations_store(standard_error: &mut dyn Write) {
     let retention_days = user_config_or_env_u64(
         PLUGIN_MEMORY_RETENTION_DAYS,
-        "CLAUDE_SKILLS_OBSERVATION_RETENTION_DAYS",
+        OBSERVATION_RETENTION_ENV_VAR,
         OBSERVATION_DEFAULT_RETENTION_DAYS,
     );
     if retention_days == 0 {

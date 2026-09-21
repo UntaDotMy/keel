@@ -37,6 +37,10 @@ pub const KEEL_HOME_ENV_VAR: &str = "KEEL_HOME";
 pub const DEFAULT_HOOK_TIMEOUT_SECS: u64 = 5;
 pub const EXTENDED_HOOK_TIMEOUT_SECS: u64 = 10;
 pub const EXTENDED_HOOK_TIMEOUT_MS: u64 = 10_000;
+/// Per-probe kill budget for the repository-truth git fields. Four probes run
+/// back to back inside one tool body, so four tries must still fit the outer MCP
+/// deadline (`DEFAULT_MCP_CHILD_TIMEOUT_SECS`, 25s default) and return a bounded
+/// snapshot rather than abandon the worker.
 pub const GIT_FIELD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 pub const DOCTOR_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
@@ -56,9 +60,14 @@ pub const SESSION_STARTED_DIR_SUFFIX: &str = "-session-started";
 
 /// Suffix that turns a gate directory into its block-counter directory.
 pub const GATE_BLOCKS_SUFFIX: &str = "-blocks";
-/// Per-gate block-counter directories. Must stay the gate dir plus the suffix;
-/// the unit test at the bottom of this file pins that derivation.
+/// Per-gate block-counter directories. The test at the bottom of this file pins
+/// every entry whose gate dir exists above; memory, learned-skill, and research
+/// have no non-blocks marker directory, so they stand alone.
 pub const REVIEW_GATE_BLOCKS_DIR: &str = "review-gate-blocks";
+pub const BRIEF_GATE_BLOCKS_DIR: &str = "brief-gate-blocks";
+pub const MEMORY_GATE_BLOCKS_DIR: &str = "memory-gate-blocks";
+pub const LEARNED_SKILL_GATE_BLOCKS_DIR: &str = "learned-skill-gate-blocks";
+pub const RESEARCH_GATE_BLOCKS_DIR: &str = "research-gate-blocks";
 pub const COMPLETENESS_GATE_BLOCKS_DIR: &str = "completeness-gate-blocks";
 
 pub const REVIEWED_EXT: &str = ".reviewed";
@@ -94,6 +103,10 @@ mod tests {
         assert_eq!(
             REVIEW_GATE_BLOCKS_DIR,
             format!("{REVIEW_GATE_DIR}{GATE_BLOCKS_SUFFIX}")
+        );
+        assert_eq!(
+            BRIEF_GATE_BLOCKS_DIR,
+            format!("{BRIEF_GATE_DIR}{GATE_BLOCKS_SUFFIX}")
         );
         assert_eq!(
             COMPLETENESS_GATE_BLOCKS_DIR,

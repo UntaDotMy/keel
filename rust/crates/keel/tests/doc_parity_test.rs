@@ -842,9 +842,15 @@ fn no_hardcoded_tool_or_gate_literals_in_hook_lifecycle() {
                 "\"iron-law-satisfied\"",
                 "\"iron-law-gate\"",
                 "\"review-gate\"",
-                "\"review-gate-blocks\"",
                 "\"brief-gate\"",
                 "\"completeness-gate\"",
+                // Block-counter dirs are a separate vocabulary: `"brief-gate"`
+                // does not match `"brief-gate-blocks"`, so each needs an entry.
+                "\"review-gate-blocks\"",
+                "\"brief-gate-blocks\"",
+                "\"memory-gate-blocks\"",
+                "\"learned-skill-gate-blocks\"",
+                "\"research-gate-blocks\"",
                 "\"completeness-gate-blocks\"",
             ] {
                 assert!(
