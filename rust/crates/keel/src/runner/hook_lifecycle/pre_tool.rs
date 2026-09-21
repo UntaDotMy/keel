@@ -1403,18 +1403,24 @@ mod namespace_tests {
     /// its gate and confidence; at or above it stays a plain denial.
     #[test]
     fn denial_text_escalates_only_below_the_confidence_threshold() {
-        let low = PreToolGateDecision::deny_with_confidence("weak evidence", 0.4, true, "iron_law");
+        const IRON_LAW_GATE: &str = "iron_law";
+        let low =
+            PreToolGateDecision::deny_with_confidence("weak evidence", 0.4, true, IRON_LAW_GATE);
         let escalated = denial_text(&low);
         assert!(escalated.contains("KEEL_GATE_ESCALATE"), "{escalated}");
-        assert!(escalated.contains("iron_law"), "{escalated}");
+        assert!(escalated.contains(IRON_LAW_GATE), "{escalated}");
         assert!(escalated.contains("0.40"), "{escalated}");
 
         let high =
-            PreToolGateDecision::deny_with_confidence("solid evidence", 0.95, true, "iron_law");
+            PreToolGateDecision::deny_with_confidence("solid evidence", 0.95, true, IRON_LAW_GATE);
         assert_eq!(denial_text(&high), "solid evidence");
 
-        let unflagged =
-            PreToolGateDecision::deny_with_confidence("weak but unflagged", 0.2, false, "iron_law");
+        let unflagged = PreToolGateDecision::deny_with_confidence(
+            "weak but unflagged",
+            0.2,
+            false,
+            IRON_LAW_GATE,
+        );
         assert_eq!(
             denial_text(&unflagged),
             "weak but unflagged",
