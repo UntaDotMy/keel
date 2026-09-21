@@ -160,7 +160,9 @@ fn split(rows: &RawRows, seed: u64) -> (LabelledRows, LabelledRows, LabelledRows
         labelled.swap(index, swap);
     }
     let test_count = labelled.len() / 5;
-    let validation_count = labelled.len() / 10;
+    // why: the accept point is fitted here, and a tenth of the corpus was thin
+    // enough that the fitted floor moved on noise alone.
+    let validation_count = labelled.len() * 3 / 20;
     let test = labelled.split_off(labelled.len() - test_count);
     let validation = labelled.split_off(labelled.len() - validation_count);
     (labelled, validation, test)
