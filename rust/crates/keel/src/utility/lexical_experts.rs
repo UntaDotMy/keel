@@ -99,6 +99,9 @@ struct Fitted {
 /// all: a held-out score over a handful of rows would be a guess.
 pub fn train(rows: &RawRows) -> Option<LexicalModel> {
     let (train_rows, held_out_rows) = split(rows, DEFAULT_SEED);
+    // why: community tags carry label noise, and pruning the rows the fitted
+    // model confidently contradicts lifted held-out accuracy in measurement.
+    let (train_rows, _) = prune_label_noise(&train_rows);
     let fitted = fit(&train_rows)?;
     let held_out = score_held_out(&fitted, &held_out_rows);
     let usable = rows.len() >= REFUSE_BELOW_ROWS
@@ -446,6 +449,94 @@ pub fn accept_threshold_for(model: &LexicalModel, skill: &str) -> f64 {
         .find(|(name, _)| name == skill)
         .map(|(_, accept)| *accept)
         .unwrap_or(held_out.accept)
+}
+
+/// One row's out-of-fold judgement: the class the fold model chose, how sure it
+/// was, and what it gave the tag the row already claims.
+struct OutOfFold {
+    best: usize,
+    confidence: f64,
+    given: usize,
+    given_probability: f64,
+}
+
+/// Confident Learning on weak labels: judge every row with a fold model that
+/// never saw it, then drop rows whose given tag that model confidently
+/// contradicts. In-sample judging finds nothing, because a fitted model agrees
+/// with the rows it memorized, so the folds are what make this worth doing.
+fn prune_label_noise(rows: &LabelledRows) -> (LabelledRows, usize) {
+    const FOLDS: usize = 5;
+    if rows.len() < FOLDS {
+        return (rows.clone(), 0);
+    }
+    let mut judgements: Vec<Option<OutOfFold>> = Vec::new();
+    judgements.resize_with(rows.len(), || None);
+    for fold in 0..FOLDS {
+        let training: LabelledRows = rows
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| index % FOLDS != fold)
+            .map(|(_, row)| row.clone())
+            .collect();
+        let Some(fitted) = fit(&training) else {
+            return (rows.clone(), 0);
+        };
+        let model = LexicalModel {
+            schema: LEXICAL_SCHEMA,
+            training_rows: training.len(),
+            skills: fitted.experts.len(),
+            experts: fitted.experts,
+            idf: fitted.idf,
+            held_out: None,
+            usable: true,
+        };
+        let scorer = Scorer::new(&model);
+        for (index, (prompt, skill)) in rows.iter().enumerate() {
+            if index % FOLDS != fold {
+                continue;
+            }
+            let document = scorer.vectorize(prompt);
+            if document.is_empty() {
+                continue;
+            }
+            let Some(given) = scorer.names.iter().position(|name| name == skill) else {
+                continue;
+            };
+            let probabilities = scorer.probabilities(&document, 1.0);
+            let (best, confidence) = best_of(&probabilities);
+            judgements[index] = Some(OutOfFold {
+                best,
+                confidence,
+                given,
+                given_probability: probabilities[given],
+            });
+        }
+    }
+    let mut self_confidence: HashMap<&str, (f64, usize)> = HashMap::new();
+    for ((_, skill), judgement) in rows.iter().zip(&judgements) {
+        if let Some(judgement) = judgement {
+            let entry = self_confidence.entry(skill.as_str()).or_default();
+            entry.0 += judgement.given_probability;
+            entry.1 += 1;
+        }
+    }
+    let mut kept = Vec::with_capacity(rows.len());
+    let mut pruned = 0usize;
+    for ((prompt, skill), judgement) in rows.iter().zip(&judgements) {
+        let suspect = judgement.as_ref().is_some_and(|judgement| {
+            let mean = self_confidence
+                .get(skill.as_str())
+                .map(|(sum, count)| sum / (*count).max(1) as f64)
+                .unwrap_or(0.0);
+            judgement.best != judgement.given && judgement.confidence > mean
+        });
+        if suspect {
+            pruned += 1;
+        } else {
+            kept.push((prompt.clone(), skill.clone()));
+        }
+    }
+    (kept, pruned)
 }
 
 fn score_held_out(fitted: &Fitted, rows: &LabelledRows) -> Option<HeldOut> {

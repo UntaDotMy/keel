@@ -274,9 +274,35 @@ pub const DESIGN_TAGS: &[(&str, &str)] = &[
     ("dependencies", "dependency-and-supply-chain"),
 ];
 
+/// Desktop power-user corpus: OS-layer troubleshooting and infra.
+pub const DESKTOP_TAGS: &[(&str, &str)] = &[
+    ("security", "adversarial-security-review"),
+    ("docker", OPS_SKILL),
+    ("nginx", OPS_SKILL),
+    ("postgresql", "postgres-migration-safety"),
+    ("troubleshooting", "systematic-debugging"),
+    ("monitoring", "observability-and-incident-response"),
+];
+
+/// Ubuntu desktop-and-server corpus.
+pub const UBUNTU_TAGS: &[(&str, &str)] = &[
+    ("docker", OPS_SKILL),
+    ("nginx", OPS_SKILL),
+    ("postgresql", "postgres-migration-safety"),
+    ("security", "adversarial-security-review"),
+    ("server", OPS_SKILL),
+    ("monitoring", "observability-and-incident-response"),
+];
+
 /// Every corpus a model trains on, so no skill is left with zero evidence and
 /// therefore unpredictable no matter how confident the gate is.
-pub const EXTERNAL_SITES: &[&str] = &["stackoverflow", "serverfault", "softwareengineering"];
+pub const EXTERNAL_SITES: &[&str] = &[
+    "stackoverflow",
+    "serverfault",
+    "softwareengineering",
+    "superuser",
+    "askubuntu",
+];
 
 /// Site plus tag map for one corpus. An unknown name falls back to the developer
 /// corpus rather than inventing a fourth.
@@ -284,6 +310,8 @@ pub fn corpus_for(site: &str) -> (&'static str, &'static [(&'static str, &'stati
     match site {
         "serverfault" => ("serverfault", OPS_TAGS),
         "softwareengineering" => ("softwareengineering", DESIGN_TAGS),
+        "superuser" => ("superuser", DESKTOP_TAGS),
+        "askubuntu" => ("askubuntu", UBUNTU_TAGS),
         _ => ("stackoverflow", EXTERNAL_TAGS),
     }
 }
