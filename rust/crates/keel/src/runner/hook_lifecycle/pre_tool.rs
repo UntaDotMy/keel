@@ -117,7 +117,6 @@ impl PreToolGateDecision {
     pub const ESCALATION_CONFIDENCE_THRESHOLD: f64 = 0.6;
 
     /// Returns the confidence value, defaulting to 0.7 when Allow has no explicit value.
-    #[allow(dead_code)]
     pub(crate) fn confidence(&self) -> f64 {
         match self {
             PreToolGateDecision::Allow => Self::DEFAULT_CONFIDENCE,
@@ -128,7 +127,6 @@ impl PreToolGateDecision {
 
     /// Whether this denial should be escalated to a human reviewer.
     /// True when escalation is flagged AND confidence is below threshold.
-    #[allow(dead_code)]
     pub(crate) fn needs_escalation(&self) -> bool {
         match self {
             PreToolGateDecision::Deny {
@@ -1131,11 +1129,7 @@ pub(super) fn run_hook_pre_tool_use(
         markdown_only_edit,
     );
     if decision.is_denied() {
-        emit_pretool_deny(
-            decision.denial_reason().unwrap_or("gate denied"),
-            standard_output,
-            standard_error,
-        );
+        emit_pretool_deny(&denial_text(&decision), standard_output, standard_error);
         return 0;
     }
 
@@ -1243,6 +1237,20 @@ pub(super) fn run_hook_pre_tool_use(
             0
         }
     }
+}
+
+/// Denial text for a gate decision. A low-confidence denial names its gate and
+/// confidence so a human can override it, instead of reading as a hard block.
+fn denial_text(decision: &PreToolGateDecision) -> String {
+    let reason = decision.denial_reason().unwrap_or("gate denied");
+    if !decision.needs_escalation() {
+        return reason.to_string();
+    }
+    let gate_name = match decision {
+        PreToolGateDecision::Deny { gate_name, .. } => *gate_name,
+        _ => "gate",
+    };
+    crate::utility::decision::format_gate_escalation(gate_name, reason, decision.confidence())
 }
 
 /// PostToolUse handler.
@@ -1390,6 +1398,29 @@ Run `keel plan ready --plan <id>` to evaluate readiness, or resolve the blocking
 #[cfg(test)]
 mod namespace_tests {
     use super::*;
+
+    /// A denial below the escalation threshold must read as an escalation with
+    /// its gate and confidence; at or above it stays a plain denial.
+    #[test]
+    fn denial_text_escalates_only_below_the_confidence_threshold() {
+        let low = PreToolGateDecision::deny_with_confidence("weak evidence", 0.4, true, "iron_law");
+        let escalated = denial_text(&low);
+        assert!(escalated.contains("KEEL_GATE_ESCALATE"), "{escalated}");
+        assert!(escalated.contains("iron_law"), "{escalated}");
+        assert!(escalated.contains("0.40"), "{escalated}");
+
+        let high =
+            PreToolGateDecision::deny_with_confidence("solid evidence", 0.95, true, "iron_law");
+        assert_eq!(denial_text(&high), "solid evidence");
+
+        let unflagged =
+            PreToolGateDecision::deny_with_confidence("weak but unflagged", 0.2, false, "iron_law");
+        assert_eq!(
+            denial_text(&unflagged),
+            "weak but unflagged",
+            "escalation needs both the flag and low confidence"
+        );
+    }
 
     #[test]
     fn keel_research_matcher_rejects_foreign_and_lookalike_namespaces() {
