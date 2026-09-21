@@ -1,25 +1,42 @@
 //! Per-skill lexical experts learned from real rows, the evidence the router
 //! lacks when a prompt does not match keel's own trigger vocabulary.
 //!
-//! Trained from weakly labelled rows (a community tag names the domain, the tag
-//! maps to the skill), scored as a log-odds of the prompt's tokens against the
-//! corpus background. The held-out split is fixed-seed and disjoint, so a
-//! reported number is never a training number.
+//! Multinomial logistic regression over TF-IDF unigram and bigram features,
+//! trained by adagrad on weakly labelled rows (a community tag names the domain,
+//! the tag maps to the skill) with class priors in the bias. TF-IDF plus a linear
+//! model is the strong baseline for short multi-class text: it matches
+//! transformers on standard benchmarks while staying a hash lookup to score.
+//! The held-out split is fixed-seed and disjoint, and confidence is temperature
+//! fitted on that split, so no reported number is a training number.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-pub const LEXICAL_SCHEMA: u32 = 1;
-const SMOOTHING: f64 = 0.5;
-const WEIGHT_CLIP: f64 = 6.0;
+pub const LEXICAL_SCHEMA: u32 = 2;
 const DEFAULT_SEED: u64 = 42;
+const EPOCHS: usize = 30;
+const LEARNING_RATE: f64 = 0.5;
+const WEIGHT_DECAY: f64 = 1e-4;
+const ADAGRAD_EPSILON: f64 = 1e-8;
+const MIN_WORD: usize = 3;
 const REFUSE_BELOW_ROWS: usize = 100;
 const REFUSE_BELOW_ACCURACY: f64 = 0.50;
+
+/// Question words carry no domain signal and would otherwise dominate bigrams.
+const STOPWORDS: &[&str] = &[
+    "the", "and", "for", "with", "how", "why", "what", "when", "where", "which", "does", "did",
+    "not", "you", "your", "from", "this", "that", "these", "those", "are", "was", "were", "have",
+    "has", "had", "can", "could", "should", "would", "about", "into", "over", "under", "between",
+    "after", "before", "during", "there", "their", "them", "they", "its", "get", "got", "use",
+    "using", "one", "two", "any", "all", "but", "out", "own", "same", "than", "then", "too",
+    "very", "just", "also", "more", "most", "some", "such", "only", "other", "want", "need",
+];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LexicalExpert {
     pub name: String,
+    pub bias: f64,
     pub terms: Vec<(String, f64)>,
 }
 
@@ -29,6 +46,7 @@ pub struct HeldOut {
     pub correct: usize,
     pub accuracy: f64,
     pub brier: f64,
+    /// Temperature fitted on this split by lowest Brier.
     pub scale: f64,
 }
 
@@ -38,16 +56,33 @@ pub struct LexicalModel {
     pub training_rows: usize,
     pub skills: usize,
     pub experts: Vec<LexicalExpert>,
+    /// Inverse document frequency per feature, so scoring the same features a
+    /// training row used needs no corpus.
+    pub idf: Vec<(String, f64)>,
     pub held_out: Option<HeldOut>,
     pub usable: bool,
 }
 
-/// Train one expert per skill. Returns `None` when the corpus cannot support a
-/// model at all: a held-out score over a handful of rows would be a guess.
-pub fn train(rows: &[(String, Option<String>)]) -> Option<LexicalModel> {
+/// A prompt with its weak label: a community tag mapped to a keel skill.
+pub type LabelledRows = Vec<(String, String)>;
+
+/// Raw rows as fetched, where an unlabelled row is allowed and then dropped.
+pub type RawRows = [(String, Option<String>)];
+
+type Weights = Vec<HashMap<String, f64>>;
+type Accumulators = Vec<HashMap<String, f64>>;
+
+struct Fitted {
+    experts: Vec<LexicalExpert>,
+    idf: Vec<(String, f64)>,
+}
+
+/// Train the experts. Returns `None` when the corpus cannot support a model at
+/// all: a held-out score over a handful of rows would be a guess.
+pub fn train(rows: &RawRows) -> Option<LexicalModel> {
     let (train_rows, held_out_rows) = split(rows, DEFAULT_SEED);
-    let model = fit(&train_rows)?;
-    let held_out = score_held_out(&model, &held_out_rows);
+    let fitted = fit(&train_rows)?;
+    let held_out = score_held_out(&fitted, &held_out_rows);
     let usable = rows.len() >= REFUSE_BELOW_ROWS
         && held_out
             .as_ref()
@@ -55,8 +90,9 @@ pub fn train(rows: &[(String, Option<String>)]) -> Option<LexicalModel> {
     Some(LexicalModel {
         schema: LEXICAL_SCHEMA,
         training_rows: train_rows.len(),
-        skills: model.len(),
-        experts: model,
+        skills: fitted.experts.len(),
+        experts: fitted.experts,
+        idf: fitted.idf,
         held_out,
         usable,
     })
@@ -80,133 +116,303 @@ fn split(rows: &RawRows, seed: u64) -> (LabelledRows, LabelledRows) {
     (labelled, held_out)
 }
 
-/// A prompt with its weak label: a community tag mapped to a keel skill.
-pub type LabelledRows = Vec<(String, String)>;
-
-/// Raw rows as fetched, where an unlabelled row is allowed and then dropped.
-pub type RawRows = [(String, Option<String>)];
-
-type TermCounts = HashMap<String, HashMap<String, usize>>;
-
-fn term_counts(rows: &[(String, String)]) -> TermCounts {
-    let mut per_skill: TermCounts = HashMap::new();
-    for (prompt, skill) in rows {
-        let entry = per_skill.entry(skill.clone()).or_default();
-        for token in crate::utility::skill_match::tokenize(prompt) {
-            *entry.entry(token).or_default() += 1;
-        }
+/// Unigrams plus adjacent bigrams: a bigram is what separates `borrow checker`
+/// from a page that merely mentions both words.
+fn features(prompt: &str) -> Vec<String> {
+    let words: Vec<String> = prompt
+        .to_ascii_lowercase()
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|word| word.len() >= MIN_WORD && !STOPWORDS.contains(word))
+        .map(str::to_string)
+        .collect();
+    let mut features: Vec<String> = words.clone();
+    for pair in words.windows(2) {
+        features.push(format!("{}_{}", pair[0], pair[1]));
     }
-    per_skill
+    features
 }
 
-fn fit(rows: &[(String, String)]) -> Option<Vec<LexicalExpert>> {
+fn inverse_document_frequency(rows: &LabelledRows) -> Vec<(String, f64)> {
+    let mut document_frequency: HashMap<String, usize> = HashMap::new();
+    for (prompt, _) in rows {
+        let mut seen: Vec<String> = features(prompt);
+        seen.sort();
+        seen.dedup();
+        for feature in seen {
+            *document_frequency.entry(feature).or_default() += 1;
+        }
+    }
+    let total = rows.len() as f64;
+    let mut idf: Vec<(String, f64)> = document_frequency
+        .into_iter()
+        .map(|(feature, count)| (feature, ((1.0 + total) / (1.0 + count as f64)).ln() + 1.0))
+        .collect();
+    idf.sort_by(|left, right| left.0.cmp(&right.0));
+    idf
+}
+
+/// Sublinear term frequency against the fitted document frequencies, L2
+/// normalized so a long title cannot outvote a short one.
+fn vectorize(prompt: &str, idf: &HashMap<String, f64>) -> HashMap<String, f64> {
+    let mut counts: HashMap<String, f64> = HashMap::new();
+    for feature in features(prompt) {
+        if idf.contains_key(&feature) {
+            *counts.entry(feature).or_default() += 1.0;
+        }
+    }
+    let mut vector: HashMap<String, f64> = counts
+        .into_iter()
+        .map(|(feature, count)| (feature.clone(), (1.0 + count.ln()) * idf[&feature]))
+        .collect();
+    let norm = vector
+        .values()
+        .map(|value| value * value)
+        .sum::<f64>()
+        .sqrt();
+    if norm > 0.0 {
+        for value in vector.values_mut() {
+            *value /= norm;
+        }
+    }
+    vector
+}
+
+fn fit(rows: &LabelledRows) -> Option<Fitted> {
     if rows.is_empty() {
         return None;
     }
-    let per_skill = term_counts(rows);
-    let mut background: HashMap<String, usize> = HashMap::new();
-    for counts in per_skill.values() {
-        for (token, count) in counts {
-            *background.entry(token.clone()).or_default() += count;
+    let idf_pairs = inverse_document_frequency(rows);
+    let idf: HashMap<String, f64> = idf_pairs.iter().cloned().collect();
+    let mut classes: Vec<String> = rows.iter().map(|(_, skill)| skill.clone()).collect();
+    classes.sort();
+    classes.dedup();
+    if classes.is_empty() {
+        return None;
+    }
+    let class_index: HashMap<String, usize> = classes
+        .iter()
+        .enumerate()
+        .map(|(index, name)| (name.clone(), index))
+        .collect();
+    let documents: Vec<(usize, HashMap<String, f64>)> = rows
+        .iter()
+        .map(|(prompt, skill)| (class_index[skill], vectorize(prompt, &idf)))
+        .collect();
+
+    let mut weights: Weights = vec![HashMap::new(); classes.len()];
+    let mut accumulators: Accumulators = vec![HashMap::new(); classes.len()];
+    // Class priors start in the bias, so an over-sampled tag does not win by count.
+    let mut biases: Vec<f64> = classes
+        .iter()
+        .map(|name| {
+            let count = rows.iter().filter(|(_, skill)| skill == name).count() as f64;
+            (count / rows.len() as f64).max(1e-6).ln()
+        })
+        .collect();
+
+    let mut order: Vec<usize> = (0..documents.len()).collect();
+    let mut state = DEFAULT_SEED | 1;
+    for _ in 0..EPOCHS {
+        for index in (1..order.len()).rev() {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let swap = (state >> 33) as usize % (index + 1);
+            order.swap(index, swap);
+        }
+        for position in &order {
+            let (label, document) = &documents[*position];
+            let logits: Vec<f64> = (0..classes.len())
+                .map(|class| biases[class] + dot(&weights[class], document))
+                .collect();
+            let probabilities = softmax(&logits, 1.0);
+            for class in 0..classes.len() {
+                let observed = (class == *label) as u8 as f64;
+                let gradient = probabilities[class] - observed;
+                biases[class] -= LEARNING_RATE * gradient;
+                for (feature, value) in document {
+                    let step = LEARNING_RATE * gradient * value;
+                    let slot = accumulators[class].entry(feature.clone()).or_default();
+                    *slot += step * step;
+                    let update = step / (slot.sqrt() + ADAGRAD_EPSILON);
+                    let weight = weights[class].entry(feature.clone()).or_default();
+                    *weight -= update;
+                }
+            }
+        }
+        for class_weights in weights.iter_mut() {
+            for weight in class_weights.values_mut() {
+                *weight *= 1.0 - LEARNING_RATE * WEIGHT_DECAY;
+            }
         }
     }
-    let background_total: usize = background.values().sum();
-    let vocabulary = background.len().max(1) as f64;
-    let experts: Vec<LexicalExpert> = per_skill
+
+    let experts = classes
         .iter()
-        .map(|(skill, counts)| {
-            let skill_total: usize = counts.values().sum();
-            let mut terms: Vec<(String, f64)> = counts
+        .enumerate()
+        .map(|(class, name)| {
+            let mut terms: Vec<(String, f64)> = weights[class]
                 .iter()
-                .map(|(token, count)| {
-                    let background_count = background.get(token).copied().unwrap_or(0) as f64;
-                    let present =
-                        (*count as f64 + SMOOTHING) / (skill_total as f64 + SMOOTHING * vocabulary);
-                    let base = (background_count + SMOOTHING)
-                        / (background_total as f64 + SMOOTHING * vocabulary);
-                    let weight = (present / base).ln().clamp(-WEIGHT_CLIP, WEIGHT_CLIP);
-                    (token.clone(), weight)
-                })
+                .map(|(feature, weight)| (feature.clone(), *weight))
                 .collect();
             terms.sort_by(|left, right| {
                 right
                     .1
-                    .partial_cmp(&left.1)
+                    .abs()
+                    .partial_cmp(&left.1.abs())
                     .unwrap_or(std::cmp::Ordering::Equal)
             });
             LexicalExpert {
-                name: skill.clone(),
+                name: name.clone(),
+                bias: biases[class],
                 terms,
             }
         })
         .collect();
-    (!experts.is_empty()).then_some(experts)
+    Some(Fitted {
+        experts,
+        idf: idf_pairs,
+    })
 }
 
-fn score(experts: &[LexicalExpert], prompt: &str) -> Vec<(String, f64)> {
-    let tokens = crate::utility::skill_match::tokenize(prompt);
-    let mut scored: Vec<(String, f64)> = experts
+fn dot(weights: &HashMap<String, f64>, document: &HashMap<String, f64>) -> f64 {
+    document
         .iter()
-        .map(|expert| {
-            let mut sum = 0.0;
-            let mut seen = 0usize;
-            for (term, weight) in &expert.terms {
-                if tokens.contains(term) {
-                    sum += weight;
-                    seen += 1;
-                }
-            }
-            let mean = if seen == 0 { 0.0 } else { sum / seen as f64 };
-            let coverage = seen as f64 / tokens.len().max(1) as f64;
-            (expert.name.clone(), mean * coverage.sqrt())
-        })
-        .collect();
-    scored.sort_by(|left, right| {
-        right
-            .1
-            .partial_cmp(&left.1)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    scored
+        .map(|(feature, value)| weights.get(feature).copied().unwrap_or(0.0) * value)
+        .sum()
 }
 
-/// Best skill and its calibrated confidence. `None` when no expert has any
-/// evidence for the prompt: silence is a valid answer, a coin flip is not.
-pub fn predict(model: &LexicalModel, prompt: &str) -> Option<(String, f64)> {
-    let scored = score(&model.experts, prompt);
-    let (name, top) = scored.first()?;
-    let second = scored.get(1).map(|(_, value)| *value).unwrap_or(0.0);
-    let margin = top - second;
-    if margin <= 0.0 {
-        return None;
+fn softmax(logits: &[f64], temperature: f64) -> Vec<f64> {
+    let scaled: Vec<f64> = logits.iter().map(|logit| logit / temperature).collect();
+    let top = scaled.iter().copied().fold(f64::MIN, f64::max);
+    let exponents: Vec<f64> = scaled.iter().map(|value| (value - top).exp()).collect();
+    let total: f64 = exponents.iter().sum();
+    exponents.into_iter().map(|value| value / total).collect()
+}
+
+/// Feature-major weights, built once per model. Scoring must never rebuild a
+/// map per row: the temperature search alone scores every held-out row 40 times.
+struct Scorer {
+    names: Vec<String>,
+    biases: Vec<f64>,
+    weights: HashMap<String, Vec<f64>>,
+    idf: HashMap<String, f64>,
+}
+
+impl Scorer {
+    fn new(model: &LexicalModel) -> Self {
+        let mut weights: HashMap<String, Vec<f64>> = HashMap::new();
+        for (class, expert) in model.experts.iter().enumerate() {
+            for (feature, weight) in &expert.terms {
+                let row = weights
+                    .entry(feature.clone())
+                    .or_insert_with(|| vec![0.0; model.experts.len()]);
+                row[class] = *weight;
+            }
+        }
+        Self {
+            names: model
+                .experts
+                .iter()
+                .map(|expert| expert.name.clone())
+                .collect(),
+            biases: model.experts.iter().map(|expert| expert.bias).collect(),
+            weights,
+            idf: model.idf.iter().cloned().collect(),
+        }
     }
+
+    fn vectorize(&self, prompt: &str) -> HashMap<String, f64> {
+        vectorize(prompt, &self.idf)
+    }
+
+    fn probabilities(&self, document: &HashMap<String, f64>, temperature: f64) -> Vec<f64> {
+        let logits: Vec<f64> = (0..self.names.len())
+            .map(|class| {
+                self.biases[class]
+                    + document
+                        .iter()
+                        .map(|(feature, value)| {
+                            self.weights
+                                .get(feature)
+                                .map(|row| row[class] * value)
+                                .unwrap_or(0.0)
+                        })
+                        .sum::<f64>()
+            })
+            .collect();
+        softmax(&logits, temperature)
+    }
+
+    fn predict(&self, prompt: &str, temperature: f64) -> Option<(String, f64)> {
+        let document = self.vectorize(prompt);
+        if document.is_empty() {
+            return None;
+        }
+        let (best, probability) = best_of(&self.probabilities(&document, temperature));
+        Some((self.names[best].clone(), probability))
+    }
+}
+
+fn best_of(probabilities: &[f64]) -> (usize, f64) {
+    probabilities
+        .iter()
+        .enumerate()
+        .max_by(|left, right| {
+            left.1
+                .partial_cmp(right.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .map(|(index, probability)| (index, *probability))
+        .unwrap_or((0, 0.0))
+}
+
+/// Best skill and its temperature-calibrated confidence. `None` when the prompt
+/// shares no feature with the training rows: silence beats a coin flip.
+pub fn predict(model: &LexicalModel, prompt: &str) -> Option<(String, f64)> {
     let scale = model
         .held_out
         .as_ref()
         .map(|metrics| metrics.scale)
         .unwrap_or(1.0);
-    let confidence = 1.0 / (1.0 + (-scale * margin).exp());
-    Some((name.clone(), confidence))
+    Scorer::new(model).predict(prompt, scale)
 }
 
-fn score_held_out(model: &[LexicalExpert], rows: &[(String, String)]) -> Option<HeldOut> {
+fn score_held_out(fitted: &Fitted, rows: &LabelledRows) -> Option<HeldOut> {
     if rows.is_empty() {
         return None;
     }
-    let mut best_scale = 0.25f64;
+    let model = LexicalModel {
+        schema: LEXICAL_SCHEMA,
+        training_rows: 0,
+        skills: fitted.experts.len(),
+        experts: fitted.experts.clone(),
+        idf: fitted.idf.clone(),
+        held_out: None,
+        usable: true,
+    };
+    let scorer = Scorer::new(&model);
+    let documents: Vec<(String, HashMap<String, f64>)> = rows
+        .iter()
+        .map(|(prompt, skill)| (skill.clone(), scorer.vectorize(prompt)))
+        .collect();
+    let mut best_scale = 1.0f64;
     let mut best_brier = f64::MAX;
     for step in 1..=40 {
-        let scale = step as f64 * 0.25;
-        let brier = brier_for(model, rows, scale);
+        let scale = step as f64 * 0.05;
+        let brier = brier_for_documents(&scorer, &documents, scale);
         if brier < best_brier {
             best_scale = scale;
             best_brier = brier;
         }
     }
-    let scale = best_scale;
     let mut correct = 0usize;
-    for (prompt, skill) in rows {
-        if predict_with_scale(model, prompt, scale).is_some_and(|(name, _)| name == *skill) {
+    for (skill, document) in &documents {
+        if document.is_empty() {
+            continue;
+        }
+        let (best, _) = best_of(&scorer.probabilities(document, best_scale));
+        if &scorer.names[best] == skill {
             correct += 1;
         }
     }
@@ -214,30 +420,33 @@ fn score_held_out(model: &[LexicalExpert], rows: &[(String, String)]) -> Option<
         rows: rows.len(),
         correct,
         accuracy: correct as f64 / rows.len() as f64,
-        brier: brier_for(model, rows, scale),
-        scale,
+        brier: best_brier,
+        scale: best_scale,
     })
 }
 
-fn brier_for(model: &[LexicalExpert], rows: &[(String, String)], scale: f64) -> f64 {
+/// Brier over the rows the model actually answered: a silent row has no stated
+/// probability to score, so it is reported through accuracy and coverage instead.
+fn brier_for_documents(
+    scorer: &Scorer,
+    documents: &[(String, HashMap<String, f64>)],
+    scale: f64,
+) -> f64 {
     let mut sum = 0.0;
-    for (prompt, skill) in rows {
-        let (name, confidence) = predict_with_scale(model, prompt, scale).unwrap_or_default();
-        let correct = (!name.is_empty() && name == *skill) as u8 as f64;
+    let mut scored = 0usize;
+    for (skill, document) in documents {
+        if document.is_empty() {
+            continue;
+        }
+        let (best, confidence) = best_of(&scorer.probabilities(document, scale));
+        let correct = (&scorer.names[best] == skill) as u8 as f64;
         sum += (confidence - correct).powi(2);
+        scored += 1;
     }
-    sum / rows.len().max(1) as f64
-}
-
-fn predict_with_scale(model: &[LexicalExpert], prompt: &str, scale: f64) -> Option<(String, f64)> {
-    let scored = score(model, prompt);
-    let (name, top) = scored.first()?;
-    let second = scored.get(1).map(|(_, value)| *value).unwrap_or(0.0);
-    let margin = top - second;
-    if margin <= 0.0 {
-        return None;
+    if scored == 0 {
+        return f64::MAX;
     }
-    Some((name.clone(), 1.0 / (1.0 + (-scale * margin).exp())))
+    sum / scored as f64
 }
 
 pub fn artifact_path(claude_home: &Path) -> PathBuf {
@@ -281,6 +490,14 @@ mod tests {
     }
 
     #[test]
+    fn features_carry_unigrams_and_bigrams_without_question_words() {
+        let produced = features("How do I fix the borrow checker error");
+        assert!(produced.contains(&"borrow".to_string()));
+        assert!(produced.contains(&"borrow_checker".to_string()));
+        assert!(!produced.contains(&"the".to_string()));
+    }
+
+    #[test]
     fn train_splits_disjointly_and_scores_held_out() {
         let rows = separable_rows();
         let model = train(&rows).expect("separable corpus trains");
@@ -295,12 +512,22 @@ mod tests {
     }
 
     #[test]
-    fn predict_names_the_learned_skill_and_refuses_a_tie() {
+    fn predict_names_the_learned_skill() {
         let rows = separable_rows();
         let model = train(&rows).expect("model");
         let (name, confidence) = predict(&model, "postgres autovacuum bloat").expect("predicts");
         assert_eq!(name, "postgres");
         assert!(confidence > 0.5, "confidence {confidence}");
+    }
+
+    #[test]
+    fn unseen_vocabulary_stays_silent() {
+        let rows = separable_rows();
+        let model = train(&rows).expect("model");
+        assert!(
+            predict(&model, "zzz qqq").is_none(),
+            "no shared feature means no answer, not a guess"
+        );
     }
 
     #[test]
