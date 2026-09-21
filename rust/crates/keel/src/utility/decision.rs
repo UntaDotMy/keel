@@ -2707,7 +2707,8 @@ pub fn handle_decision_tool(arguments: &Value) -> Result<String, String> {
                 .get("remote")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
-            let report = crate::utility::decision_benchmark::run(remote);
+            let home = crate::runtime::resolve_claude_home("").ok(); // why: no home means no calibrated column
+            let report = crate::utility::decision_benchmark::run(home.as_deref(), remote);
             if arguments.get("json").and_then(Value::as_bool).unwrap_or(false) {
                 return serde_json::to_string_pretty(
                     &crate::utility::decision_benchmark::to_json(&report),

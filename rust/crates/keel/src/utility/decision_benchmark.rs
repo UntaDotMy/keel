@@ -28,11 +28,16 @@ const CONTROL_PROMPTS: &[&str] = &[
     "summarize the changelog since the last release",
 ];
 
+/// Where the scored prompts came from, so a self-referential run can never be
+/// quoted as a real-world one.
+pub const SOURCE_FIXTURES: &str = "keel curated vocabulary (self-referential)";
+
 #[derive(Debug, Clone, Serialize)]
 pub struct BenchmarkRow {
     pub prompt: String,
     pub expected: Option<String>,
     pub local: Option<String>,
+    pub local_confidence: Option<f64>,
     pub remote: Option<String>,
     pub remote_confidence: Option<f64>,
     pub remote_ms: Option<u64>,
@@ -51,6 +56,14 @@ pub struct BenchmarkReport {
     pub remote_p50_ms: Option<u64>,
     pub remote_brier: Option<f64>,
     pub remote_ece: Option<f64>,
+    /// Scored over the rows that carried a calibrated local confidence, which is
+    /// why the count travels with the numbers instead of being implied by cases.
+    pub local_brier: Option<f64>,
+    pub local_ece: Option<f64>,
+    pub local_confidence_rows: usize,
+    /// Where the prompts came from. Keel's own fixtures and a fetched public
+    /// corpus must never read as the same result.
+    pub source: String,
     pub rows: Vec<BenchmarkRow>,
 }
 
@@ -68,7 +81,7 @@ pub fn build_cases() -> Vec<(String, Option<String>)> {
     cases
 }
 
-pub fn run(remote: bool) -> BenchmarkReport {
+pub fn run(home: Option<&std::path::Path>, remote: bool) -> BenchmarkReport {
     let cases = build_cases();
     let prompts: Vec<String> = cases.iter().map(|(prompt, _)| prompt.clone()).collect();
     let remote_batch = if remote {
@@ -83,6 +96,9 @@ pub fn run(remote: bool) -> BenchmarkReport {
     let mut remote_correct = 0;
     for (index, (prompt, expected)) in cases.iter().enumerate() {
         let local = curated_skill_for_prompt(prompt).map(str::to_string);
+        let local_confidence = local
+            .as_deref()
+            .and_then(|skill| router_confidence(home, prompt, skill));
         let local_correct_case = local == *expected;
         if local_correct_case {
             local_correct += 1;
@@ -101,6 +117,7 @@ pub fn run(remote: bool) -> BenchmarkReport {
             prompt: prompt.clone(),
             expected: expected.clone(),
             local,
+            local_confidence,
             remote,
             remote_confidence: item.and_then(|(_, confidence, _)| *confidence),
             remote_ms: item.map(|(_, _, ms)| *ms),
@@ -109,29 +126,24 @@ pub fn run(remote: bool) -> BenchmarkReport {
         });
     }
 
-    // The service reports a confidence per answer, so its calibration is
-    // comparable to a keel expert's: confidence versus correctness.
-    let remote_pairs: Vec<(f64, bool)> = rows
-        .iter()
-        .filter_map(|row| match (row.remote_confidence, row.remote_correct) {
-            (Some(confidence), Some(correct)) => Some((confidence, correct)),
-            _ => None,
-        })
-        .collect();
-    let remote_brier = if remote_pairs.is_empty() {
-        None
-    } else {
-        let sum: f64 = remote_pairs
+    // Both columns are scored the same way: confidence versus correctness, so
+    // keel's own calibration stops reading as n/a next to the remote service.
+    let remote_pairs = scored_pairs(
+        &rows
             .iter()
-            .map(|(confidence, correct)| (confidence - if *correct { 1.0 } else { 0.0 }).powi(2))
-            .sum();
-        Some(sum / remote_pairs.len() as f64)
-    };
-    let remote_ece = if remote_pairs.is_empty() {
-        None
-    } else {
-        Some(expected_calibration_error(&remote_pairs))
-    };
+            .map(|row| (row.remote_confidence, row.remote_correct))
+            .collect::<Vec<_>>(),
+    );
+    let local_pairs = scored_pairs(
+        &rows
+            .iter()
+            .map(|row| (row.local_confidence, Some(row.local_correct)))
+            .collect::<Vec<_>>(),
+    );
+    let remote_brier = brier_score(&remote_pairs);
+    let remote_ece = ece_score(&remote_pairs);
+    let local_brier = brier_score(&local_pairs);
+    let local_ece = ece_score(&local_pairs);
 
     BenchmarkReport {
         cases: cases.len(),
@@ -143,8 +155,45 @@ pub fn run(remote: bool) -> BenchmarkReport {
         remote_p50_ms: percentile_ms(&rows, 50),
         remote_brier,
         remote_ece,
+        local_brier,
+        local_ece,
+        local_confidence_rows: local_pairs.len(),
+        source: SOURCE_FIXTURES.to_string(),
         rows,
     }
+}
+
+/// Calibrated confidence the live router reports for `skill` on this prompt, or
+/// `None` when it is silent or names a different skill: a confidence is never
+/// attached to a decision the router did not make.
+fn router_confidence(home: Option<&std::path::Path>, prompt: &str, skill: &str) -> Option<f64> {
+    let decision = crate::utility::skill_match::match_skill_for_prompt_with_details(home?, prompt)?;
+    (decision.name == skill).then_some(decision.confidence)
+}
+
+fn scored_pairs(pairs: &[(Option<f64>, Option<bool>)]) -> Vec<(f64, bool)> {
+    pairs
+        .iter()
+        .filter_map(|(confidence, correct)| Some(((*confidence)?, (*correct)?)))
+        .collect()
+}
+
+fn brier_score(pairs: &[(f64, bool)]) -> Option<f64> {
+    if pairs.is_empty() {
+        return None;
+    }
+    let sum: f64 = pairs
+        .iter()
+        .map(|(confidence, correct)| (confidence - if *correct { 1.0 } else { 0.0 }).powi(2))
+        .sum();
+    Some(sum / pairs.len() as f64)
+}
+
+fn ece_score(pairs: &[(f64, bool)]) -> Option<f64> {
+    if pairs.is_empty() {
+        return None;
+    }
+    Some(expected_calibration_error(pairs))
 }
 
 struct RemoteBatch {
@@ -239,7 +288,7 @@ const CELL_WIDTH: usize = 34;
 
 pub fn render(report: &BenchmarkReport) -> String {
     let mut out = String::new();
-    out.push_str("KEEL DECISION BENCHMARK   curated routing vocabulary\n");
+    out.push_str(&format!("KEEL DECISION BENCHMARK   {}\n", report.source));
     out.push_str(&format!(
         "cases: {} ({} curated prompts, {} controls)\n",
         report.cases,
@@ -260,6 +309,12 @@ pub fn render(report: &BenchmarkReport) -> String {
         ));
     } else {
         out.push_str("classifier.dev   not run (pass --remote to spend one live call)\n");
+    }
+    if let (Some(brier), Some(ece)) = (report.local_brier, report.local_ece) {
+        out.push_str(&format!(
+            "keel local       confidence vs correctness: brier {brier:.4}   ece {ece:.4}   over {} of {} rows\n",
+            report.local_confidence_rows, report.cases
+        ));
     }
     if let (Some(brier), Some(ece)) = (report.remote_brier, report.remote_ece) {
         out.push_str(&format!(
@@ -308,6 +363,7 @@ pub fn to_json(report: &BenchmarkReport) -> serde_json::Value {
                 "prompt": row.prompt,
                 "expected": row.expected,
                 "local": row.local,
+                "local_confidence": row.local_confidence,
                 "remote": row.remote,
                 "remote_confidence": row.remote_confidence,
                 "remote_ms": row.remote_ms,
@@ -320,6 +376,10 @@ pub fn to_json(report: &BenchmarkReport) -> serde_json::Value {
         "cases": report.cases,
         "controls": report.controls,
         "local_correct": report.local_correct,
+        "local_brier": report.local_brier,
+        "local_ece": report.local_ece,
+        "local_confidence_rows": report.local_confidence_rows,
+        "source": report.source,
         "remote_available": report.remote_available,
         "remote_correct": report.remote_correct,
         "remote_model": report.remote_model,
@@ -346,7 +406,7 @@ mod tests {
 
     #[test]
     fn curated_cases_route_locally() {
-        let report = run(false);
+        let report = run(None, false);
         assert_eq!(report.cases, build_cases().len());
         assert_eq!(report.local_correct, report.cases);
         assert!(!report.remote_available);
@@ -405,7 +465,7 @@ mod tests {
 
     #[test]
     fn render_names_both_columns_without_remote() {
-        let report = run(false);
+        let report = run(None, false);
         let text = render(&report);
         assert!(text.contains("keel local"));
         assert!(text.contains("classifier.dev"));
