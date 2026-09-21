@@ -41,7 +41,6 @@ pub(super) const IRON_LAW_GATE_DENIAL_VERIFIED: &str =
 /// Iron-law edit-gate mode. Default is **Verified**: a fresh external web lookup
 /// is required before editing, and a fresh research-cache entry counts as reuse.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-
 pub(crate) enum IronLawGateMode {
     /// Disabled entirely.
     Off,
@@ -108,14 +107,17 @@ pub enum PreToolGateDecision {
         continue_anyway: bool,
     },
 }
-#[allow(dead_code)]
+// Production reads decisions through `deny_with_confidence`, `warn`, and
+// `as_option`; the items below are test-facing and carry their own narrow allow.
 impl PreToolGateDecision {
+    #[allow(dead_code)]
     pub(crate) const DEFAULT_CONFIDENCE: f64 = 0.7;
 
     /// Escalation threshold: denials below it escalate (J07 governs over the J01 sketch).
     pub const ESCALATION_CONFIDENCE_THRESHOLD: f64 = 0.6;
 
     /// Returns the confidence value, defaulting to 0.7 when Allow has no explicit value.
+    #[allow(dead_code)]
     pub(crate) fn confidence(&self) -> f64 {
         match self {
             PreToolGateDecision::Allow => Self::DEFAULT_CONFIDENCE,
@@ -126,6 +128,7 @@ impl PreToolGateDecision {
 
     /// Whether this denial should be escalated to a human reviewer.
     /// True when escalation is flagged AND confidence is below threshold.
+    #[allow(dead_code)]
     pub(crate) fn needs_escalation(&self) -> bool {
         match self {
             PreToolGateDecision::Deny {
@@ -138,6 +141,7 @@ impl PreToolGateDecision {
     }
 
     /// Whether the tool call is allowed (no denial or explicit allow with warning).
+    #[allow(dead_code)]
     pub(crate) fn is_allowed(&self) -> bool {
         match self {
             PreToolGateDecision::Allow => true,
@@ -167,6 +171,7 @@ impl PreToolGateDecision {
     }
 
     /// Creates a Deny decision with default confidence and no escalation.
+    #[allow(dead_code)]
     pub(crate) fn deny(reason: &'static str, gate_name: &'static str) -> Self {
         PreToolGateDecision::Deny {
             reason,
@@ -192,7 +197,6 @@ impl PreToolGateDecision {
     }
 
     /// Creates a Warn decision.
-    #[allow(dead_code)]
     pub(crate) fn warn(message: &'static str, confidence: f64, continue_anyway: bool) -> Self {
         PreToolGateDecision::Warn {
             message,
@@ -290,15 +294,6 @@ impl DecisionCache {
             .entry(gate_name.to_string())
             .or_default()
             .insert(key, entry);
-    }
-    /// Clear all entries for a session.
-    #[allow(dead_code)]
-    fn clear_session(&mut self, session_id: &str) {
-        for entries in self.entries.values_mut() {
-            entries.retain(|(sess, _): &(String, String), _: &mut CacheEntry| -> bool {
-                sess != session_id
-            });
-        }
     }
 
     /// Prune expired entries.
@@ -910,7 +905,7 @@ pub(crate) fn markdown_only_edit_path(path: &str, tool_name: &str) -> bool {
 }
 /// Iron Law gate name constant - kept for API completeness even though iron_law
 /// gate doesn't use the cache (state can change between calls).
-#[allow(dead_code)]
+#[allow(dead_code)] // gate identifier retained for API completeness
 pub(crate) const GATE_NAME_IRON_LAW: &str = "iron_law";
 pub(crate) const GATE_NAME_PLAN: &str = "plan";
 pub(crate) const GATE_NAME_ANVIL: &str = "anvil";
@@ -1063,7 +1058,7 @@ pub(crate) fn fold_gate_decisions(
 }
 /// Backward-compat wrapper: converts GateDecision to Option<&'static str>.
 /// New code should use pre_tool_gate_decision_with_markdown_context directly.
-#[allow(dead_code)]
+#[allow(dead_code)] // backward-compat wrapper for external callers
 pub(crate) fn pre_tool_gate_decision(
     session_id: &str,
     tool_name: &str,

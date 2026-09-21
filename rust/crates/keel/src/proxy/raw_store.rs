@@ -5,7 +5,11 @@
 //! Side Effects: Creates raw-output directories and writes stdout/stderr/metadata/compact logs.
 
 use crate::proxy::execution::ExecutionIdentity;
+use crate::runner::shared_constants::{
+    PLUGIN_MEMORY_RETENTION_DAYS, RAW_OUTPUT_DEFAULT_RETENTION_DAYS, RAW_OUTPUT_RETENTION_ENV_VAR,
+};
 use crate::runtime::resolve_claude_home;
+use crate::utility::file_lock::{is_lock_contention, LOCK_RETRY_INTERVAL, LOCK_TIMEOUT};
 use crate::utility::hashing::{fnv1a64_bytes_hex, sha256_hex};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -35,12 +39,6 @@ pub(crate) const EXECUTION_RECEIPT_INTEGRITY_SCHEMA_VERSION: u32 = 2;
 /// path construction so a caller cannot create oversized path components.
 const MAX_RAW_ID_BYTES: usize = 256;
 
-/// Default raw-output retention when neither the plugin userConfig knob nor the
-/// operator env var is set. Mirrors RAW_OUTPUT_DEFAULT_RETENTION_DAYS used by
-/// the SessionEnd prune in runner::hook_lifecycle; both read the same override
-/// vars so manual, session-end, and auto prune agree on the bound.
-const RAW_AUTO_PRUNE_DEFAULT_RETENTION_DAYS: u64 = 14;
-
 /// Minimum wall-clock gap between auto-prune sweeps on the capture hot path.
 /// The store ages by whole days, so sweeping more often than a few hours buys
 /// nothing; a stamp file under the store root throttles repeat runs.
@@ -56,9 +54,6 @@ const RAW_STAGING_CLEANUP_INTERVAL_SECS: u64 = 6 * 60 * 60;
 /// processes. The lock is advisory to readers because publication is an atomic
 /// directory rename, but it prevents a prune from racing a writer between
 /// staging and publish.
-const RAW_STORE_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
-const RAW_STORE_LOCK_RETRY_MS: u64 = 25;
-
 struct RawStoreLock {
     file: fs::File,
 }
@@ -83,29 +78,22 @@ fn lock_raw_store(root: &Path) -> io::Result<RawStoreLock> {
         .read(true)
         .write(true)
         .open(&path)?;
-    let deadline = std::time::Instant::now() + RAW_STORE_LOCK_TIMEOUT;
+    let deadline = std::time::Instant::now() + LOCK_TIMEOUT;
     loop {
         match file.try_lock_exclusive() {
             Ok(()) => return Ok(RawStoreLock { file }),
-            Err(error) if raw_store_lock_contention(&error) => {
+            Err(error) if is_lock_contention(&error) => {
                 if std::time::Instant::now() >= deadline {
                     return Err(io::Error::new(
                         io::ErrorKind::TimedOut,
                         "raw store lock remained held",
                     ));
                 }
-                std::thread::sleep(Duration::from_millis(RAW_STORE_LOCK_RETRY_MS));
+                std::thread::sleep(LOCK_RETRY_INTERVAL);
             }
             Err(error) => return Err(error),
         }
     }
-}
-
-fn raw_store_lock_contention(error: &io::Error) -> bool {
-    error.kind() == io::ErrorKind::WouldBlock
-        || error
-            .raw_os_error()
-            .is_some_and(|code| matches!(code, 32 | 33))
 }
 
 fn bounded_capture_lengths(first: usize, second: usize) -> (usize, usize) {
@@ -148,20 +136,17 @@ fn existing_capture_bytes(
 
 /// Resolve the raw-output retention in days using the same precedence as the
 /// SessionEnd prune: plugin userConfig env, then the operator env var, then the
-/// default. `0` disables pruning. Kept local so the proxy hot path does not
-/// depend on the runner module.
+/// default. `0` disables pruning. Both names come from shared_constants so the
+/// manual, SessionEnd, and auto prune paths cannot drift apart.
 fn raw_auto_prune_retention_days() -> u64 {
-    for var in [
-        "CLAUDE_PLUGIN_OPTION_MEMORY_RETENTION_DAYS",
-        "CLAUDE_SKILLS_RAW_RETENTION_DAYS",
-    ] {
+    for var in [PLUGIN_MEMORY_RETENTION_DAYS, RAW_OUTPUT_RETENTION_ENV_VAR] {
         if let Ok(value) = std::env::var(var) {
             if let Ok(parsed) = value.trim().parse::<u64>() {
                 return parsed;
             }
         }
     }
-    RAW_AUTO_PRUNE_DEFAULT_RETENTION_DAYS
+    RAW_OUTPUT_DEFAULT_RETENTION_DAYS
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1800,8 +1785,8 @@ mod tests {
     static AUTO_PRUNE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     const RETENTION_ENV_VARS: [&str; 2] = [
-        "CLAUDE_PLUGIN_OPTION_MEMORY_RETENTION_DAYS",
-        "CLAUDE_SKILLS_RAW_RETENTION_DAYS",
+        crate::runner::shared_constants::PLUGIN_MEMORY_RETENTION_DAYS,
+        crate::runner::shared_constants::RAW_OUTPUT_RETENTION_ENV_VAR,
     ];
 
     /// Set the operator retention env var, run the closure, restore prior state.

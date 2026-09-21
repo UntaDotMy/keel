@@ -21,7 +21,8 @@ use crate::proxy::raw_store::{RawNamespace, RawRun, RawStore, RunMeta};
 use crate::proxy::token_meter::TokenMeter;
 use crate::runtime::{
     command_timeout, configure_process_group, display_path, own_process_tree, run_command,
-    terminate_owned_process_tree, ProcessResult, MAX_CAPTURED_OUTPUT_BYTES,
+    terminate_owned_process_tree, terminate_tree_and_drain, ProcessResult,
+    MAX_CAPTURED_OUTPUT_BYTES,
 };
 use chrono::{DateTime, SecondsFormat, Utc};
 
@@ -881,11 +882,12 @@ fn run_command_streaming_proxy(
                 }
                 Ok(None) => {}
                 Err(error) => {
-                    let _ = terminate_owned_process_tree(&mut child, &mut process_guard);
-                    let _ = child.wait();
-                    drop(receiver);
-                    let _ = stdout_handle.join();
-                    let _ = stderr_handle.join();
+                    let _ = terminate_tree_and_drain(
+                        &mut child,
+                        &mut process_guard,
+                        stdout_handle,
+                        stderr_handle,
+                    );
                     return Err(format!("execute {program}: wait failed: {error}"));
                 }
             }
@@ -995,11 +997,8 @@ fn run_command_streaming_proxy(
     }
     let timed_out = child_status.is_none() || drain_timed_out;
     if timed_out {
-        let kill_error = terminate_owned_process_tree(&mut child, &mut process_guard).err();
-        let _ = child.wait();
-        drop(receiver);
-        let _ = stdout_handle.join();
-        let _ = stderr_handle.join();
+        let kill_error =
+            terminate_tree_and_drain(&mut child, &mut process_guard, stdout_handle, stderr_handle);
         let suffix = kill_error
             .map(|error| format!("; process-tree cleanup failed: {error}"))
             .unwrap_or_default();

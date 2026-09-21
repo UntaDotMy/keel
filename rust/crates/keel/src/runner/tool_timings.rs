@@ -18,12 +18,13 @@
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use fs2::FileExt;
 use serde_json::{json, Value as JsonDocument};
 
 use crate::runtime::resolve_claude_home;
+use crate::utility::file_lock::{is_lock_contention, LOCK_RETRY_INTERVAL, LOCK_TIMEOUT};
 
 /// JSON key the harness uses on PostToolUse / PostToolUseFailure input for
 /// the tool execution duration. Documented in the v2.1.119 changelog.
@@ -95,8 +96,6 @@ const MAX_TIMING_FILE_BYTES: u64 = 8 * 1024 * 1024;
 /// Bound all retained timing files, independent of the retention setting.
 const MAX_TIMING_TOTAL_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_TIMING_ROWS_PER_DAY: usize = 100_000;
-const TIMING_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
-const TIMING_LOCK_RETRY_MS: u64 = 25;
 
 struct TimingStoreLock {
     file: fs::File,
@@ -125,18 +124,18 @@ fn lock_timing_store(directory: &Path) -> std::io::Result<TimingStoreLock> {
                 format!("open tool-timings lock {}: {error}", path.display()),
             )
         })?;
-    let deadline = Instant::now() + TIMING_LOCK_TIMEOUT;
+    let deadline = Instant::now() + LOCK_TIMEOUT;
     loop {
         match file.try_lock_exclusive() {
             Ok(()) => return Ok(TimingStoreLock { file }),
-            Err(error) if timing_lock_contention(&error) => {
+            Err(error) if is_lock_contention(&error) => {
                 if Instant::now() >= deadline {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::TimedOut,
                         "tool-timings lock remained held",
                     ));
                 }
-                std::thread::sleep(Duration::from_millis(TIMING_LOCK_RETRY_MS));
+                std::thread::sleep(LOCK_RETRY_INTERVAL);
             }
             Err(error) => {
                 return Err(std::io::Error::new(
@@ -146,13 +145,6 @@ fn lock_timing_store(directory: &Path) -> std::io::Result<TimingStoreLock> {
             }
         }
     }
-}
-
-fn timing_lock_contention(error: &std::io::Error) -> bool {
-    error.kind() == std::io::ErrorKind::WouldBlock
-        || error
-            .raw_os_error()
-            .is_some_and(|code| matches!(code, 32 | 33))
 }
 
 /// Recover a writer crash that left the final JSONL row without a newline.
@@ -925,11 +917,10 @@ mod tests {
         });
     }
 
-    /// Sentinel env var name for the SessionEnd timings prune retention.
-    /// Hard-coded here so a rename in `hook_lifecycle.rs` would break this
-    /// test instead of silently disabling the env override at the wiring
-    /// layer.
-    const TIMINGS_RETENTION_ENV_VAR: &str = "CLAUDE_SKILLS_TIMINGS_RETENTION_DAYS";
+    /// Sentinel env var name for the SessionEnd timings prune retention. It is
+    /// imported rather than re-declared, so a rename in shared_constants.rs
+    /// cannot silently disable the env override at the wiring layer.
+    use crate::runner::shared_constants::TIMINGS_RETENTION_ENV_VAR;
 
     /// Set `TIMINGS_RETENTION_ENV_VAR`, run the closure, restore prior
     /// state. Pairs with `with_isolated_claude_home` which already holds

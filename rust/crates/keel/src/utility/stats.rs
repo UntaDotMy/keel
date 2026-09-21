@@ -94,16 +94,7 @@ pub fn run_stats_command(
             return 1;
         }
     };
-    let workspace_root = {
-        let flag = flag_set.string_value("workspace-root").trim().to_string();
-        if flag.is_empty() {
-            std::env::current_dir()
-                .map(|path| display_path(&path))
-                .unwrap_or_default()
-        } else {
-            flag
-        }
-    };
+    let workspace_root = stats_workspace_root(&flag_set);
 
     let snapshot = collect_snapshot(
         &claude_home,
@@ -487,6 +478,12 @@ const LATENCY_STAGE_MAX_MS: f64 = 250.0;
 /// in-memory work.
 const LATENCY_IO_STAGE_MAX_MS: f64 = 1_500.0;
 
+/// One probe definition for the memory-retrieval stage, shared by the warm-up
+/// and the timed call: separate copies would let the timed stage measure the cold
+/// index the warm-up was added to avoid.
+const LATENCY_RECALL_PROBE_QUERY: &str = "latency probe";
+const LATENCY_RECALL_PROBE_LIMIT: usize = 5;
+
 /// §33: measure the gateway's own pipeline stages, not a synthetic loop. Each
 /// stage calls the owner production calls, and a stage above its declared
 /// ceiling fails the run rather than only printing a number.
@@ -541,6 +538,14 @@ fn run_latency_benchmark(
         )
     };
     let _warm_projection = firewall.project(projection("warm-up payload"));
+    // why: recall opens (and may rebuild) its FTS index on first use; warm the
+    // owner here so index construction is not charged to the retrieval stage.
+    let _warm_recall = crate::utility::recall::search_recall_index(
+        &claude_home,
+        LATENCY_RECALL_PROBE_QUERY,
+        LATENCY_RECALL_PROBE_LIMIT,
+        None,
+    );
     let store = crate::proxy::raw_store::RawStore::new();
     // why: an empty or unreadable store only means there is no recovery pointer to
     // time; the stage reports zero rather than failing the whole benchmark.
@@ -572,7 +577,12 @@ fn run_latency_benchmark(
         )
     });
     let (memory_retrieval_ms, _recalled) = time(|| {
-        crate::utility::recall::search_recall_index(&claude_home, "latency probe", 5, None)
+        crate::utility::recall::search_recall_index(
+            &claude_home,
+            LATENCY_RECALL_PROBE_QUERY,
+            LATENCY_RECALL_PROBE_LIMIT,
+            None,
+        )
     });
     // Per-retrieval overhead, not a full-store scan: one recovery lookup on the
     // request path, which is what a bounded recovery pointer actually costs.

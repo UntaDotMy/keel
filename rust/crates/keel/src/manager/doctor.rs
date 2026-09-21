@@ -319,7 +319,7 @@ fn running_mcp_serve_pids_with_ppid() -> Vec<(u32, u32)> {
         "powershell",
         &arguments,
         None,
-        std::time::Duration::from_secs(10),
+        crate::runner::shared_constants::DOCTOR_PROBE_TIMEOUT,
     );
     parse_pid_ppid_listing(
         output
@@ -339,7 +339,7 @@ fn running_mcp_serve_pids_with_ppid() -> Vec<(u32, u32)> {
         "sh",
         &arguments,
         None,
-        std::time::Duration::from_secs(10),
+        crate::runner::shared_constants::DOCTOR_PROBE_TIMEOUT,
     );
     parse_pid_ppid_listing(
         output
@@ -401,7 +401,7 @@ fn terminate_pid(pid: u32) -> bool {
         "taskkill",
         &arguments,
         None,
-        std::time::Duration::from_secs(10),
+        crate::runner::shared_constants::DOCTOR_PROBE_TIMEOUT,
     )
     .map(|result| result.code == 0)
     .unwrap_or(false)
@@ -413,7 +413,7 @@ fn terminate_pid(pid: u32) -> bool {
         "kill",
         &[pid.to_string()],
         None,
-        std::time::Duration::from_secs(10),
+        crate::runner::shared_constants::DOCTOR_PROBE_TIMEOUT,
     )
     .map(|result| result.code == 0)
     .unwrap_or(false)
@@ -460,7 +460,10 @@ fn run_hook_probe(command: &str) -> Option<String> {
     // Disabling the gate for this child only measures rewrite allow/updatedInput.
     let mut child = Command::new(executable)
         .args(["hook", "pre-tool-use"])
-        .env("KEEL_IRON_LAW_GATE", "off")
+        .env(
+            crate::runner::shared_constants::IRON_LAW_GATE_ENV_VAR,
+            "off",
+        )
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -604,6 +607,11 @@ fn probe_mcp_launch(standard_output: &mut dyn Write, claude_home: &std::path::Pa
     );
 }
 
+/// `server/discover` handshake budget for the registered MCP command. Shorter
+/// than `DOCTOR_PROBE_TIMEOUT`: the probe needs one local JSON-RPC line, so 5s is
+/// already generous, and a longer wait would stall the whole doctor run.
+const MCP_DISCOVER_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Spawn `command args...`, send one modern `server/discover` JSON-RPC line,
 /// and require a matching complete discovery result for the supported protocol.
 ///
@@ -612,7 +620,7 @@ fn probe_mcp_launch(standard_output: &mut dyn Write, claude_home: &std::path::Pa
 /// hang `doctor`. A reader thread captures stdout while the main thread waits on
 /// a channel with a deadline; on timeout the child is killed and reaped.
 fn probe_mcp_discover(command: &str, args: &[String]) -> bool {
-    probe_mcp_discover_with_timeout(command, args, std::time::Duration::from_secs(5))
+    probe_mcp_discover_with_timeout(command, args, MCP_DISCOVER_PROBE_TIMEOUT)
 }
 
 fn probe_mcp_discover_with_timeout(

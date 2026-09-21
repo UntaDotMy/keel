@@ -998,8 +998,8 @@ fn noul_decision_from_canonical(
 
 /// Unlisted dangerous verbs escalate for human review (J06 novel patterns).
 const NOVEL_DESTRUCTIVE_VERBS: &[&str] = &[
-    "dd ",
-    "shred ",
+    "dd",
+    "shred",
     "wipefs",
     "fdisk",
     "parted",
@@ -1009,9 +1009,42 @@ const NOVEL_DESTRUCTIVE_VERBS: &[&str] = &[
     "halt",
     "poweroff",
     "iptables",
-    "nft ",
+    "nft",
     "setenforce",
 ];
+
+/// Match a novel destructive verb ensuring word/token boundaries so words
+/// like "add" or "git add" do not match "dd", "imparted" does not match
+/// "parted", etc.
+fn find_novel_destructive_verb(normalized: &str) -> Option<&'static str> {
+    for &verb in NOVEL_DESTRUCTIVE_VERBS {
+        let mut search_from = 0;
+        while let Some(pos) = normalized[search_from..].find(verb) {
+            let abs_pos = search_from + pos;
+            let end_pos = abs_pos + verb.len();
+
+            let left_ok = if abs_pos == 0 {
+                true
+            } else {
+                let prev = normalized[..abs_pos].chars().next_back().unwrap();
+                !prev.is_alphanumeric() && prev != '_' && prev != '-'
+            };
+
+            let right_ok = if end_pos == normalized.len() {
+                true
+            } else {
+                let next = normalized[end_pos..].chars().next().unwrap();
+                !next.is_alphanumeric() && next != '_' && next != '-'
+            };
+
+            if left_ok && right_ok {
+                return Some(verb);
+            }
+            search_from = abs_pos + 1;
+        }
+    }
+    None
+}
 
 /// Cloud, container, and database destructive command rules (closing Jev Noul gaps).
 pub fn detect_cloud_and_container_destructive(
@@ -1380,10 +1413,7 @@ fn noul_novelty_layer(
     } else if normalized.replace(' ', "").contains(":(){") {
         // Fork-bomb signature unmodeled by the canonical tokenizer (J06).
         noul_block_destructive(0.95, 0.95, "Shell fork bomb", "fork")
-    } else if let Some(verb) = NOVEL_DESTRUCTIVE_VERBS
-        .iter()
-        .find(|verb| normalized.contains(**verb))
-    {
+    } else if let Some(verb) = find_novel_destructive_verb(normalized) {
         noul_escalate(
             format!(
                 "Unrecognized potentially-destructive pattern '{verb}' — human review required"
@@ -3100,6 +3130,20 @@ mod tests {
     }
 
     #[test]
+    fn shell_noul_allows_git_add_and_add_prefix() {
+        assert_noul_action("git add .", ShellRiskAction::Allow);
+        assert_noul_action("git add -A", ShellRiskAction::Allow);
+        assert_noul_action(
+            "$msg = 'Add : REFACTOR : example subject line'",
+            ShellRiskAction::Allow,
+        );
+        assert_noul_action(
+            "git commit -m \"Add : REFACTOR : test\"",
+            ShellRiskAction::Allow,
+        );
+    }
+
+    #[test]
     fn shell_noul_escalates_substitution_smuggled_in_echo() {
         // Dynamic execution hides the payload from static verdicts: the safe
         // direction is human review, not a guessed verdict.
@@ -3653,7 +3697,7 @@ mod tests {
 
     #[test]
     fn shell_noul_allows_windows_paths_with_backslashes() {
-        let cmd = r#""C:\Users\Administrator\.keel\keel.exe" run -- cargo test"#;
+        let cmd = r#""C:\tools\keel\keel.exe" run -- cargo test"#;
         let decision = evaluate_shell_command_noul(cmd);
         assert_eq!(decision.action, ShellRiskAction::Allow);
         assert_eq!(decision.category, ShellRiskCategory::Safe);

@@ -1,5 +1,8 @@
 // Installer host wiring.
 use super::*;
+use crate::runner::shared_constants::{
+    DEFAULT_HOOK_TIMEOUT_SECS, EXTENDED_HOOK_TIMEOUT_MS, EXTENDED_HOOK_TIMEOUT_SECS,
+};
 use crate::runtime::{display_path, installed_executable_path, write_text};
 use std::path::{Path, PathBuf};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -364,14 +367,25 @@ fn cursor_hooks_payload(script: &Path) -> serde_json::Value {
         display_path(script)
     );
     let matcher = "Write|Edit|Delete|StrReplace|MultiEdit|NotebookEdit|ApplyPatch|Patch|SearchReplace|Shell|Bash|PowerShell|Command|Terminal|Read|Grep";
+    // One entry shape for every event: a changed timeout or command cannot miss
+    // an event, and the literal keys exist once.
+    let entry = serde_json::json!({
+        "command": command,
+        "timeout": DEFAULT_HOOK_TIMEOUT_SECS,
+    });
+    let gated = |matcher: &str| {
+        let mut with_matcher = entry.clone();
+        with_matcher["matcher"] = serde_json::Value::String(matcher.to_string());
+        with_matcher
+    };
     serde_json::json!({
         "version": 1,
         "hooks": {
-            "preToolUse": [{"command": command, "matcher": matcher, "timeout": 5}],
-            "postToolUse": [{"command": command, "timeout": 5}],
-            "preCompact": [{"command": command, "timeout": 5}],
-            "stop": [{"command": command, "timeout": 5}],
-            "sessionEnd": [{"command": command, "timeout": 5}],
+            "preToolUse": [gated(matcher)],
+            "postToolUse": [entry.clone()],
+            "preCompact": [entry.clone()],
+            "stop": [entry.clone()],
+            "sessionEnd": [entry],
         }
     })
 }
@@ -646,17 +660,20 @@ pub(crate) fn grok_hooks_are_effective(grok_home: &Path, keel_home: &Path, binar
 pub(crate) fn grok_hooks_payload(binary: &Path) -> serde_json::Value {
     let command =
         crate::runner::shell_rewrite::platform_default_command_for_executable_args(binary, "hook");
+    // One event shape for all nine events, so the command and timeout literals
+    // exist once instead of nine times.
+    let event = |subcommand: &str| serde_json::json!([{ "hooks": [{ "type": "command", "command": format!("{command} {subcommand}"), "timeout": EXTENDED_HOOK_TIMEOUT_SECS }] }]);
     serde_json::json!({
         "hooks": {
-            "SessionStart": [{ "hooks": [{ "type": "command", "command": format!("{command} session-start"), "timeout": 10 }] }],
-            "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": format!("{command} user-prompt-submit"), "timeout": 10 }] }],
-            "PreToolUse": [{ "hooks": [{ "type": "command", "command": format!("{command} pre-tool-use"), "timeout": 10 }] }],
-            "PostToolUse": [{ "hooks": [{ "type": "command", "command": format!("{command} post-tool-use"), "timeout": 10 }] }],
-            "PostToolUseFailure": [{ "hooks": [{ "type": "command", "command": format!("{command} post-tool-use-failure"), "timeout": 10 }] }],
-            "PreCompact": [{ "hooks": [{ "type": "command", "command": format!("{command} pre-compact"), "timeout": 10 }] }],
-            "PostCompact": [{ "hooks": [{ "type": "command", "command": format!("{command} post-compact"), "timeout": 10 }] }],
-            "SessionEnd": [{ "hooks": [{ "type": "command", "command": format!("{command} session-end"), "timeout": 10 }] }],
-            "Stop": [{ "hooks": [{ "type": "command", "command": format!("{command} stop"), "timeout": 10 }] }]
+            "SessionStart": event("session-start"),
+            "UserPromptSubmit": event("user-prompt-submit"),
+            "PreToolUse": event("pre-tool-use"),
+            "PostToolUse": event("post-tool-use"),
+            "PostToolUseFailure": event("post-tool-use-failure"),
+            "PreCompact": event("pre-compact"),
+            "PostCompact": event("post-compact"),
+            "SessionEnd": event("session-end"),
+            "Stop": event("stop")
         }
     })
 }
@@ -920,7 +937,7 @@ fn zcode_hook_group(binary: &Path, subcommand: &str) -> serde_json::Value {
             "command": display_path(binary),
             "args": ["hook", subcommand],
             "enabled": true,
-            "timeoutMs": 10000,
+            "timeoutMs": EXTENDED_HOOK_TIMEOUT_MS,
             "statusMessage": status_message
         }]
     })
@@ -1441,17 +1458,17 @@ pub(crate) fn antigravity_hooks_payload() -> serde_json::Value {
         "keel": {
             "PreToolUse": [{
                 "matcher": "*",
-                "hooks": [{"type": "command", "command": antigravity_hook_command("pre-tool-use"), "timeout": 10}]
+                "hooks": [{"type": "command", "command": antigravity_hook_command("pre-tool-use"), "timeout": EXTENDED_HOOK_TIMEOUT_SECS}]
             }],
             "PostToolUse": [{
                 "matcher": "*",
-                "hooks": [{"type": "command", "command": antigravity_hook_command("post-tool-use"), "timeout": 10}]
+                "hooks": [{"type": "command", "command": antigravity_hook_command("post-tool-use"), "timeout": EXTENDED_HOOK_TIMEOUT_SECS}]
             }],
             "PreInvocation": [
-                {"type": "command", "command": antigravity_hook_command("pre-invocation"), "timeout": 10}
+                {"type": "command", "command": antigravity_hook_command("pre-invocation"), "timeout": EXTENDED_HOOK_TIMEOUT_SECS}
             ],
             "Stop": [
-                {"type": "command", "command": antigravity_hook_command("stop"), "timeout": 10}
+                {"type": "command", "command": antigravity_hook_command("stop"), "timeout": EXTENDED_HOOK_TIMEOUT_SECS}
             ]
         }
     })

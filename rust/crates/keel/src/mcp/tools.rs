@@ -28,7 +28,7 @@
 
 use std::collections::HashSet;
 use std::env;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -45,7 +45,7 @@ use crate::utility::memory::refresh_system_map_with_status;
 use crate::utility::memory_families::family_counts;
 use crate::utility::recall::{
     recall_workspace_context, reindex_after_write_paths, search_recall_index_with_options,
-    RecallQueryOptions,
+    RecallQueryOptions, DEFAULT_RECALL_LIMIT, MAX_RECALL_LIMIT,
 };
 use crate::utility::record_store::{current_timestamp_millis, format_timestamp_iso8601};
 use crate::utility::skill_match::{
@@ -122,11 +122,6 @@ pub(crate) fn discovery_snapshot() -> Value {
         "ranking": "relevance+intent+usage+schema_cost+policy+error_rate",
     })
 }
-
-/// Default cap for `recall` matches when the caller does not supply one. The
-/// CLI uses the same default (see `utility::recall::DEFAULT_RECALL_LIMIT`).
-const DEFAULT_RECALL_LIMIT: usize = 20;
-const MAX_RECALL_LIMIT: usize = 100;
 
 /// A background command is transient MCP state. Keep the process-local
 /// registry bounded even when a client disappears before polling the final
@@ -340,6 +335,34 @@ fn pack_catalog_page(
     spec_default: bool,
     all_tools: Vec<Value>,
 ) -> Result<Value, String> {
+    pack_catalog_page_at(
+        profile,
+        level,
+        budget,
+        cursor,
+        context,
+        compact_default,
+        spec_default,
+        all_tools,
+        now_unix_seconds(),
+    )
+}
+
+/// [`pack_catalog_page`] with the request instant pinned. A fresh walk buckets
+/// its cursor deadline from this value, so pinning it keeps two immediate calls
+/// byte-identical instead of racing a TTL window boundary (§34).
+#[allow(clippy::too_many_arguments)]
+fn pack_catalog_page_at(
+    profile: super::McpCatalogProfile,
+    level: u64,
+    budget: usize,
+    cursor: Option<&str>,
+    context: &super::McpRequestContext,
+    compact_default: bool,
+    spec_default: bool,
+    all_tools: Vec<Value>,
+    now_seconds: u64,
+) -> Result<Value, String> {
     let expected = all_tools.len();
     let fingerprint = catalog_snapshot_fingerprint(profile, &all_tools, level, budget);
     let start = match cursor {
@@ -365,7 +388,7 @@ fn pack_catalog_page(
     // let the clock change which tools a page packs. One TTL window, one deadline.
     let expiry = match cursor {
         Some(value) => peek_catalog_cursor(value)?.expires_at,
-        None => catalog_cursor_expiry_at(now_unix_seconds(), mcp_cursor_ttl_seconds()),
+        None => catalog_cursor_expiry_at(now_seconds, mcp_cursor_ttl_seconds()),
     };
     let mut page_tools = Vec::new();
     let mut offset = start;
@@ -851,7 +874,7 @@ fn tools_list_catalog() -> Value {
                     "type": "object",
                     "properties": {
                         "query": { "type": "string", "description": "Search terms; punctuation is stripped and tokens are AND-ed with prefix match." },
-                        "limit": { "type": "integer", "minimum": 1, "maximum": MAX_RECALL_LIMIT, "description": "Maximum hits (default 20)." },
+                        "limit": { "type": "integer", "minimum": 1, "maximum": MAX_RECALL_LIMIT, "description": format!("Maximum hits (default {DEFAULT_RECALL_LIMIT}).") },
                         "workspace": { "type": "string", "description": "Workspace scope to boost (and, with local_only, filter) in ranking. Auto-derived from cwd when omitted; pass a canonical workspace key or explicit scope to force." },
                         "local_only": { "type": "boolean", "description": "Apply workspace and current-branch eligibility in SQLite before result limits; stale/expired research, quarantined/superseded lessons, and superseded entities stay excluded. Default false." }
                     },
@@ -2163,7 +2186,7 @@ fn tool_recall(arguments: &Value) -> Result<String, String> {
         }
     };
     let claude_home = tool_claude_home("recall")?;
-    let local_only = optional_bool_arg(arguments, "local_only") == Some(true);
+    let local_only = bool_arg_or(arguments, "local_only", false);
     let workspace_context =
         recall_workspace_context(optional_string_arg(arguments, "workspace"), local_only)
             .map_err(|error| format!("recall: {error}"))?;
@@ -2208,8 +2231,6 @@ const MCP_RECALL_HOME_CHARS: usize = 512;
 const MCP_RECALL_WORKSPACE_CHARS: usize = 512;
 const MCP_RECALL_FTS_CHARS: usize = 512;
 const MCP_RECALL_EXCERPT_CHARS: usize = 600;
-const MCP_RECALL_MAX_BYTES: usize = crate::utility::recall::MAX_RECALL_RESULT_BYTES;
-const MCP_RECALL_MAX_TOKENS: usize = crate::utility::recall::MAX_RECALL_RESULT_TOKENS;
 
 /// Build the model-visible recall envelope after all filtering. Every
 /// candidate is measured as the complete serialized response, not only as a
@@ -2405,8 +2426,8 @@ fn mcp_recall_within_budget(payload: &Value) -> bool {
     let Ok(rendered) = serde_json::to_string(payload) else {
         return false;
     };
-    rendered.len() <= MCP_RECALL_MAX_BYTES
-        && TokenMeter::count_text(&rendered) <= MCP_RECALL_MAX_TOKENS
+    rendered.len() <= crate::utility::recall::MAX_RECALL_RESULT_BYTES
+        && TokenMeter::count_text(&rendered) <= crate::utility::recall::MAX_RECALL_RESULT_TOKENS
 }
 
 fn relative_to_home(claude_home: &Path, absolute_path: &Path) -> String {
@@ -2799,6 +2820,22 @@ fn command_requires_confirmation_depth(
         );
     }
 
+    if base == "gh" {
+        // Only the bare `gh <command> <subcommand>` shape is provably read-only;
+        // every other form, including all of `gh api`, needs the explicit opt-in.
+        let command = arguments.first().map(String::as_str);
+        let subcommand = arguments.get(1).map(String::as_str);
+        if command == Some(GH_READ_ONLY_FREE_FORM) {
+            return subcommand.is_none();
+        }
+        let operation = match (command, subcommand) {
+            (Some(command), Some(subcommand)) => format!("{command} {subcommand}"),
+            (Some(command), None) => command.to_string(),
+            _ => return true,
+        };
+        return !GH_READ_ONLY_OPERATIONS.contains(&operation.as_str());
+    }
+
     if base == "rg"
         && arguments
             .iter()
@@ -2879,6 +2916,35 @@ fn command_requires_confirmation_depth(
 
     !is_known_safe_tool
 }
+/// Read-only `gh` operations, one entry per trusted command and subcommand pair.
+/// Anything absent needs the explicit opt-in. `gh api` is absent by design: it
+/// can POST, PATCH, DELETE, or send a GraphQL mutation, so it is never provably
+/// read-only.
+const GH_READ_ONLY_OPERATIONS: &[&str] = &[
+    "status",
+    "pr list",
+    "pr view",
+    "pr status",
+    "pr diff",
+    "pr checks",
+    "issue list",
+    "issue view",
+    "issue status",
+    "run list",
+    "run view",
+    "release list",
+    "release view",
+    "workflow list",
+    "workflow view",
+    "label list",
+    "repo view",
+    "auth status",
+];
+
+/// `gh search <type> <query>` is read-only for every type, so the policy trusts
+/// the command without enumerating its types.
+const GH_READ_ONLY_FREE_FORM: &str = "search";
+
 fn enforce_run_command_policy(
     program: &str,
     arguments: &[String],
@@ -2928,8 +2994,8 @@ fn tool_run_command(arguments: &Value) -> Result<String, String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(PathBuf::from);
-    let wait = optional_bool_arg(arguments, "wait").unwrap_or(true);
-    let confirm = optional_bool_arg(arguments, "confirm").unwrap_or(false);
+    let wait = bool_arg_or(arguments, "wait", true);
+    let confirm = bool_arg_or(arguments, "confirm", false);
 
     // Three mutually exclusive input forms. Exactly one must be present; each
     // maps to (label, program, args) for the child. No fallback between forms:
@@ -3047,7 +3113,7 @@ fn tool_run_command(arguments: &Value) -> Result<String, String> {
         run_command_with_timeout(child, mcp_child_timeout(), "run_command")?;
     // `json` mode returns a structured object; default text report keeps real
     // newlines so multi-line build/test logs stay legible in the tool-result view.
-    if Some(true) == optional_bool_arg(arguments, "json") {
+    if bool_arg_or(arguments, "json", false) {
         let payload = json!({
             "command": label,
             "exit_code": exit_code,
@@ -3286,7 +3352,7 @@ fn spawn_background_command(mut child: Command, label: &str) -> Result<String, S
     );
 
     // Reaper: poll try_wait until the child exits (or kill takes it), then
-    // record the exit code. Consistent with run_command_with_timeout_stdin's
+    // record the exit code. Consistent with run_command_with_timeout's
     // poll loop — no platform-specific signals needed.
     let reaper_entry = Arc::clone(&entry);
     let lifetime = background_command_ttl();
@@ -3589,7 +3655,7 @@ fn tool_command_output(arguments: &Value) -> Result<String, String> {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         registry.remove(&command_id);
-        if Some(true) == optional_bool_arg(arguments, "json") {
+        if bool_arg_or(arguments, "json", false) {
             let payload = json!({
                 "command_id": command_id,
                 "label": entry.label,
@@ -4642,12 +4708,7 @@ fn tool_context_brief(arguments: &Value) -> Result<String, String> {
     mcp_json_compact(&payload).map_err(|error| format!("context_brief: {error}"))
 }
 
-/// Per-probe kill budget for the repository-truth git fields. Four probes run
-/// back to back inside one tool body, so this must leave room under the outer
-/// MCP deadline (`mcp_child_timeout`, 25s default): four 5s tries still return
-/// before the deadline that would abandon the worker. A healthy probe is
-/// ~60ms, so the budget only fires on a genuinely wedged git.
-const GIT_FIELD_TIMEOUT: Duration = Duration::from_secs(5);
+use crate::runner::shared_constants::GIT_FIELD_TIMEOUT;
 
 /// Compact current-checkout truth for plan §46: branch, commit, dirty state,
 /// and detected languages, bounded and on demand, never a full repository
@@ -4996,19 +5057,10 @@ pub(crate) fn mcp_child_timeout() -> Duration {
 /// Run a prepared `Command` with piped stdio, draining stdout/stderr on
 /// helper threads so a full pipe cannot deadlock, and kill the child if it
 /// exceeds `timeout`. Returns `(exit_code, stdout, stderr)`.
+/// MCP timeout runner: shared capture and tree ownership plus request cancellation.
+/// Kept separate from [`runtime::run_prepared_command_with_timeout`] for MCP error wordings.
 fn run_command_with_timeout(
-    command: Command,
-    timeout: Duration,
-    label: &str,
-) -> Result<(i32, String, String), String> {
-    run_command_with_timeout_stdin(command, None, timeout, label)
-}
-
-/// Same as [`run_command_with_timeout`], optionally feeding `stdin_bytes` on a
-/// writer thread so a slow consumer cannot block the kill path.
-fn run_command_with_timeout_stdin(
     mut command: Command,
-    stdin_bytes: Option<Vec<u8>>,
     timeout: Duration,
     label: &str,
 ) -> Result<(i32, String, String), String> {
@@ -5025,15 +5077,6 @@ fn run_command_with_timeout_stdin(
         }
     };
 
-    if let Some(bytes) = stdin_bytes {
-        if let Some(mut stdin_pipe) = child.stdin.take() {
-            std::thread::spawn(move || {
-                let _ = stdin_pipe.write_all(&bytes);
-                let _ = stdin_pipe.flush();
-            });
-        }
-    }
-
     let stdout_pipe = child
         .stdout
         .take()
@@ -5043,14 +5086,8 @@ fn run_command_with_timeout_stdin(
         .take()
         .ok_or_else(|| format!("{label}: missing stderr pipe"))?;
 
-    let stdout_handle = std::thread::spawn(move || {
-        let (bytes, _) = crate::runtime::capture_stream(stdout_pipe);
-        String::from_utf8_lossy(&bytes).into_owned()
-    });
-    let stderr_handle = std::thread::spawn(move || {
-        let (bytes, _) = crate::runtime::capture_stream(stderr_pipe);
-        String::from_utf8_lossy(&bytes).into_owned()
-    });
+    let (stdout_handle, stderr_handle) =
+        crate::runtime::spawn_capture_threads(stdout_pipe, stderr_pipe);
 
     let deadline = Instant::now() + timeout;
     let status = loop {
@@ -5058,14 +5095,12 @@ fn run_command_with_timeout_stdin(
             Ok(Some(status)) => break status,
             Ok(None) => {
                 if current_tool_is_cancelled() {
-                    let kill_error = crate::runtime::terminate_owned_process_tree(
+                    let kill_error = crate::runtime::terminate_tree_and_drain(
                         &mut child,
                         &mut process_guard,
-                    )
-                    .err();
-                    let _ = child.wait();
-                    let _ = stdout_handle.join();
-                    let _ = stderr_handle.join();
+                        stdout_handle,
+                        stderr_handle,
+                    );
                     let suffix = kill_error
                         .map(|error| format!("; process-tree cleanup failed: {error}"))
                         .unwrap_or_default();
@@ -5074,14 +5109,12 @@ fn run_command_with_timeout_stdin(
                     ));
                 }
                 if Instant::now() >= deadline {
-                    let kill_error = crate::runtime::terminate_owned_process_tree(
+                    let kill_error = crate::runtime::terminate_tree_and_drain(
                         &mut child,
                         &mut process_guard,
-                    )
-                    .err();
-                    let _ = child.wait();
-                    let _ = stdout_handle.join();
-                    let _ = stderr_handle.join();
+                        stdout_handle,
+                        stderr_handle,
+                    );
                     let async_hint = if label == "run_command" {
                         "; for long commands pass wait:false and poll command_output instead of waiting"
                     } else {
@@ -5110,9 +5143,11 @@ fn run_command_with_timeout_stdin(
     let _ = crate::runtime::terminate_owned_process_tree(&mut child, &mut process_guard);
     let stdout_text = stdout_handle
         .join()
+        .map(|(bytes, _)| String::from_utf8_lossy(&bytes).into_owned())
         .unwrap_or_else(|_| String::from("(stdout reader panicked)"));
     let stderr_text = stderr_handle
         .join()
+        .map(|(bytes, _)| String::from_utf8_lossy(&bytes).into_owned())
         .unwrap_or_else(|_| String::from("(stderr reader panicked)"));
     Ok((status.code().unwrap_or(-1), stdout_text, stderr_text))
 }
@@ -5643,6 +5678,11 @@ fn optional_bool_arg(arguments: &Value, key: &str) -> Option<bool> {
     arguments.get(key).and_then(Value::as_bool)
 }
 
+/// Optional boolean flag with an explicit default when absent or non-boolean.
+fn bool_arg_or(arguments: &Value, key: &str, default: bool) -> bool {
+    optional_bool_arg(arguments, key).unwrap_or(default)
+}
+
 fn optional_int_arg(arguments: &Value, key: &str) -> Option<i64> {
     arguments.get(key).and_then(Value::as_i64)
 }
@@ -5675,7 +5715,7 @@ fn tool_review(arguments: &Value) -> Result<String, String> {
         );
     }
     if action == "closeout" {
-        if optional_bool_arg(arguments, "wait").unwrap_or(false) {
+        if bool_arg_or(arguments, "wait", false) {
             return Err(
                 "review closeout: pass wait:false; the closeout is long-running, so poll the returned commandId with command_output({\"command_id\": <commandId>}) (or stop it with command_kill({\"command_id\": <commandId>}))"
                     .to_string(),
@@ -5754,13 +5794,13 @@ fn review_closeout_args(executable: &Path, arguments: &Value) -> Vec<String> {
             args.push(format!("{flag}={value}"));
         }
     }
-    if optional_bool_arg(arguments, "strict").unwrap_or(false) {
+    if bool_arg_or(arguments, "strict", false) {
         args.push("--strict".to_string());
     }
-    if optional_bool_arg(arguments, "require_ci").unwrap_or(false) {
+    if bool_arg_or(arguments, "require_ci", false) {
         args.push("--require-ci".to_string());
     }
-    if optional_bool_arg(arguments, "write_baseline").unwrap_or(false) {
+    if bool_arg_or(arguments, "write_baseline", false) {
         args.push("--write-baseline".to_string());
     }
     args
@@ -5821,7 +5861,7 @@ fn tool_gain(arguments: &Value) -> Result<String, String> {
     let since = optional_string_arg(arguments, "since").unwrap_or("today");
     let mut all_args: Vec<&str> = vec!["--since", since];
     let mut owned: Vec<String> = Vec::new();
-    if Some(true) == optional_bool_arg(arguments, "json") {
+    if bool_arg_or(arguments, "json", false) {
         owned.push("--json".to_string());
     }
     for s in &owned {
@@ -5885,7 +5925,7 @@ fn tool_skill_lint(arguments: &Value) -> Result<String, String> {
     if let Some(root) = optional_string_arg(arguments, "repo_root") {
         owned.push(format!("--repo-root={root}"));
     }
-    if Some(true) == optional_bool_arg(arguments, "json") {
+    if bool_arg_or(arguments, "json", false) {
         owned.push("--json".to_string());
     }
     for s in &owned {
@@ -5903,7 +5943,7 @@ fn tool_telemetry(arguments: &Value) -> Result<String, String> {
     if let Some(t) = optional_int_arg(arguments, "top") {
         owned.push(format!("--top={t}"));
     }
-    if Some(true) == optional_bool_arg(arguments, "json") {
+    if bool_arg_or(arguments, "json", false) {
         owned.push("--json".to_string());
     }
     for s in &owned {
@@ -5918,7 +5958,7 @@ fn tool_session(arguments: &Value) -> Result<String, String> {
     if let Some(s) = optional_string_arg(arguments, "since") {
         owned.push(format!("--since={s}"));
     }
-    if Some(true) == optional_bool_arg(arguments, "json") {
+    if bool_arg_or(arguments, "json", false) {
         owned.push("--json".to_string());
     }
     for s in &owned {
@@ -6087,7 +6127,7 @@ fn tool_code_graph(arguments: &Value) -> Result<String, String> {
     if let Some(output) = optional_string_arg(arguments, "output") {
         owned.push(format!("--output={output}"));
     }
-    if Some(true) == optional_bool_arg(arguments, "json") {
+    if bool_arg_or(arguments, "json", false) {
         owned.push("--json".to_string());
     }
     for s in &owned {
@@ -6118,7 +6158,7 @@ fn tool_learn(arguments: &Value) -> Result<String, String> {
     if let Some(w) = optional_int_arg(arguments, "window") {
         owned.push(format!("--window={w}"));
     }
-    if Some(true) == optional_bool_arg(arguments, "json") {
+    if bool_arg_or(arguments, "json", false) {
         owned.push("--json".to_string());
     }
     for s in &owned {
@@ -6158,7 +6198,7 @@ fn tool_observe(arguments: &Value) -> Result<String, String> {
         owned.push(format!("--workspace-root={root}"));
     }
     // Agents almost always want structured health; default to JSON unless false.
-    if optional_bool_arg(arguments, "json") != Some(false) {
+    if bool_arg_or(arguments, "json", true) {
         owned.push("--json".to_string());
     }
     run_inprocess_cli("keel observe", |out, err| {
@@ -6176,7 +6216,7 @@ fn tool_stats(arguments: &Value) -> Result<String, String> {
         owned.push(format!("--workspace-root={root}"));
     }
     // Agents almost always want structured output; default to JSON unless false.
-    if optional_bool_arg(arguments, "json") != Some(false) {
+    if bool_arg_or(arguments, "json", true) {
         owned.push("--json".to_string());
     }
     run_inprocess_cli("keel stats", |out, err| {
@@ -6200,7 +6240,7 @@ fn tool_rewrite(arguments: &Value) -> Result<String, String> {
         return Err("rewrite: missing command".to_string());
     }
     let mut owned: Vec<String> = Vec::new();
-    if Some(true) == optional_bool_arg(arguments, "json") {
+    if bool_arg_or(arguments, "json", false) {
         owned.push("--json".to_string());
     }
     owned.push(command);
@@ -6215,7 +6255,7 @@ fn tool_skill_eval(arguments: &Value) -> Result<String, String> {
     if let Some(root) = optional_string_arg(arguments, "repo_root") {
         owned.push(format!("--repo-root={root}"));
     }
-    if optional_bool_arg(arguments, "json") != Some(false) {
+    if bool_arg_or(arguments, "json", true) {
         owned.push("--json".to_string());
     }
     run_inprocess_cli("keel skill-eval", |out, err| {
@@ -6244,7 +6284,7 @@ fn tool_design_intelligence(arguments: &Value) -> Result<String, String> {
             }
         }
     }
-    if Some(true) == optional_bool_arg(arguments, "json") {
+    if bool_arg_or(arguments, "json", false) {
         owned.push("--format=json".to_string());
     }
     run_inprocess_cli("keel design-intelligence", |out, err| {
@@ -7524,7 +7564,8 @@ mod tests {
     }
 
     /// §34 through the real packer: two fresh identical requests must select the
-    /// same tools at the same measured cost, with no allowance for the clock.
+    /// same tools at the same measured cost. The request instant is pinned so the
+    /// TTL bucket cannot roll between the two calls and make the pair differ.
     #[test]
     fn repeated_identical_requests_pack_the_same_page() {
         let _env_guard = crate::test_support::ENV_LOCK
@@ -7537,9 +7578,20 @@ mod tests {
         let profile = crate::mcp::McpCatalogProfile::Tiered;
         let tools = synthetic_paging_tools("repeat-tool");
         let context = crate::mcp::McpRequestContext::authoritative(Some("repeat-session"));
+        const PINNED_NOW_SECONDS: u64 = 1_789_000_000;
         let pack = || {
-            pack_catalog_page(profile, 2, 600, None, &context, false, false, tools.clone())
-                .expect("a valid budget must produce a page")
+            pack_catalog_page_at(
+                profile,
+                2,
+                600,
+                None,
+                &context,
+                false,
+                false,
+                tools.clone(),
+                PINNED_NOW_SECONDS,
+            )
+            .expect("a valid budget must produce a page")
         };
 
         let first = pack();
@@ -8024,6 +8076,14 @@ mod tests {
         }
     }
 
+    /// The one spelling of the GitHub CLI program name used by the policy tests.
+    const GH: &str = "gh";
+    /// Shared `gh` subcommand words for the policy matrix, so the vocabulary
+    /// exists once instead of once per case.
+    const GH_PR: &str = "pr";
+    const GH_LIST: &str = "list";
+    const GH_VIEW: &str = "view";
+
     #[test]
     fn run_command_policy_requires_explicit_unsafe_opt_in() {
         let _env_guard = crate::test_support::ENV_LOCK
@@ -8080,6 +8140,19 @@ mod tests {
             ),
             ("rg", vec!["--pre", "processor", "pattern"]),
             ("find", vec![".", "-exec", "sh", "-c", "echo pwn", ";"]),
+            (GH, vec![GH_PR, "merge", "289"]),
+            (GH, vec![GH_PR, "create", "--fill"]),
+            (GH, vec!["release", "create", "v1"]),
+            (GH, vec!["repo", "delete", "owner/repo"]),
+            (GH, vec!["auth", "login"]),
+            (GH, vec!["extension", "install", "owner/ext"]),
+            (GH, vec!["api", "-X", "DELETE", "/repos/owner/repo"]),
+            (
+                GH,
+                vec!["api", "graphql", "-f", "query=mutation{deleteIssue}"],
+            ),
+            (GH, vec!["-R", "owner/repo", GH_PR, GH_LIST]),
+            (GH, vec!["search"]),
         ] {
             let arguments = arguments
                 .into_iter()
@@ -8096,6 +8169,17 @@ mod tests {
             ("cargo", vec!["check"]),
             ("rg", vec!["pattern", "."]),
             ("find", vec!["needle.txt"]),
+            (GH, vec!["status"]),
+            (GH, vec![GH_PR, GH_LIST, "--limit", "5"]),
+            (GH, vec![GH_PR, GH_VIEW, "289", "--json", "title"]),
+            (GH, vec![GH_PR, "checks", "289"]),
+            (GH, vec!["issue", GH_LIST]),
+            (GH, vec!["run", GH_VIEW, "35556776068"]),
+            (GH, vec!["release", GH_VIEW]),
+            (GH, vec!["workflow", GH_LIST]),
+            (GH, vec!["repo", GH_VIEW]),
+            (GH, vec!["auth", "status"]),
+            (GH, vec!["search", "prs", "deflake"]),
         ] {
             if which::which(program).is_err() {
                 continue;
@@ -8349,8 +8433,10 @@ mod tests {
             crate::utility::recall::RecallReplay::default(),
         );
         let rendered = serde_json::to_string(&payload).expect("serialize bounded recall");
-        assert!(rendered.len() <= MCP_RECALL_MAX_BYTES);
-        assert!(TokenMeter::count_text(&rendered) <= MCP_RECALL_MAX_TOKENS);
+        assert!(rendered.len() <= crate::utility::recall::MAX_RECALL_RESULT_BYTES);
+        assert!(
+            TokenMeter::count_text(&rendered) <= crate::utility::recall::MAX_RECALL_RESULT_TOKENS
+        );
         assert!(rendered.contains("provenanceId"));
         assert!(rendered.contains("retrievalRef"));
         assert!(rendered.contains("prov-sha256:"));

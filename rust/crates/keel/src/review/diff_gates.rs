@@ -414,14 +414,7 @@ pub(crate) fn comment_style_gate(
         let base = if base.is_empty() { "origin/main" } else { base };
         crate::comment_lint::lint_added_comments(repository_root, base)
     };
-    let blocking = crate::comment_lint::has_blocking(&findings);
-    let status = if findings.is_empty() {
-        GateStatus::Pass
-    } else if blocking {
-        GateStatus::Fail
-    } else {
-        GateStatus::Warn
-    };
+    let (status, blocking) = findings_gate_status(!findings.is_empty());
     let details = if findings.is_empty() {
         "no added-comment style issues".to_string()
     } else {
@@ -523,6 +516,86 @@ pub(crate) fn brownfield_source_from_name_status(line: &str) -> Option<String> {
     Some(normalized)
 }
 
+/// Per-gate wording for the pre-PR plan-evidence protocol.
+struct PlanEvidenceGate {
+    name: &'static str,
+    noun: &'static str,
+    evidence: &'static str,
+    missing_plan: &'static str,
+    finding_noun: &'static str,
+}
+
+/// Shared pre-PR plan-evidence protocol: surface check, touched-source check,
+/// plan presence, issue review, then per-gate clean handling via 'on_clean'.
+#[allow(clippy::too_many_arguments)] // why: mirrors the 3 unified gate signatures plus 2 behavior params
+fn run_plan_evidence_gate(
+    spec: &PlanEvidenceGate,
+    repository_root: &Path,
+    base_ref: &str,
+    surface_name: &str,
+    plan_id: &str,
+    claude_home: &str,
+    review_issues: fn(&Path, &str, &str) -> Result<Vec<String>, String>,
+    on_clean: impl FnOnce(&str, usize) -> (GateStatus, String),
+) -> GateResult {
+    let gate_result = |status, blocking, details: String| GateResult {
+        name: spec.name.to_string(),
+        status,
+        blocking,
+        details: Some(details),
+    };
+    let blocking_failure = |details: &str| gate_result(GateStatus::Fail, true, details.to_string());
+    if surface_name != "pre-pr" {
+        return gate_result(
+            GateStatus::Pass,
+            false,
+            format!("pre-PR {} gate not requested", spec.noun),
+        );
+    }
+    let touched = match reviewed_existing_sources(repository_root, base_ref) {
+        Ok(touched) => touched,
+        Err(error) => {
+            return blocking_failure(&format!(
+                "{}; {} evidence cannot be checked",
+                error, spec.evidence
+            ))
+        }
+    };
+    if touched.is_empty() {
+        return gate_result(
+            GateStatus::Pass,
+            true,
+            format!(
+                "no existing source modified; {} gate not applicable",
+                spec.noun
+            ),
+        );
+    }
+    let plan = plan_id.trim();
+    if plan.is_empty() {
+        return blocking_failure(spec.missing_plan);
+    }
+    match review_issues(repository_root, claude_home, plan) {
+        Ok(issues) if issues.is_empty() => {
+            let (status, details) = on_clean(plan, touched.len());
+            gate_result(status, true, details)
+        }
+        Ok(issues) => blocking_failure(&format!(
+            "plan {} has {} {}: {}",
+            plan,
+            issues.len(),
+            spec.finding_noun,
+            issues
+                .iter()
+                .take(5)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("; ")
+        )),
+        Err(error) => blocking_failure(&error),
+    }
+}
+
 pub(crate) fn research_traceability_gate(
     repository_root: &Path,
     base_ref: &str,
@@ -530,50 +603,30 @@ pub(crate) fn research_traceability_gate(
     plan_id: &str,
     claude_home: &str,
 ) -> GateResult {
-    let blocking_failure = |details: &str| research_gate_result(GateStatus::Fail, true, details);
-    if surface_name != "pre-pr" {
-        return research_gate_result(
-            GateStatus::Pass,
-            false,
-            "pre-PR research gate not requested",
-        );
-    }
-    let touched = match reviewed_existing_sources(repository_root, base_ref) {
-        Ok(touched) => touched,
-        Err(error) => {
-            return blocking_failure(&format!("{error}; research evidence cannot be checked"))
-        }
-    };
-    if touched.is_empty() {
-        return research_gate_result(
-            GateStatus::Pass,
-            true,
-            "no existing source modified; research gate not applicable",
-        );
-    }
-    if plan_id.trim().is_empty() {
-        return blocking_failure(
-            "non-greenfield pre-PR review requires --plan <id> with passing research evidence",
-        );
-    }
-    match crate::utility::plan::review_research_issues(repository_root, claude_home, plan_id.trim()) {
-        Ok(issues) if issues.is_empty() => research_gate_result(
-            GateStatus::Pass,
-            true,
-            &format!(
-                "plan {} has current source and requirement traceability for {} existing source file(s)",
-                plan_id.trim(),
-                touched.len()
-            ),
-        ),
-        Ok(issues) => blocking_failure(&format!(
-                "plan {} has {} untraced or stale research finding(s): {}",
-                plan_id.trim(),
-                issues.len(),
-                issues.iter().take(5).cloned().collect::<Vec<_>>().join("; ")
-            )),
-        Err(error) => blocking_failure(&error),
-    }
+    run_plan_evidence_gate(
+        &PlanEvidenceGate {
+            name: "research_traceability",
+            noun: "research",
+            evidence: "research",
+            missing_plan:
+                "non-greenfield pre-PR review requires --plan <id> with passing research evidence",
+            finding_noun: "untraced or stale research finding(s)",
+        },
+        repository_root,
+        base_ref,
+        surface_name,
+        plan_id,
+        claude_home,
+        crate::utility::plan::review_research_issues,
+        |plan, touched| {
+            (
+                GateStatus::Pass,
+                format!(
+                    "plan {plan} has current source and requirement traceability for {touched} existing source file(s)"
+                ),
+            )
+        },
+    )
 }
 
 pub(crate) fn architecture_design_gate(
@@ -583,65 +636,29 @@ pub(crate) fn architecture_design_gate(
     plan_id: &str,
     claude_home: &str,
 ) -> GateResult {
-    let result = |status, blocking, details: &str| GateResult {
-        name: "architecture_design".to_string(),
-        status,
-        blocking,
-        details: Some(details.to_string()),
-    };
-    let blocking_failure = |details: &str| result(GateStatus::Fail, true, details);
-    if surface_name != "pre-pr" {
-        return result(
-            GateStatus::Pass,
-            false,
-            "pre-PR architecture gate not requested",
-        );
-    }
-    let touched = match reviewed_existing_sources(repository_root, base_ref) {
-        Ok(touched) => touched,
-        Err(error) => {
-            return blocking_failure(&format!("{error}; architecture evidence cannot be checked"))
-        }
-    };
-    if touched.is_empty() {
-        return result(
-            GateStatus::Pass,
-            true,
-            "no existing source modified; architecture gate not applicable",
-        );
-    }
-    if plan_id.trim().is_empty() {
-        return blocking_failure(
-            "non-greenfield pre-PR review requires --plan <id> with a complete architecture design",
-        );
-    }
-    match crate::utility::plan::review_architecture_issues(
+    run_plan_evidence_gate(
+        &PlanEvidenceGate {
+            name: "architecture_design",
+            noun: "architecture",
+            evidence: "architecture",
+            missing_plan: "non-greenfield pre-PR review requires --plan <id> with a complete architecture design",
+            finding_noun: "architecture design finding(s)",
+        },
         repository_root,
+        base_ref,
+        surface_name,
+        plan_id,
         claude_home,
-        plan_id.trim(),
-    ) {
-        Ok(issues) if issues.is_empty() => result(
-            GateStatus::Pass,
-            true,
-            &format!(
-                "plan {} has a complete mapped architecture for {} existing source file(s)",
-                plan_id.trim(),
-                touched.len()
-            ),
-        ),
-        Ok(issues) => blocking_failure(&format!(
-            "plan {} has {} architecture design finding(s): {}",
-            plan_id.trim(),
-            issues.len(),
-            issues
-                .iter()
-                .take(5)
-                .cloned()
-                .collect::<Vec<_>>()
-                .join("; ")
-        )),
-        Err(error) => blocking_failure(&error),
-    }
+        crate::utility::plan::review_architecture_issues,
+        |plan, touched| {
+            (
+                GateStatus::Pass,
+                format!(
+                    "plan {plan} has a complete mapped architecture for {touched} existing source file(s)"
+                ),
+            )
+        },
+    )
 }
 
 pub(crate) fn task_evidence_gate(
@@ -651,44 +668,26 @@ pub(crate) fn task_evidence_gate(
     plan_id: &str,
     claude_home: &str,
 ) -> GateResult {
-    let result = |status, blocking, details: &str| GateResult {
-        name: "task_evidence".to_string(),
-        status,
-        blocking,
-        details: Some(details.to_string()),
-    };
-    let blocking_failure = |details: &str| result(GateStatus::Fail, true, details);
-    if surface_name != "pre-pr" {
-        return result(
-            GateStatus::Pass,
-            false,
-            "pre-PR task evidence gate not requested",
-        );
-    }
-    let touched = match reviewed_existing_sources(repository_root, base_ref) {
-        Ok(touched) => touched,
-        Err(error) => {
-            return blocking_failure(&format!("{error}; task evidence cannot be checked"))
-        }
-    };
-    if touched.is_empty() {
-        return result(
-            GateStatus::Pass,
-            true,
-            "no existing source modified; task evidence gate not applicable",
-        );
-    }
-    if plan_id.trim().is_empty() {
-        return blocking_failure(
-            "non-greenfield pre-PR review requires --plan <id> with valid task evidence",
-        );
-    }
-    match crate::utility::plan::review_task_issues(repository_root, claude_home, plan_id.trim()) {
-        Ok(issues) if issues.is_empty() => {
+    run_plan_evidence_gate(
+        &PlanEvidenceGate {
+            name: "task_evidence",
+            noun: "task evidence",
+            evidence: "task",
+            missing_plan:
+                "non-greenfield pre-PR review requires --plan <id> with valid task evidence",
+            finding_noun: "task evidence finding(s)",
+        },
+        repository_root,
+        base_ref,
+        surface_name,
+        plan_id,
+        claude_home,
+        crate::utility::plan::review_task_issues,
+        |plan, touched| {
             let (ac_status, ac_summary) = crate::utility::plan::evaluate_acceptance_criteria(
                 repository_root,
                 claude_home,
-                plan_id.trim(),
+                plan,
             )
             .unwrap_or_else(|error| {
                 (
@@ -698,33 +697,16 @@ pub(crate) fn task_evidence_gate(
             });
             let details = if ac_summary.is_empty() {
                 format!(
-                    "plan {} has valid task tickets, RTM links, and evidence for {} existing source file(s)",
-                    plan_id.trim(),
-                    touched.len()
+                    "plan {plan} has valid task tickets, RTM links, and evidence for {touched} existing source file(s)"
                 )
             } else {
                 format!(
-                    "plan {} has valid task tickets, RTM links, and evidence for {} existing source file(s)\n{}",
-                    plan_id.trim(),
-                    touched.len(),
-                    ac_summary
+                    "plan {plan} has valid task tickets, RTM links, and evidence for {touched} existing source file(s)\n{ac_summary}"
                 )
             };
-            result(ac_status, true, &details)
-        }
-        Ok(issues) => blocking_failure(&format!(
-            "plan {} has {} task evidence finding(s): {}",
-            plan_id.trim(),
-            issues.len(),
-            issues
-                .iter()
-                .take(5)
-                .cloned()
-                .collect::<Vec<_>>()
-                .join("; ")
-        )),
-        Err(error) => blocking_failure(&error),
-    }
+            (ac_status, details)
+        },
+    )
 }
 
 fn reviewed_existing_sources(
@@ -747,15 +729,6 @@ fn reviewed_existing_sources(
     touched.sort();
     touched.dedup();
     Ok(touched)
-}
-
-fn research_gate_result(status: GateStatus, blocking: bool, details: &str) -> GateResult {
-    GateResult {
-        name: "research_traceability".to_string(),
-        status,
-        blocking,
-        details: Some(details.to_string()),
-    }
 }
 
 /// Blocking brownfield gate: modifying established source requires a complete
@@ -1271,14 +1244,7 @@ pub(crate) fn prose_style_gate(
         let base = if base.is_empty() { "origin/main" } else { base };
         crate::comment_lint::lint_added_prose(repository_root, base)
     };
-    let blocking = crate::comment_lint::has_blocking_prose(&findings);
-    let status = if findings.is_empty() {
-        GateStatus::Pass
-    } else if blocking {
-        GateStatus::Fail
-    } else {
-        GateStatus::Warn
-    };
+    let (status, blocking) = findings_gate_status(!findings.is_empty());
     let details = if findings.is_empty() {
         "no prose-style issues in added markdown/doc lines".to_string()
     } else {
@@ -1325,13 +1291,9 @@ pub(crate) fn slop_gate(
         });
         findings
     };
-    // Warn-level by design: heuristic findings must surface, never strand a
-    // commit on a false positive.
-    let status = if findings.is_empty() {
-        GateStatus::Pass
-    } else {
-        GateStatus::Warn
-    };
+    // Production policy: a heuristic finding still blocks. The detector is the
+    // enforcement point, so an unreviewed duplicate literal cannot ship.
+    let (status, blocking) = findings_gate_status(!findings.is_empty());
     let details = if findings.is_empty() {
         "no AI-slop patterns detected".to_string()
     } else {
@@ -1350,7 +1312,18 @@ pub(crate) fn slop_gate(
     GateResult {
         name: "slop_detector".to_string(),
         status,
-        blocking: false,
+        blocking,
         details: Some(details),
+    }
+}
+
+/// Production policy: a review gate never passes with outstanding findings.
+/// Warnings are failures here, so a surfaced issue is either fixed or the gate
+/// fails; nothing ships acknowledged-but-unfixed.
+fn findings_gate_status(has_findings: bool) -> (GateStatus, bool) {
+    if has_findings {
+        (GateStatus::Fail, true)
+    } else {
+        (GateStatus::Pass, false)
     }
 }
