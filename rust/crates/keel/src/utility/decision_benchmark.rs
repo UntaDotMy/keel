@@ -124,10 +124,18 @@ fn score_cases(
     let mut local_correct = 0;
     let mut remote_correct = 0;
     for (index, (prompt, expected)) in cases.iter().enumerate() {
-        let local = curated_skill_for_prompt(prompt).map(str::to_string);
-        let local_confidence = local
-            .as_deref()
-            .and_then(|skill| router_confidence(home, prompt, skill));
+        // With a home, the local column IS the live router, so silence is scored
+        // as silence and an improvement in routing shows up in the number.
+        let (local, local_confidence) = match home {
+            Some(home) => {
+                match crate::utility::skill_match::match_skill_for_prompt_with_details(home, prompt)
+                {
+                    Some(decision) => (Some(decision.name), Some(decision.confidence)),
+                    None => (None, None),
+                }
+            }
+            None => (curated_skill_for_prompt(prompt).map(str::to_string), None),
+        };
         let local_correct_case = local == *expected;
         if local_correct_case {
             local_correct += 1;
@@ -193,14 +201,6 @@ fn score_cases(
         source: source.to_string(),
         rows,
     }
-}
-
-/// Calibrated confidence the live router reports for `skill` on this prompt, or
-/// `None` when it is silent or names a different skill: a confidence is never
-/// attached to a decision the router did not make.
-fn router_confidence(home: Option<&std::path::Path>, prompt: &str, skill: &str) -> Option<f64> {
-    let decision = crate::utility::skill_match::match_skill_for_prompt_with_details(home?, prompt)?;
-    (decision.name == skill).then_some(decision.confidence)
 }
 
 fn scored_pairs(pairs: &[(Option<f64>, Option<bool>)]) -> Vec<(f64, bool)> {
