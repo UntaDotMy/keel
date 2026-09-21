@@ -20,14 +20,12 @@ use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
-
-use fs2::FileExt;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::error::KeelError;
 use crate::json::{write_indented, Value};
 use crate::runtime::{display_path, safe_path_segment, write_text};
-use crate::utility::file_lock::{is_lock_contention, LOCK_RETRY_INTERVAL, LOCK_TIMEOUT};
+use crate::utility::file_lock::ExclusiveLock;
 
 /// An ordered collection of string fields backing one stored record.
 pub type Record = Vec<(String, String)>;
@@ -47,43 +45,10 @@ const MAX_RECORD_BYTES: usize = 1024 * 1024;
 const MAX_RECORD_STORE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_RECORD_STORE_RECORDS: usize = 10_000;
 
-struct RecordStoreLock {
-    file: fs::File,
-}
-
-impl Drop for RecordStoreLock {
-    fn drop(&mut self) {
-        // Qualify the trait method: rustc 1.89 added an inherent `File::unlock`
-        // that would otherwise shadow this and break the declared 1.80 MSRV.
-        let _ = fs2::FileExt::unlock(&self.file);
-    }
-}
-
-fn lock_record_store(directory: &Path) -> io::Result<RecordStoreLock> {
-    fs::create_dir_all(directory)?;
-    let path = directory.join(".store.lock");
-    let file = fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(path)?;
-    let deadline = Instant::now() + LOCK_TIMEOUT;
-    loop {
-        match file.try_lock_exclusive() {
-            Ok(()) => return Ok(RecordStoreLock { file }),
-            Err(error) if is_lock_contention(&error) => {
-                if Instant::now() >= deadline {
-                    return Err(io::Error::new(
-                        io::ErrorKind::TimedOut,
-                        "record store lock remained held",
-                    ));
-                }
-                std::thread::sleep(LOCK_RETRY_INTERVAL);
-            }
-            Err(error) => return Err(error),
-        }
-    }
+/// Lock guard for one record-store directory: the shared bounded-wait
+/// exclusive lock, released when the guard drops.
+fn lock_record_store(directory: &Path) -> io::Result<ExclusiveLock> {
+    crate::utility::file_lock::lock_exclusive(directory, ".store.lock")
 }
 
 /// The one phrasing for the `MAX_RECORD_BYTES` bound, shared by the metadata

@@ -176,7 +176,20 @@ fn skill_match_pending_path(claude_home: &Path) -> PathBuf {
     state_directory(claude_home).join(SKILL_MATCH_PENDING_FILE)
 }
 
+/// Best-effort exclusive lock for a state ledger, keyed by the ledger filename.
+/// The caller decides what a failure means: writers proceed unlocked (a rare
+/// lost update beats a dropped record) and reconcilers defer the whole ledger.
+fn lock_state_ledger(
+    claude_home: &Path,
+    ledger_file: &str,
+) -> std::io::Result<crate::utility::file_lock::ExclusiveLock> {
+    let lock_name = format!("{ledger_file}.lock");
+    crate::utility::file_lock::lock_exclusive(&state_directory(claude_home), &lock_name)
+}
+
 fn record_pending_skill_match(claude_home: &Path, skill_name: &str, predicted_confidence: f64) {
+    // why: a contended lock leaves the append unlocked rather than dropping it.
+    let _guard = lock_state_ledger(claude_home, SKILL_MATCH_PENDING_FILE).ok();
     let path = skill_match_pending_path(claude_home);
     let mut pending: Vec<PendingSkillMatch> = fs::read_to_string(&path)
         .ok()
@@ -201,6 +214,11 @@ fn record_pending_skill_match(claude_home: &Path, skill_name: &str, predicted_co
 
 /// Reconcile staged routing decisions (cited records success); consumes the ledger.
 pub fn reconcile_skill_match_outcomes(claude_home: &Path) -> usize {
+    // why: defer the ledger when the lock is unavailable; reconciling unlocked
+    // could double-count outcomes another process is already scoring.
+    let Ok(_guard) = lock_state_ledger(claude_home, SKILL_MATCH_PENDING_FILE) else {
+        return 0;
+    };
     let path = skill_match_pending_path(claude_home);
     let text = match fs::read_to_string(&path) {
         Ok(text) => text,
@@ -289,6 +307,8 @@ fn record_pending_composition(
     considered: &[String],
     confidence: f64,
 ) {
+    // why: a contended lock leaves the append unlocked rather than dropping it.
+    let _guard = lock_state_ledger(claude_home, COMPOSITION_PENDING_FILE).ok();
     let path = composition_pending_path(claude_home);
     let mut pending: Vec<PendingComposition> = fs::read_to_string(&path)
         .ok()
@@ -336,6 +356,11 @@ fn load_composition_calibration(claude_home: &Path) -> CompositionCalibration {
 /// Reconcile staged composition decisions: compose needs every chosen skill
 /// cited, single needs its skill cited, generic needs none considered cited.
 pub fn reconcile_composition_outcomes(claude_home: &Path) -> usize {
+    // why: defer the ledger when the lock is unavailable; reconciling unlocked
+    // could double-count outcomes another process is already scoring.
+    let Ok(_guard) = lock_state_ledger(claude_home, COMPOSITION_PENDING_FILE) else {
+        return 0;
+    };
     let path = composition_pending_path(claude_home);
     let text = match fs::read_to_string(&path) {
         Ok(text) => text,
@@ -3867,6 +3892,29 @@ mod tests {
         );
         let hit = crate::utility::skill_usage::skill_success_rate(&home, REVIEWER_SKILL);
         assert!(hit > 0.5, "the cited skill must record a hit, got {hit}");
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    /// The pending ledger serializes concurrent writers: without the lock the
+    /// read-modify-write loses entries under contention.
+    #[test]
+    fn concurrent_pending_match_writes_keep_every_entry() {
+        let home = home_with_skills("pending-lock", &[(REVIEWER_SKILL, "review code diffs")]);
+        let home_ref = &home;
+        std::thread::scope(|scope| {
+            for index in 0..8 {
+                scope.spawn(move || {
+                    record_pending_skill_match(
+                        home_ref,
+                        REVIEWER_SKILL,
+                        0.8 + index as f64 / 1000.0,
+                    );
+                });
+            }
+        });
+        let text = fs::read_to_string(skill_match_pending_path(&home)).expect("read ledger");
+        let pending: Vec<PendingSkillMatch> = serde_json::from_str(&text).expect("parse ledger");
+        assert_eq!(pending.len(), 8, "every concurrent append must survive");
         let _ = fs::remove_dir_all(&home);
     }
 
