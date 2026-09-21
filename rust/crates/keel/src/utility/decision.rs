@@ -2728,15 +2728,10 @@ pub fn handle_decision_tool(arguments: &Value) -> Result<String, String> {
                 None => {
                     // why: every corpus trains, so no class is left with zero
                     // evidence; each site's page one stays held out for scoring.
-                    let mut fetched = Vec::new();
-                    for site in crate::utility::decision_benchmark::EXTERNAL_SITES {
-                        fetched.extend(
-                            crate::utility::decision_benchmark::fetch_external_site(
-                                site, per_tag, 2, pages,
-                            )
-                            .map_err(|error| format!("decision train-lexical: {error}"))?,
-                        );
-                    }
+                    let fetched = crate::utility::decision_benchmark::fetch_all_corpora(
+                        per_tag, pages,
+                    )
+                    .map_err(|error| format!("decision train-lexical: {error}"))?;
                     let _ = crate::utility::decision_benchmark::write_external_cache(
                         &corpus, &fetched,
                     );
@@ -2782,9 +2777,18 @@ pub fn handle_decision_tool(arguments: &Value) -> Result<String, String> {
                     .get("per_tag")
                     .and_then(Value::as_u64)
                     .unwrap_or(25) as usize;
-                let cache = home
-                    .as_deref()
-                    .map(crate::utility::decision_benchmark::external_cache_path);
+                let source = arguments
+                    .get("source")
+                    .and_then(Value::as_str)
+                    .unwrap_or("stackexchange")
+                    .to_string();
+                let cache = home.as_deref().map(|home| {
+                    if source == "crates" {
+                        crate::utility::decision_benchmark::crates_cache_path(home)
+                    } else {
+                        crate::utility::decision_benchmark::external_cache_path(home)
+                    }
+                });
                 let cached = if refresh {
                     None
                 } else {
@@ -2795,13 +2799,17 @@ pub fn handle_decision_tool(arguments: &Value) -> Result<String, String> {
                 let cases = match cached {
                     Some(cases) => cases,
                     None => {
-                        let site = arguments
-                            .get("site")
-                            .and_then(Value::as_str)
-                            .unwrap_or("stackoverflow");
-                        let fetched = crate::utility::decision_benchmark::fetch_external_site(
-                            site, per_tag, 1, 1,
-                        )
+                        let fetched = if source == "crates" {
+                            crate::utility::decision_benchmark::fetch_crates_categories(per_tag, 1)
+                        } else {
+                            let site = arguments
+                                .get("site")
+                                .and_then(Value::as_str)
+                                .unwrap_or("stackoverflow");
+                            crate::utility::decision_benchmark::fetch_external_site(
+                                site, per_tag, 1, 1,
+                            )
+                        }
                         .map_err(|error| format!("decision benchmark: {error}"))?;
                         if let Some(path) = cache.as_deref() {
                             // why: a cache that cannot be written must not fail a
@@ -3055,6 +3063,7 @@ pub fn run_decision_command(
             flag_set.bool_flag("refresh", false);
             flag_set.string_flag("per-tag", "25");
             flag_set.string_flag("site", "stackoverflow");
+            flag_set.string_flag("source", "stackexchange");
             flag_set.bool_flag("json", false);
         }
         "train-lexical" => {
@@ -3225,6 +3234,7 @@ pub fn run_decision_command(
             "refresh": flag_set.bool_value("refresh"),
             "per_tag": flag_set.string_value("per-tag").trim().parse::<u64>().unwrap_or(25),
             "site": flag_set.string_value("site"),
+            "source": flag_set.string_value("source"),
             "json": flag_set.bool_value("json"),
         }),
         "train-lexical" => serde_json::json!({

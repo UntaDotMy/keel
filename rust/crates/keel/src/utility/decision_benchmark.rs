@@ -385,6 +385,94 @@ pub fn fetch_external_site(
     Ok(cases)
 }
 
+const CRATES_ENDPOINT: &str = "https://crates.io/api/v1/crates";
+const CRATES_USER_AGENT: &str = "keel-benchmark/0.1 (evaluation harness)";
+
+/// crates.io categories are a controlled vocabulary as well, on a second provider
+/// with a different noise profile: one-line crate descriptions instead of
+/// question titles, so a result here is not the same corpus twice.
+pub const CRATE_CATEGORIES: &[(&str, &str)] = &[
+    ("database", "backend-and-data-architecture"),
+    ("web-programming::websocket", "websocket-realtime-design"),
+    (
+        "internationalization",
+        "internationalization-and-localization",
+    ),
+    ("cryptography", "adversarial-security-review"),
+    ("development-tools::testing", "test-driven-development"),
+    ("development-tools::debugging", "systematic-debugging"),
+    ("api-bindings", "api-contract-design"),
+    (
+        "development-tools::cargo-plugins",
+        "dependency-and-supply-chain",
+    ),
+];
+
+/// Fetch crate descriptions per category. crates.io asks callers to identify
+/// themselves, so the request carries a user agent.
+pub fn fetch_crates_categories(
+    per_category: usize,
+    page: usize,
+) -> Result<Vec<(String, Option<String>)>, String> {
+    let mut rows = Vec::new();
+    for (category, skill) in CRATE_CATEGORIES {
+        let url =
+            format!("{CRATES_ENDPOINT}?category={category}&per_page={per_category}&page={page}");
+        let output = Command::new("curl")
+            .args([
+                "-s",
+                "-A",
+                CRATES_USER_AGENT,
+                "--max-time",
+                EXTERNAL_TIMEOUT_SECS,
+                &url,
+            ])
+            .output()
+            .map_err(|error| format!("crates {category}: {error}"))?;
+        if !output.status.success() {
+            return Err(format!("crates {category}: curl failed"));
+        }
+        let body = String::from_utf8_lossy(&output.stdout);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&body).map_err(|error| format!("crates {category}: {error}"))?;
+        for entry in parsed["crates"].as_array().into_iter().flatten() {
+            if let Some(description) = entry["description"].as_str() {
+                rows.push((description.to_string(), Some((*skill).to_string())));
+            }
+        }
+    }
+    Ok(rows)
+}
+
+/// Cache for the crates corpus, kept beside the Stack Exchange one.
+pub fn crates_cache_path(claude_home: &std::path::Path) -> std::path::PathBuf {
+    external_cache_path(claude_home).with_file_name("crates-corpus.json")
+}
+
+/// Every corpus trains. One provider failing must not stop training: the rows
+/// that did arrive are kept and only an empty result is an error.
+pub fn fetch_all_corpora(
+    per_tag: usize,
+    pages: usize,
+) -> Result<Vec<(String, Option<String>)>, String> {
+    let mut rows = Vec::new();
+    let mut failures: Vec<String> = Vec::new();
+    for site in EXTERNAL_SITES {
+        match fetch_external_site(site, per_tag, 2, pages) {
+            Ok(fetched) => rows.extend(fetched),
+            Err(error) => failures.push(format!("{site}: {error}")),
+        }
+    }
+    match fetch_crates_categories(per_tag, 1) {
+        Ok(fetched) => rows.extend(fetched),
+        Err(error) => failures.push(format!("crates: {error}")),
+    }
+    if rows.is_empty() {
+        return Err(failures.join("; "));
+    }
+    Ok(rows)
+}
+
 /// Developer-corpus fetch, the corpus the models are trained on.
 pub fn fetch_external(
     per_tag: usize,
