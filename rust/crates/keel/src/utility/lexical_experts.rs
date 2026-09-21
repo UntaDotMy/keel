@@ -113,6 +113,33 @@ pub fn train(rows: &RawRows) -> Option<LexicalModel> {
     })
 }
 
+/// A question carrying two mapped tags appears under both classes, which teaches
+/// the model that one row owns two skills. Keep single-tag rows only, and report
+/// how many were dropped so the loss is visible rather than silent.
+pub fn drop_ambiguous_tags(rows: &RawRows) -> (Vec<(String, Option<String>)>, usize) {
+    let mut owners: HashMap<String, Vec<&str>> = HashMap::new();
+    for (prompt, skill) in rows {
+        if let Some(skill) = skill {
+            let entry = owners.entry(prompt.clone()).or_default();
+            if !entry.contains(&skill.as_str()) {
+                entry.push(skill.as_str());
+            }
+        }
+    }
+    let ambiguous: Vec<String> = owners
+        .into_iter()
+        .filter(|(_, skills)| skills.len() > 1)
+        .map(|(title, _)| title)
+        .collect();
+    let kept: Vec<(String, Option<String>)> = rows
+        .iter()
+        .filter(|(prompt, _)| !ambiguous.iter().any(|title| title == prompt))
+        .cloned()
+        .collect();
+    let dropped = rows.len().saturating_sub(kept.len());
+    (kept, dropped)
+}
+
 fn split(rows: &RawRows, seed: u64) -> (LabelledRows, LabelledRows) {
     let mut labelled: LabelledRows = rows
         .iter()
@@ -564,6 +591,20 @@ mod tests {
         assert!(produced.contains(&"borrow".to_string()));
         assert!(produced.contains(&"borrow_checker".to_string()));
         assert!(!produced.contains(&"the".to_string()));
+    }
+
+    #[test]
+    fn ambiguous_titles_are_dropped_and_single_tag_rows_kept() {
+        const SKILL: &str = "rust";
+        let rows: Vec<(String, Option<String>)> = vec![
+            ("shared title".to_string(), Some(SKILL.to_string())),
+            ("shared title".to_string(), Some("postgres".to_string())),
+            ("only rust".to_string(), Some(SKILL.to_string())),
+        ];
+        let (kept, dropped) = drop_ambiguous_tags(&rows);
+        assert_eq!(dropped, 2, "both copies of the shared title go");
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].1.as_deref(), Some(SKILL));
     }
 
     #[test]

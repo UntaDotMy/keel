@@ -2737,6 +2737,8 @@ pub fn handle_decision_tool(arguments: &Value) -> Result<String, String> {
                     fetched
                 }
             };
+            let (rows, dropped_ambiguous) =
+                crate::utility::lexical_experts::drop_ambiguous_tags(&rows);
             let model = crate::utility::lexical_experts::train(&rows).ok_or_else(|| {
                 "decision train-lexical: the corpus carried no labelled rows".to_string()
             })?;
@@ -2745,6 +2747,7 @@ pub fn handle_decision_tool(arguments: &Value) -> Result<String, String> {
             let out = serde_json::json!({
                 "action": "train-lexical",
                 "rows": rows.len(),
+                "dropped_ambiguous": dropped_ambiguous,
                 "training_rows": model.training_rows,
                 "skills": model.skills,
                 "usable": model.usable,
