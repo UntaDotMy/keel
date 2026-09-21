@@ -19,6 +19,8 @@ const EPOCHS: usize = 30;
 const LEARNING_RATE: f64 = 0.5;
 const WEIGHT_DECAY: f64 = 1e-4;
 const ADAGRAD_EPSILON: f64 = 1e-8;
+/// Epochs without a validation improvement before training stops.
+const EARLY_STOP_PATIENCE: usize = 5;
 const MIN_WORD: usize = 3;
 const REFUSE_BELOW_ROWS: usize = 100;
 const REFUSE_BELOW_ACCURACY: f64 = 0.50;
@@ -102,7 +104,7 @@ pub fn train(rows: &RawRows) -> Option<LexicalModel> {
     // why: community tags carry label noise, and pruning the rows the fitted
     // model confidently contradicts lifted held-out accuracy in measurement.
     let (train_rows, _) = prune_label_noise(&train_rows);
-    let fitted = fit(&train_rows)?;
+    let fitted = fit(&train_rows, &validation_rows)?;
     let held_out = score_held_out(&fitted, &validation_rows, &test_rows);
     let usable = rows.len() >= REFUSE_BELOW_ROWS
         && held_out
@@ -229,7 +231,35 @@ fn vectorize(prompt: &str, idf: &HashMap<String, f64>) -> HashMap<String, f64> {
     vector
 }
 
-fn fit(rows: &LabelledRows) -> Option<Fitted> {
+/// Validation Brier at the untempered scale, used only to choose the epoch. The
+/// reported Brier is still the test split's.
+fn validation_brier(
+    validation: &[(usize, HashMap<String, f64>)],
+    weights: &Weights,
+    biases: &[f64],
+    classes: usize,
+) -> f64 {
+    let mut total = 0.0;
+    let mut counted = 0usize;
+    for (label, document) in validation {
+        if document.is_empty() {
+            continue;
+        }
+        let logits: Vec<f64> = (0..classes)
+            .map(|class| biases[class] + dot(&weights[class], document))
+            .collect();
+        let probabilities = softmax(&logits, 1.0);
+        total += (1.0 - probabilities[*label]).powi(2);
+        counted += 1;
+    }
+    if counted == 0 {
+        f64::MAX
+    } else {
+        total / counted as f64
+    }
+}
+
+fn fit(rows: &LabelledRows, validation_rows: &LabelledRows) -> Option<Fitted> {
     if rows.is_empty() {
         return None;
     }
@@ -264,6 +294,14 @@ fn fit(rows: &LabelledRows) -> Option<Fitted> {
 
     let mut order: Vec<usize> = (0..documents.len()).collect();
     let mut state = DEFAULT_SEED | 1;
+    let validation: Vec<(usize, HashMap<String, f64>)> = validation_rows
+        .iter()
+        .filter_map(|(prompt, skill)| Some((*class_index.get(skill)?, vectorize(prompt, &idf))))
+        .collect();
+    let mut best_brier = f64::MAX;
+    let mut best_weights = weights.clone();
+    let mut best_biases = biases.clone();
+    let mut stale = 0usize;
     for _ in 0..EPOCHS {
         for index in (1..order.len()).rev() {
             state = state
@@ -297,7 +335,28 @@ fn fit(rows: &LabelledRows) -> Option<Fitted> {
                 *weight *= 1.0 - LEARNING_RATE * WEIGHT_DECAY;
             }
         }
+        // why: a fixed epoch count trains past the point where the validation
+        // slice improves, so the best epoch is kept rather than the last one.
+        if !validation.is_empty() {
+            let brier = validation_brier(&validation, &weights, &biases, classes.len());
+            if brier < best_brier - 1e-6 {
+                best_brier = brier;
+                best_weights = weights.clone();
+                best_biases = biases.clone();
+                stale = 0;
+            } else {
+                stale += 1;
+                if stale >= EARLY_STOP_PATIENCE {
+                    break;
+                }
+            }
+        }
     }
+    let (weights, biases) = if validation.is_empty() {
+        (weights, biases)
+    } else {
+        (best_weights, best_biases)
+    };
 
     let experts = classes
         .iter()
@@ -482,7 +541,7 @@ fn prune_label_noise(rows: &LabelledRows) -> (LabelledRows, usize) {
             .filter(|(index, _)| index % FOLDS != fold)
             .map(|(_, row)| row.clone())
             .collect();
-        let Some(fitted) = fit(&training) else {
+        let Some(fitted) = fit(&training, &LabelledRows::new()) else {
             return (rows.clone(), 0);
         };
         let model = LexicalModel {
