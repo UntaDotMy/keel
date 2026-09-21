@@ -341,7 +341,7 @@ fn raw_recovery_store() -> crate::proxy::raw_store::RawStore {
         return crate::proxy::raw_store::RawStore::with_namespace(store.root().clone(), namespace);
     }
     if !crate::proxy::raw_store::RawNamespace::has_mcp_context()
-        && !crate::proxy::run::running_under_claude_code()
+        && !crate::proxy::run::running_under_agent_host()
     {
         return store;
     }
@@ -367,9 +367,8 @@ mod tests {
 
     impl RecoveryEnvironment {
         fn clear() -> Self {
-            let previous = crate::proxy::run::CLAUDE_CODE_SIGNAL_VARS
-                .iter()
-                .copied()
+            let previous = crate::proxy::run::host_signal_vars()
+                .into_iter()
                 .chain([
                     "KEEL_MCP_SESSION_ID",
                     "KEEL_MCP_WORKSPACE_ID",

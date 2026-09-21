@@ -54,26 +54,26 @@ use chrono::{DateTime, SecondsFormat, Utc};
 /// with a signal present. The tool-process vars close that gap; the hook vars
 /// stay so hook-launched runs keep working.
 ///
-/// Any one of those being non-empty signals "this is a harness-driven run."
+/// Any of those being non-empty signals "this is a harness-driven run."
 /// Absence means "user typed `keel run --` themselves" — passthrough.
-pub(crate) const CLAUDE_CODE_SIGNAL_VARS: &[&str] = &[
-    "CLAUDE_SKILLS_HOOK",
-    "CLAUDE_PROJECT_DIR",
-    "CLAUDE_PLUGIN_ROOT",
-    "CLAUDE_AGENT",
-    "CLAUDE_SKILLS_AGENT",
-    "CLAUDECODE",
-    "CLAUDE_CODE_ENTRYPOINT",
-    "CLAUDE_CODE_SESSION_ID",
-    "AI_AGENT",
-    // Codex hook-launched shell calls use these host-neutral capture signals,
-    // matching the existing Claude capture behavior.
-    "CODEX_THREAD_ID",
-    "CODEX_CI",
-];
+///
+/// The per-host variables live in the host registry
+/// (`HostCapabilities::HOST_CAPTURE_SIGNALS`), so every claimed host answers
+/// capture detection and adding a host cannot silently skip it.
+pub(crate) fn host_signal_vars() -> Vec<&'static str> {
+    crate::proxy::execution::HostCapabilities::HOST_CAPTURE_SIGNALS
+        .iter()
+        .flat_map(|(_, vars)| vars.iter().copied())
+        .chain(
+            crate::proxy::execution::HostCapabilities::HOST_NEUTRAL_SIGNALS
+                .iter()
+                .copied(),
+        )
+        .collect()
+}
 
-pub fn running_under_claude_code() -> bool {
-    CLAUDE_CODE_SIGNAL_VARS.iter().any(|name| {
+pub fn running_under_agent_host() -> bool {
+    host_signal_vars().into_iter().any(|name| {
         std::env::var(name)
             .map(|value| !value.trim().is_empty())
             .unwrap_or(false)
@@ -150,7 +150,7 @@ pub fn run_proxy(
     // and a recovery artifact they never asked for. Explicit filter modes
     // (`--errors-only`, `--ultra`) are intentional opt-ins and always capture.
     let force_capture = flag_set.bool_value("errors-only") || flag_set.bool_value("ultra");
-    if !running_under_claude_code() && !force_capture {
+    if !running_under_agent_host() && !force_capture {
         // why: passthrough honors none of the capture-only flags, and silently
         // ignoring an explicit `--json` reads as a broken flag rather than a mode.
         const CAPTURE_ONLY_FLAGS: &[&str] = &["json", "stream", "full", "no-compact", "no-raw"];
@@ -260,7 +260,7 @@ pub fn run_proxy(
                 adapter_name: adapter.name().to_string(),
                 raw_path: std::path::PathBuf::new(),
                 compact_path: std::path::PathBuf::new(),
-                // The capture path only runs when `running_under_claude_code()`
+                // The capture path only runs when `running_under_agent_host()`
                 // returned true above, so defaulting to "claude-code" reflects
                 // verified state — not an assumption. CLAUDE_SKILLS_AGENT and
                 // CLAUDE_AGENT remain explicit overrides for forks or test
@@ -1069,14 +1069,16 @@ mod tests {
     use super::*;
     use crate::test_support::ENV_LOCK;
 
-    // why: a copy here would let a new gate signal survive `clear_signals`,
-    // silently turning the "no signal present" tests into no-ops.
-    const SIGNAL_VARS: &[&str] = super::CLAUDE_CODE_SIGNAL_VARS;
+    // why: reading the same owner keeps a new signal from surviving
+    // `clear_signals`, which would turn the "no signal present" tests into no-ops.
+    fn signal_vars() -> Vec<&'static str> {
+        super::host_signal_vars()
+    }
 
     fn snapshot_signals() -> Vec<(&'static str, Option<String>)> {
-        SIGNAL_VARS
-            .iter()
-            .map(|name| (*name, std::env::var(name).ok()))
+        signal_vars()
+            .into_iter()
+            .map(|name| (name, std::env::var(name).ok()))
             .collect()
     }
 
@@ -1090,13 +1092,13 @@ mod tests {
     }
 
     fn clear_signals() {
-        for name in SIGNAL_VARS {
+        for name in signal_vars() {
             std::env::remove_var(name);
         }
     }
 
     #[test]
-    fn gate_blocks_capture_when_no_claude_code_signal_is_present() {
+    fn gate_blocks_capture_when_no_host_signal_is_present() {
         let _guard = ENV_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1104,7 +1106,7 @@ mod tests {
         clear_signals();
 
         assert!(
-            !running_under_claude_code(),
+            !running_under_agent_host(),
             "with all CLAUDE_* signals cleared, the gate must report 'not under the harness'"
         );
 
@@ -1121,9 +1123,27 @@ mod tests {
         std::env::set_var("CLAUDE_PROJECT_DIR", "/tmp/example-project");
 
         assert!(
-            running_under_claude_code(),
+            running_under_agent_host(),
             "the harness documents CLAUDE_PROJECT_DIR as a hook-execution variable; \
              setting it must satisfy the gate"
+        );
+
+        restore_signals(&snapshot);
+    }
+
+    #[test]
+    fn gate_allows_capture_when_commandcode_scratchpad_is_set() {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let snapshot = snapshot_signals();
+        clear_signals();
+        std::env::set_var("COMMANDCODE_SCRATCHPAD", "C:/tmp/keel-scratchpad");
+
+        assert!(
+            running_under_agent_host(),
+            "Command Code exports only its scratchpad to shell children; \
+             setting it must satisfy the gate or that host never captures"
         );
 
         restore_signals(&snapshot);
@@ -1139,7 +1159,7 @@ mod tests {
         std::env::set_var("CLAUDE_SKILLS_HOOK", "1");
 
         assert!(
-            running_under_claude_code(),
+            running_under_agent_host(),
             "operators must be able to opt into capture mode for tests and tooling"
         );
 
@@ -1167,7 +1187,7 @@ mod tests {
             clear_signals();
             std::env::set_var(name, value);
             assert!(
-                running_under_claude_code(),
+                running_under_agent_host(),
                 "{name} is exported to the Bash tool child; it must satisfy the capture gate \
                  or the compaction proxy silently no-ops on every rewritten command"
             );
@@ -1186,7 +1206,7 @@ mod tests {
         std::env::set_var("CLAUDE_PROJECT_DIR", "   ");
 
         assert!(
-            !running_under_claude_code(),
+            !running_under_agent_host(),
             "an empty or whitespace-only env value is the same as 'not set' — otherwise \
              a stale export from a previous shell could silently re-enable capture"
         );

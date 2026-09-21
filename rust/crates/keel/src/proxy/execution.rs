@@ -111,6 +111,43 @@ impl HostCapabilities {
         "muse",
     ];
 
+    /// Environment variables each claimed host exports to the shell children it
+    /// launches; `keel run` treats any of them as its capture signal. A host
+    /// whose runtime variable is not verified carries the empty slice and is
+    /// covered by the host-neutral marker instead, so no claimed host silently
+    /// loses capture. The parity test enforces one entry per claimed host.
+    pub const HOST_CAPTURE_SIGNALS: &'static [(&'static str, &'static [&'static str])] = &[
+        (
+            "claude",
+            &[
+                "CLAUDE_SKILLS_HOOK",
+                "CLAUDE_PROJECT_DIR",
+                "CLAUDE_PLUGIN_ROOT",
+                "CLAUDE_AGENT",
+                "CLAUDE_SKILLS_AGENT",
+                "CLAUDECODE",
+                "CLAUDE_CODE_ENTRYPOINT",
+                "CLAUDE_CODE_SESSION_ID",
+            ],
+        ),
+        ("codex", &["CODEX_THREAD_ID", "CODEX_CI"]),
+        ("commandcode", &["COMMANDCODE_SCRATCHPAD"]),
+        ("opencode", &["OPENCODE", "OPENCODE_VERSION"]),
+        ("grok", &["GROK_HOME"]),
+        ("pi", &[]),
+        ("omp", &[]),
+        ("cursor", &[]),
+        ("cowork", &[]),
+        ("zcode", &[]),
+        ("antigravity", &[]),
+        ("muse", &[]),
+    ];
+
+    /// Signals that do not depend on the host name: the installer exports
+    /// `KEEL_HOST_SIGNAL` for hosts with no verified runtime variable, and
+    /// `AI_AGENT` is the generic marker some harnesses already set.
+    pub const HOST_NEUTRAL_SIGNALS: &'static [&'static str] = &["KEEL_HOST_SIGNAL", "AI_AGENT"];
+
     /// No proven interception surface at all. Unknown names resolve here too;
     /// [`Self::is_claimed_host`] is what tells the two apart.
     pub fn ungoverned(host: &str) -> Self {
@@ -547,6 +584,41 @@ mod tests {
             assert_eq!(matrix["matrix"]["hostRegistered"], true, "{platform}");
             assert_eq!(matrix["matrix"]["host"], platform, "{platform}");
         }
+    }
+
+    /// Capture detection must answer for every host keel claims, not a trio:
+    /// one entry per claimed host, no variable claimed twice, and a host with no
+    /// verified runtime variable covered by the neutral marker.
+    #[test]
+    fn every_claimed_host_answers_capture_detection() {
+        assert_eq!(
+            HostCapabilities::HOST_CAPTURE_SIGNALS.len(),
+            HostCapabilities::CLAIMED_HOSTS.len(),
+            "one capture entry per claimed host"
+        );
+        for host in HostCapabilities::CLAIMED_HOSTS {
+            assert!(
+                HostCapabilities::HOST_CAPTURE_SIGNALS
+                    .iter()
+                    .any(|(name, _)| name == host),
+                "{host} has no capture-signal entry"
+            );
+        }
+        let mut seen: Vec<&str> = Vec::new();
+        for (host, vars) in HostCapabilities::HOST_CAPTURE_SIGNALS {
+            if vars.is_empty() {
+                assert!(
+                    HostCapabilities::HOST_NEUTRAL_SIGNALS.contains(&"KEEL_HOST_SIGNAL"),
+                    "{host} carries no variable, so the neutral marker must exist"
+                );
+            }
+            for var in *vars {
+                assert!(!seen.contains(var), "{var} is claimed by two hosts");
+                seen.push(var);
+            }
+        }
+        assert!(seen.contains(&"COMMANDCODE_SCRATCHPAD"));
+        assert!(seen.contains(&"CLAUDE_PROJECT_DIR"));
     }
 
     /// Every claimed host answers from its own entry, never the fall-through.

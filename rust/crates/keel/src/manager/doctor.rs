@@ -505,7 +505,7 @@ fn run_hook_probe(command: &str) -> Option<String> {
 /// Report whether the rewritten command would actually be captured.
 /// why: doctor probed only the rewrite, so it passed while capture did nothing.
 fn report_capture_gate(standard_output: &mut dyn Write) {
-    if crate::proxy::run::running_under_claude_code() {
+    if crate::proxy::run::running_under_agent_host() {
         let _ = writeln!(
             standard_output,
             "[ok] compaction capture active (agent-session signal present)"
