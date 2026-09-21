@@ -14,18 +14,6 @@ pub fn laplace_rate(total: usize, correct: usize) -> f64 {
     (correct as f64 + 1.0) / (total as f64 + 2.0)
 }
 
-/// Weight given to empirical evidence: total / (total + 100), capped at 0.95.
-/// N=10 leans ~9% empirical, N=100 splits evenly, N=1000 leans ~91%.
-pub fn blend_weight(total: usize) -> f64 {
-    (total as f64 / (total as f64 + BLEND_REFERENCE_SAMPLES)).clamp(0.0, 0.95)
-}
-
-/// Blend an empirical rate toward a computed fallback by sample count.
-pub fn blend(empirical: f64, computed: f64, total: usize) -> f64 {
-    let weight = blend_weight(total);
-    (weight * empirical + (1.0 - weight) * computed).clamp(0.0, 1.0)
-}
-
 /// Brier score for one probabilistic prediction: squared error against the
 /// binary outcome. Lower is better; 0 is perfect, 1 is maximally wrong.
 pub fn brier_score(confidence: f64, outcome: bool) -> f64 {
@@ -227,13 +215,20 @@ mod benchmark_tests {
         );
     }
 
+    /// The retired N-weighted blend, kept as the benchmark's legacy baseline so
+    /// the table still contrasts the two estimators.
+    fn legacy_blend(empirical: f64, computed: f64, total: usize) -> f64 {
+        let weight = (total as f64 / (total as f64 + BLEND_REFERENCE_SAMPLES)).clamp(0.0, 0.95);
+        (weight * empirical + (1.0 - weight) * computed).clamp(0.0, 1.0)
+    }
+
     /// Evidence arrives in tens, not hundreds: the legacy reference weighting
     /// barely moves at n=20, while shrinkage has already taken the evidence.
     #[test]
     fn shrinkage_authority_table() {
         let computed = 0.60;
         let at_n20 = laplace_rate(20, 18);
-        let legacy = blend(at_n20, computed, 20);
+        let legacy = legacy_blend(at_n20, computed, 20);
         let shrunk = shrinkage_rate(18.0, 20.0, computed);
         println!("\n| estimator | prior strength | estimate at n=20 | distance from computed |");
         println!("|---|---|---|---|");
@@ -253,6 +248,10 @@ mod benchmark_tests {
             (shrinkage_rate(0.0, 0.0, computed) - computed).abs() < f64::EPSILON,
             "cold start must return the computed value unchanged"
         );
+        // The retired blend's own boundaries: cold start returns computed, and
+        // the 0.95 weight cap keeps a 5% computed floor even at huge N.
+        assert_eq!(legacy_blend(0.2, 0.8, 0), 0.8);
+        assert!((legacy_blend(0.7, 0.9, 100_000) - (0.95 * 0.7 + 0.05 * 0.9)).abs() < 1e-12);
     }
 
     /// Age decays evidence rather than letting stale outcomes dominate forever.
@@ -397,20 +396,6 @@ mod tests {
         assert!((laplace_rate(998, 698) - (699.0 / 1000.0)).abs() < 1e-12);
     }
 
-    #[test]
-    fn calibration_blend_weight_schedule() {
-        assert_eq!(blend_weight(0), 0.0);
-        assert!(blend_weight(10) < 0.10);
-        assert!((blend_weight(100) - 0.5).abs() < 1e-12);
-        assert!(blend_weight(1_000_000) <= 0.95);
-    }
-
-    #[test]
-    fn calibration_blend_boundaries() {
-        assert_eq!(blend(0.2, 0.8, 0), 0.8);
-        // The 0.95 weight cap keeps a 5% computed floor even at huge N.
-        assert!((blend(0.7, 0.9, 100_000) - (0.95 * 0.7 + 0.05 * 0.9)).abs() < 1e-12);
-    }
     #[test]
     fn calibration_brier_vectors() {
         assert_eq!(brier_score(1.0, true), 0.0);
