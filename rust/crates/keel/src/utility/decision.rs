@@ -2702,6 +2702,58 @@ pub fn handle_decision_tool(arguments: &Value) -> Result<String, String> {
             serde_json::to_string_pretty(&crate::utility::decision_model::summary_value(&model))
                 .map_err(|e| format!("serialize decision model: {e}"))
         }
+        "train-lexical" => {
+            let per_tag = arguments
+                .get("per_tag")
+                .and_then(Value::as_u64)
+                .unwrap_or(100) as usize;
+            let pages = arguments
+                .get("pages")
+                .and_then(Value::as_u64)
+                .unwrap_or(2) as usize;
+            let refresh = arguments
+                .get("refresh")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let home = crate::runtime::resolve_claude_home("")
+                .map_err(|error| format!("resolve home: {error}"))?;
+            let corpus = crate::utility::decision_benchmark::training_cache_path(&home);
+            let cached = if refresh {
+                None
+            } else {
+                crate::utility::decision_benchmark::read_external_cache(&corpus)
+            };
+            let rows = match cached {
+                Some(rows) => rows,
+                None => {
+                    // why: training reads from page two so it never learns the
+                    // rows the external benchmark scores it on.
+                    let fetched =
+                        crate::utility::decision_benchmark::fetch_external(per_tag, 2, pages)
+                            .map_err(|error| format!("decision train-lexical: {error}"))?;
+                    let _ = crate::utility::decision_benchmark::write_external_cache(
+                        &corpus, &fetched,
+                    );
+                    fetched
+                }
+            };
+            let model = crate::utility::lexical_experts::train(&rows).ok_or_else(|| {
+                "decision train-lexical: the corpus carried no labelled rows".to_string()
+            })?;
+            let artifact = crate::utility::lexical_experts::artifact_path(&home);
+            crate::utility::lexical_experts::save(&artifact, &model)?;
+            let out = serde_json::json!({
+                "action": "train-lexical",
+                "rows": rows.len(),
+                "training_rows": model.training_rows,
+                "skills": model.skills,
+                "usable": model.usable,
+                "held_out": model.held_out,
+                "artifact": artifact.display().to_string(),
+            });
+            serde_json::to_string_pretty(&out)
+                .map_err(|error| format!("serialize lexical training: {error}"))
+        }
         "benchmark" => {
             let remote = arguments
                 .get("remote")
@@ -2734,8 +2786,10 @@ pub fn handle_decision_tool(arguments: &Value) -> Result<String, String> {
                 let cases = match cached {
                     Some(cases) => cases,
                     None => {
-                        let fetched = crate::utility::decision_benchmark::fetch_external(per_tag)
-                            .map_err(|error| format!("decision benchmark: {error}"))?;
+                        let fetched = crate::utility::decision_benchmark::fetch_external(
+                            per_tag, 1, 1,
+                        )
+                        .map_err(|error| format!("decision benchmark: {error}"))?;
                         if let Some(path) = cache.as_deref() {
                             // why: a cache that cannot be written must not fail a
                             // run that already fetched its corpus.
@@ -2915,6 +2969,7 @@ pub fn run_decision_command(
                 train               Fit the per-surface calibration experts over the sample corpus\n  \
                 model               Show the trained decision model or calibrate one signal\n  \
                 benchmark           Score routing: keel fixtures, or the --external stackoverflow corpus, against classifier.dev (--remote, --per-tag N, --refresh)\n  \
+                train-lexical       Fetch real labelled rows and train the per-skill lexical experts (--per-tag N, --pages N, --refresh)\n  \
                 calibration-report  Show calibration health across routing, review, composition, shell, conformal"
         );
         return 0;
@@ -2987,6 +3042,11 @@ pub fn run_decision_command(
             flag_set.bool_flag("refresh", false);
             flag_set.string_flag("per-tag", "25");
             flag_set.bool_flag("json", false);
+        }
+        "train-lexical" => {
+            flag_set.bool_flag("refresh", false);
+            flag_set.string_flag("per-tag", "100");
+            flag_set.string_flag("pages", "2");
         }
         other => {
             let _ = writeln!(
@@ -3151,6 +3211,12 @@ pub fn run_decision_command(
             "refresh": flag_set.bool_value("refresh"),
             "per_tag": flag_set.string_value("per-tag").trim().parse::<u64>().unwrap_or(25),
             "json": flag_set.bool_value("json"),
+        }),
+        "train-lexical" => serde_json::json!({
+            "action": "train-lexical",
+            "per_tag": flag_set.string_value("per-tag").trim().parse::<u64>().unwrap_or(100),
+            "pages": flag_set.string_value("pages").trim().parse::<u64>().unwrap_or(2),
+            "refresh": flag_set.bool_value("refresh"),
         }),
         "conformal" => {
             let conf = flag_set

@@ -21,6 +21,7 @@ pub(crate) mod file_lock;
 pub(crate) mod fixed_context;
 pub mod gain;
 pub mod hashing;
+pub mod lexical_experts;
 pub mod memory;
 pub mod memory_families;
 pub mod observe;

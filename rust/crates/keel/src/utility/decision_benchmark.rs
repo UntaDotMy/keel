@@ -253,56 +253,63 @@ pub const EXTERNAL_TAGS: &[(&str, &str)] = &[
 ];
 
 /// Fetch recent question titles per tag from the public Stack Exchange API. The
-/// keyless quota is 300 requests a day and each tag costs one request, so the
-/// caller caches the corpus instead of refetching it.
-pub fn fetch_external(per_tag: usize) -> Result<Vec<(String, Option<String>)>, String> {
+/// keyless quota is 300 requests a day and each tag costs one request per page,
+/// so the caller caches the corpus instead of refetching it. Pages let training
+/// rows stay disjoint from the evaluation rows they are scored against.
+pub fn fetch_external(
+    per_tag: usize,
+    first_page: usize,
+    pages: usize,
+) -> Result<Vec<(String, Option<String>)>, String> {
     let mut cases = Vec::new();
-    for (tag, skill) in EXTERNAL_TAGS {
-        let url = format!(
-            "{EXTERNAL_ENDPOINT}?order=desc&sort=activity&site=stackoverflow&pagesize={per_tag}&tagged={tag}"
-        );
-        let output = Command::new("curl")
-            .args([
-                "-s",
-                "--compressed",
-                "--max-time",
-                EXTERNAL_TIMEOUT_SECS,
-                &url,
-            ])
-            .output()
-            .map_err(|error| format!("curl failed for {tag}: {error}"))?;
-        let parsed: serde_json::Value = serde_json::from_slice(&output.stdout)
-            .map_err(|error| format!("stackexchange {tag}: unreadable response: {error}"))?;
-        if let Some(message) = parsed
-            .get("error_message")
-            .and_then(serde_json::Value::as_str)
-        {
-            return Err(format!("stackexchange {tag}: {message}"));
-        }
-        // The API requires a caller to wait when it sets backoff, and a spent
-        // quota would fail every later tag too.
-        if let Some(seconds) = parsed.get("backoff").and_then(serde_json::Value::as_u64) {
-            std::thread::sleep(std::time::Duration::from_secs(seconds));
-        }
-        if parsed
-            .get("quota_remaining")
-            .and_then(serde_json::Value::as_u64)
-            == Some(0)
-        {
-            return Err(format!("stackexchange quota spent while reading {tag}"));
-        }
-        let items = parsed
-            .get("items")
-            .and_then(serde_json::Value::as_array)
-            .ok_or_else(|| format!("stackexchange {tag}: no items array"))?;
-        for item in items {
-            let title = item
-                .get("title")
+    for page in first_page..first_page + pages {
+        for (tag, skill) in EXTERNAL_TAGS {
+            let url = format!(
+                "{EXTERNAL_ENDPOINT}?order=desc&sort=activity&site=stackoverflow&pagesize={per_tag}&page={page}&tagged={tag}"
+            );
+            let output = Command::new("curl")
+                .args([
+                    "-s",
+                    "--compressed",
+                    "--max-time",
+                    EXTERNAL_TIMEOUT_SECS,
+                    &url,
+                ])
+                .output()
+                .map_err(|error| format!("curl failed for {tag}: {error}"))?;
+            let parsed: serde_json::Value = serde_json::from_slice(&output.stdout)
+                .map_err(|error| format!("stackexchange {tag}: unreadable response: {error}"))?;
+            if let Some(message) = parsed
+                .get("error_message")
                 .and_then(serde_json::Value::as_str)
-                .map(str::trim)
-                .unwrap_or_default();
-            if !title.is_empty() {
-                cases.push((title.to_string(), Some((*skill).to_string())));
+            {
+                return Err(format!("stackexchange {tag}: {message}"));
+            }
+            // The API requires a caller to wait when it sets backoff, and a spent
+            // quota would fail every later tag too.
+            if let Some(seconds) = parsed.get("backoff").and_then(serde_json::Value::as_u64) {
+                std::thread::sleep(std::time::Duration::from_secs(seconds));
+            }
+            if parsed
+                .get("quota_remaining")
+                .and_then(serde_json::Value::as_u64)
+                == Some(0)
+            {
+                return Err(format!("stackexchange quota spent while reading {tag}"));
+            }
+            let items = parsed
+                .get("items")
+                .and_then(serde_json::Value::as_array)
+                .ok_or_else(|| format!("stackexchange {tag}: no items array"))?;
+            for item in items {
+                let title = item
+                    .get("title")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .unwrap_or_default();
+                if !title.is_empty() {
+                    cases.push((title.to_string(), Some((*skill).to_string())));
+                }
             }
         }
     }
@@ -318,6 +325,14 @@ pub fn external_cache_path(claude_home: &std::path::Path) -> std::path::PathBuf 
     crate::runtime::state_directory(claude_home)
         .join("benchmarks")
         .join("stackoverflow-corpus.json")
+}
+
+/// Training rows live apart from the evaluation rows: a model scored on the rows
+/// it learned from is a training number wearing an evaluation label.
+pub fn training_cache_path(claude_home: &std::path::Path) -> std::path::PathBuf {
+    crate::runtime::state_directory(claude_home)
+        .join("benchmarks")
+        .join("stackoverflow-train.json")
 }
 
 pub fn read_external_cache(path: &std::path::Path) -> Option<Vec<(String, Option<String>)>> {
