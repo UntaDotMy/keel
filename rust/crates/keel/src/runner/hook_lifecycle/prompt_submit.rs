@@ -7,7 +7,7 @@ pub(super) const USER_PROMPT_ENFORCEMENT_STRIP: &str = "\
 ENFORCED THIS TURN (mandatory on every turn): FOLLOW THE IRON LAW. USE KEEL.\n\
 Research-first: trust the codebase. Read SYSTEM_MAP; use system_map, recall, context_brief, run_command, skill_route/skill_get, and code_search instead of guessing.\n\
 Every fix, trace, or implementation needs fresh external research (WebSearch/WebFetch/context7) for THIS problem; recall and memory alone do not count. Reuse a fresh research-cache entry instead of re-browsing.\n\
-Sources: prefer 2025-2026 unless an older work is the primary reference for the mechanism (the original paper, the vendor spec, the RFC). One generic page is not research: tune the query (exact version, exact error text, site: filter) until it names the mechanism and the edit.\n\
+Sources: 2025-2026 only unless an older work is the primary reference (paper, spec, RFC). Tune the query until it names the mechanism; one generic page is not research.\n\
 Never assume, never guess, never skip required tests, review, or sibling scans.\n\
 PreToolUse DENIES Edit/Write and shell work until fresh external research (or a fresh research-cache entry) runs. After edits, run code_search siblings.";
 

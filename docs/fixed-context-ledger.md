@@ -26,9 +26,9 @@ measurement. Actual values are recomputed on every invocation and in CI.
 |---|---:|---:|
 | `mcp.tools_list.handshake` | 898 | 1,200 |
 | `mcp.tools_list.catalog` | 1,240 | 1,364 |
-| `hook.session_start.bootstrap` | 609 | 670 |
-| `hook.user_prompt_submit.simple` | 154 | 170 |
-| `hook.user_prompt_submit.code_change` | 205 | 226 |
+| `hook.session_start.bootstrap` | 670 | 737 |
+| `hook.user_prompt_submit.simple` | 194 | 214 |
+| `hook.user_prompt_submit.code_change` | 245 | 270 |
 | `repo.CLAUDE.md` | 1,333 | 1,467 |
 | `repo.AGENTS.md` | 2,767 | 3,044 |
 | `repo.WORKFLOW.md` | 4,884 | 5,373 |
@@ -38,7 +38,7 @@ measurement. Actual values are recomputed on every invocation and in CI.
 | `generated.zcode.AGENTS.md` | 130 | 143 |
 | `generated.antigravity.GEMINI.md` | 131 | 145 |
 | `skills.inline_catalog` | 10,149 | 11,164 |
-| `skills.full_bodies` | 88,472 | 97,320 |
+| `skills.full_bodies` | 88,993 | 97,893 |
 | `pointer.planner` | 9 | 10 |
 | `pointer.research` | 12 | 14 |
 | `pointer.ticket_checklist` | 11 | 13 |
