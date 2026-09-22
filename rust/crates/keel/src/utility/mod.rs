@@ -16,6 +16,7 @@ pub mod decision_benchmark;
 pub mod decision_model;
 pub mod decision_samples;
 pub mod design_intelligence;
+pub mod embedding;
 pub mod eval;
 pub(crate) mod file_lock;
 pub(crate) mod fixed_context;

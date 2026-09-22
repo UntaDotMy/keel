@@ -12,14 +12,29 @@ Never assume, never guess, never skip required tests, review, or sibling scans.\
 PreToolUse DENIES Edit/Write and shell work until fresh external research (or a fresh research-cache entry) runs. After edits, run code_search siblings.";
 
 pub(crate) fn user_prompt_submit_context(prompt_text: &str) -> String {
+    // fallback: no resolvable home means no skill pointer, not a failed prompt.
+    let home = resolve_claude_home("").ok();
+    user_prompt_submit_context_with_home(prompt_text, home.as_deref())
+}
+
+/// The same context measured against a named home, or none. The fixed-context
+/// ledger measures with `None`: a ratified budget must not move with whatever
+/// skills the developer happens to have installed.
+pub(crate) fn user_prompt_submit_context_hermetic(prompt_text: &str) -> String {
+    user_prompt_submit_context_with_home(prompt_text, None)
+}
+
+pub(crate) fn user_prompt_submit_context_with_home(
+    prompt_text: &str,
+    claude_home: Option<&Path>,
+) -> String {
     // Build optional pointers first, then put the enforcement strip first so models cannot miss it.
     // The full operating contract stays in canonical workspace/SessionStart context; only the strip repeats per prompt.
     let mut body = String::new();
-    let claude_home = resolve_claude_home("").ok();
 
     // Name one matched skill; its body remains on-demand instead of becoming
     // recurring per-prompt context.
-    if let (false, Some(home)) = (prompt_text.trim().is_empty(), claude_home.as_ref()) {
+    if let (false, Some(home)) = (prompt_text.trim().is_empty(), claude_home) {
         let single = crate::utility::skill_match::match_skill_for_prompt(home, prompt_text);
         let single_name = single.as_ref().map(|matched| matched.name.clone());
         let composition =

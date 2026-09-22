@@ -63,6 +63,7 @@ pub(crate) use pre_tool::{
 };
 use prompt_submit::run_hook_user_prompt_submit;
 pub(crate) use prompt_submit::user_prompt_submit_context;
+pub(crate) use prompt_submit::user_prompt_submit_context_hermetic;
 use session_end::{
     memory_scope_summary, prune_memory_record_stores, prune_observations_store,
     prune_raw_output_store, prune_state_marker_stores, refresh_memory_scope_for_current_directory,

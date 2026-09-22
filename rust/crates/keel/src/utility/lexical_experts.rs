@@ -110,6 +110,15 @@ pub struct LexicalModel {
     /// with rows refuses to score rather than scoring half the features.
     #[serde(default)]
     pub vector_rows: usize,
+    /// Width of the sentence-encoder block this model was trained with. Zero
+    /// means no encoder block, and like `vector_rows` it is checked at load so
+    /// a model is never served with half its features missing.
+    #[serde(default)]
+    pub embedding_dim: usize,
+    /// Mean encoder vector per class, when an encoder was present at training
+    /// time. Empty means the encoder tier has nothing to say.
+    #[serde(default)]
+    pub centroids: Vec<ClassCentroid>,
 }
 
 /// A prompt with its weak label: a community tag mapped to a keel skill.
@@ -137,6 +146,15 @@ type Accumulators = Vec<HashMap<String, f64>>;
 struct Fitted {
     experts: Vec<LexicalExpert>,
     idf: Vec<(String, f64)>,
+}
+
+/// The optional blocks a document carries beyond its own words: the static
+/// word-vector table and the sentence encoder. Both travel as one value so
+/// training, pruning, held-out scoring and serving cannot disagree about which
+/// blocks were used.
+#[derive(Clone, Copy, Default)]
+struct Priors<'a> {
+    vectors: Option<&'a crate::utility::word_vectors::WordVectors>,
 }
 
 /// Label support per class, so a training run shows which skills have evidence
@@ -188,7 +206,7 @@ pub fn train(rows: &RawRows) -> Option<LexicalModel> {
 
 /// Train from rows that name their provider.
 pub fn train_sourced(rows: &[SourcedRow]) -> Option<LexicalModel> {
-    train_sourced_reported(rows, None).map(|(model, _)| model)
+    train_sourced_reported(rows, None, None).map(|(model, _)| model)
 }
 
 /// Train and report the calibration fit, so the run output shows the keep
@@ -196,7 +214,9 @@ pub fn train_sourced(rows: &[SourcedRow]) -> Option<LexicalModel> {
 pub fn train_sourced_reported(
     rows: &[SourcedRow],
     vectors: Option<&crate::utility::word_vectors::WordVectors>,
+    encoder: Option<&crate::utility::embedding::Encoder>,
 ) -> Option<(LexicalModel, CalibrationFit)> {
+    let priors = Priors { vectors };
     let (train_rows, validation_rows, test_rows) = split_sourced(rows, DEFAULT_SEED);
     // Rejected: masking crates boilerplate on this slice moved held-out
     // accuracy 0.7386 → 0.7285 and Brier 0.1380 → 0.1428 (accept 0.25 → 0.35).
@@ -205,13 +225,18 @@ pub fn train_sourced_reported(
     let test_pairs = pairs_of(&test_rows);
     // why: community tags carry label noise, and pruning the rows the fitted
     // model confidently contradicts lifted held-out accuracy in measurement.
-    let (train_rows, _) = prune_label_noise(&train_pairs, vectors);
-    let fitted = fit(&train_rows, &validation_pairs, vectors)?;
+    let (train_rows, _) = prune_label_noise(&train_pairs, priors);
+    let fitted = fit(&train_rows, &validation_pairs, priors)?;
+    let centroids = match encoder {
+        Some(encoder) => build_centroids(&train_rows, encoder),
+        None => Vec::new(),
+    };
     let (held_out, report) = match score_held_out(
         &fitted,
         &validation_pairs,
         &test_pairs,
         vectors.map(|table| std::sync::Arc::new(table.clone())),
+        encoder.map(|encoder| std::sync::Arc::new(encoder.clone())),
     ) {
         Some(scored) => (Some(scored.0), scored.1),
         None => (None, CalibrationFit::default()),
@@ -230,6 +255,12 @@ pub fn train_sourced_reported(
             held_out,
             usable,
             vector_rows: vectors.map(|table| table.rows()).unwrap_or(0),
+            embedding_dim: if encoder.is_some() {
+                crate::utility::embedding::EMBEDDING_DIM
+            } else {
+                0
+            },
+            centroids,
         },
         report,
     ))
@@ -403,8 +434,9 @@ fn inverse_document_frequency(rows: &LabelledRows) -> Vec<(String, f64)> {
 }
 
 /// Sublinear term frequency against the fitted document frequencies, plus the
-/// averaged word-vector block, L2 normalized so a long title cannot outvote a
-/// short one and so neither block outweighs the other.
+/// averaged word-vector block and the encoder block, L2 normalized once over the
+/// whole document so a long title cannot outvote a short one and no block
+/// outweighs another.
 fn vectorize(
     prompt: &str,
     idf: &HashMap<String, f64>,
@@ -476,11 +508,7 @@ fn validation_brier(
     }
 }
 
-fn fit(
-    rows: &LabelledRows,
-    validation_rows: &LabelledRows,
-    vectors: Option<&crate::utility::word_vectors::WordVectors>,
-) -> Option<Fitted> {
+fn fit(rows: &LabelledRows, validation_rows: &LabelledRows, priors: Priors<'_>) -> Option<Fitted> {
     if rows.is_empty() {
         return None;
     }
@@ -499,7 +527,7 @@ fn fit(
         .collect();
     let documents: Vec<(usize, HashMap<String, f64>)> = rows
         .iter()
-        .map(|(prompt, skill)| (class_index[skill], vectorize(prompt, &idf, vectors)))
+        .map(|(prompt, skill)| (class_index[skill], vectorize(prompt, &idf, priors.vectors)))
         .collect();
 
     let mut weights: Weights = vec![HashMap::new(); classes.len()];
@@ -518,7 +546,10 @@ fn fit(
     let validation: Vec<(usize, HashMap<String, f64>)> = validation_rows
         .iter()
         .filter_map(|(prompt, skill)| {
-            Some((*class_index.get(skill)?, vectorize(prompt, &idf, vectors)))
+            Some((
+                *class_index.get(skill)?,
+                vectorize(prompt, &idf, priors.vectors),
+            ))
         })
         .collect();
     let mut best_brier = f64::MAX;
@@ -910,6 +941,11 @@ pub fn head(path: &Path) -> Option<std::sync::Arc<Head>> {
     } else {
         None
     };
+    // why: the centroids need the same encoder the training rows were encoded
+    // with, so a model carrying them refuses to serve without it.
+    if model.embedding_dim > 0 && crate::utility::embedding::encoder_beside(path).is_none() {
+        return None;
+    }
     let head = std::sync::Arc::new(Head::from_model(&model, vectors));
     if let Ok(mut cache) = HEAD_CACHE.lock() {
         *cache = Some((fingerprint, std::sync::Arc::clone(&head)));
@@ -960,6 +996,91 @@ pub fn accept_threshold(model: &LexicalModel) -> f64 {
         .unwrap_or(1.0)
 }
 
+/// One class's mean sentence vector. The encoder speaks through these rather
+/// than through the linear head: as 384 dense features per row inside the class
+/// loop the block multiplied training cost by ten, and a centroid costs one
+/// encode per training row and one per prompt.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ClassCentroid {
+    pub name: String,
+    pub vector: Vec<f32>,
+}
+
+/// Mean encoder vector per class, unit-normalized. Empty when no encoder was
+/// available at training time.
+pub fn build_centroids(
+    rows: &LabelledRows,
+    encoder: &crate::utility::embedding::Encoder,
+) -> Vec<ClassCentroid> {
+    let mut sums: HashMap<String, (Vec<f64>, usize)> = HashMap::new();
+    for (prompt, skill) in rows {
+        let Some(embedding) = encoder.encode(prompt) else {
+            continue;
+        };
+        let entry = sums
+            .entry(skill.clone())
+            .or_insert_with(|| (vec![0.0; embedding.len()], 0));
+        if entry.0.len() != embedding.len() {
+            continue;
+        }
+        for (slot, value) in entry.0.iter_mut().zip(&embedding) {
+            *slot += f64::from(*value);
+        }
+        entry.1 += 1;
+    }
+    let mut centroids: Vec<ClassCentroid> = sums
+        .into_iter()
+        .filter(|(_, (_, count))| *count > 0)
+        .map(|(name, (sum, count))| {
+            let mut vector: Vec<f32> = sum
+                .into_iter()
+                .map(|value| (value / count as f64) as f32)
+                .collect();
+            let norm = vector.iter().map(|value| value * value).sum::<f32>().sqrt();
+            if norm > 0.0 {
+                for value in &mut vector {
+                    *value /= norm;
+                }
+            }
+            ClassCentroid { name, vector }
+        })
+        .collect();
+    centroids.sort_by(|left, right| left.name.cmp(&right.name));
+    centroids
+}
+
+/// Classes ranked by cosine similarity to the prompt's encoder vector. `None`
+/// when no centroid table or no encoder is available: silence, not a guess.
+pub fn centroid_rank(
+    centroids: &[ClassCentroid],
+    encoder: &crate::utility::embedding::Encoder,
+    prompt: &str,
+) -> Option<Vec<(String, f64)>> {
+    if centroids.is_empty() {
+        return None;
+    }
+    let embedding = encoder.encode(prompt)?;
+    let mut ranked: Vec<(String, f64)> = centroids
+        .iter()
+        .map(|centroid| {
+            let dot: f64 = centroid
+                .vector
+                .iter()
+                .zip(&embedding)
+                .map(|(left, right)| f64::from(*left) * f64::from(*right))
+                .sum();
+            (centroid.name.clone(), dot.max(0.0))
+        })
+        .collect();
+    ranked.sort_by(|left, right| {
+        right
+            .1
+            .partial_cmp(&left.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    Some(ranked)
+}
+
 /// The accept point for one class, falling back to the global one for a class
 /// the held-out split could not score.
 pub fn accept_threshold_for(model: &LexicalModel, skill: &str) -> f64 {
@@ -988,10 +1109,7 @@ struct OutOfFold {
 /// never saw it, then drop rows whose given tag that model confidently
 /// contradicts. In-sample judging finds nothing, because a fitted model agrees
 /// with the rows it memorized, so the folds are what make this worth doing.
-fn prune_label_noise(
-    rows: &LabelledRows,
-    vectors: Option<&crate::utility::word_vectors::WordVectors>,
-) -> (LabelledRows, usize) {
+fn prune_label_noise(rows: &LabelledRows, priors: Priors<'_>) -> (LabelledRows, usize) {
     const FOLDS: usize = 5;
     if rows.len() < FOLDS {
         return (rows.clone(), 0);
@@ -1005,7 +1123,7 @@ fn prune_label_noise(
             .filter(|(index, _)| index % FOLDS != fold)
             .map(|(_, row)| row.clone())
             .collect();
-        let Some(fitted) = fit(&training, &LabelledRows::new(), vectors) else {
+        let Some(fitted) = fit(&training, &LabelledRows::new(), priors) else {
             return (rows.clone(), 0);
         };
         let model = LexicalModel {
@@ -1017,6 +1135,8 @@ fn prune_label_noise(
             held_out: None,
             usable: true,
             vector_rows: 0,
+            embedding_dim: 0,
+            centroids: Vec::new(),
         };
         let scorer = Scorer::new(&model, None);
         for (index, (prompt, skill)) in rows.iter().enumerate() {
@@ -1075,6 +1195,7 @@ fn score_held_out(
     calibration_rows: &LabelledRows,
     test_rows: &LabelledRows,
     vectors: Option<std::sync::Arc<crate::utility::word_vectors::WordVectors>>,
+    encoder: Option<std::sync::Arc<crate::utility::embedding::Encoder>>,
 ) -> Option<(HeldOut, CalibrationFit)> {
     if test_rows.is_empty() {
         return None;
@@ -1088,6 +1209,11 @@ fn score_held_out(
         held_out: None,
         usable: true,
         vector_rows: vectors.as_ref().map(|table| table.rows()).unwrap_or(0),
+        embedding_dim: encoder
+            .as_ref()
+            .map(|_| crate::utility::embedding::EMBEDDING_DIM)
+            .unwrap_or(0),
+        centroids: Vec::new(),
     };
     let scorer = Scorer::new(&model, vectors);
     let vectorize = |rows: &LabelledRows| -> Vec<(String, HashMap<String, f64>)> {
@@ -1778,6 +1904,8 @@ mod tests {
             training_rows: 240,
             skills: 2,
             vector_rows: 0,
+            embedding_dim: 0,
+            centroids: Vec::new(),
             experts: vec![
                 LexicalExpert {
                     name: BIN_A.to_string(),
@@ -1832,6 +1960,8 @@ mod tests {
             training_rows: 0,
             skills: 2,
             vector_rows: 0,
+            embedding_dim: 0,
+            centroids: Vec::new(),
             experts: vec![
                 LexicalExpert {
                     name: BIN_A.to_string(),

@@ -99,6 +99,17 @@ pub fn scan_unified_diff_for_slop(diff: &str) -> Vec<SlopFinding> {
     findings
 }
 
+/// Files no author writes by hand: their repetition is the format, not a smell.
+fn is_generated_file(path: &str) -> bool {
+    let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    matches!(
+        name,
+        "Cargo.lock" | "package-lock.json" | "pnpm-lock.yaml" | "yarn.lock"
+    ) || name.ends_with(".lock")
+        || path.contains("/vendor/")
+        || path.contains("/target/")
+}
+
 /// Scan every tracked source file in the tree for slop (whole-file scan). Used
 /// by the `review pre-commit --all` / `pre-pr --all` cleanup surfaces so
 /// pre-existing slop (not just added lines) is caught. Only files the detectors
@@ -168,6 +179,11 @@ fn detect_slop_patterns(
     added_lines: &[(usize, String)],
     findings: &mut Vec<SlopFinding>,
 ) {
+    // why: a lockfile repeats its own schema by construction, so the duplication
+    // detectors would fire on generated lines that no author wrote.
+    if is_generated_file(file) {
+        return;
+    }
     detect_dead_defensive_code(file, added_lines, findings);
     detect_over_commenting(file, added_lines, findings);
     detect_phantom_flags(file, added_lines, findings);
@@ -807,6 +823,20 @@ fn detect_silent_fallbacks(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_lockfile_is_not_scanned_for_author_slop() {
+        assert!(is_generated_file("Cargo.lock"));
+        assert!(is_generated_file("rust/crates/keel/Cargo.lock"));
+        assert!(is_generated_file("web/package-lock.json"));
+        assert!(is_generated_file("deps/vendor/lib.rs"));
+        assert!(!is_generated_file("rust/crates/keel/src/main.rs"));
+        // The same repeated line is a smell in code and the format in a lockfile.
+        let diff = "+++ b/Cargo.lock\n@@ -0,0 +1,4 @@\n+source = \"registry+a\"\n+source = \"registry+b\"\n+source = \"registry+c\"\n";
+        assert!(scan_unified_diff_for_slop(diff).is_empty());
+        let code = "+++ b/src/lib.rs\n@@ -0,0 +1,4 @@\n+let resolved = resolve_dependency_version(&manifest, &lockfile);\n+let resolved = resolve_dependency_version(&manifest, &lockfile);\n+let resolved = resolve_dependency_version(&manifest, &lockfile);\n";
+        assert!(!scan_unified_diff_for_slop(code).is_empty());
+    }
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_repo(label: &str) -> std::path::PathBuf {

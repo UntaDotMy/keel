@@ -169,11 +169,15 @@ pub(crate) fn collect(workspace_root: &Path) -> FixedContextLedger {
         ),
         measured(
             "hook.user_prompt_submit.simple",
-            &crate::runner::hook_lifecycle::user_prompt_submit_context(SIMPLE_PROMPT_FIXTURE),
+            &crate::runner::hook_lifecycle::user_prompt_submit_context_hermetic(
+                SIMPLE_PROMPT_FIXTURE,
+            ),
         ),
         measured(
             "hook.user_prompt_submit.code_change",
-            &crate::runner::hook_lifecycle::user_prompt_submit_context(CODE_CHANGE_PROMPT_FIXTURE),
+            &crate::runner::hook_lifecycle::user_prompt_submit_context_hermetic(
+                CODE_CHANGE_PROMPT_FIXTURE,
+            ),
         ),
         measured_file("repo.CLAUDE.md", workspace_root, "CLAUDE.md"),
         measured_file("repo.AGENTS.md", workspace_root, "AGENTS.md"),

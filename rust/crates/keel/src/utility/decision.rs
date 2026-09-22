@@ -2794,10 +2794,12 @@ pub fn handle_decision_tool(arguments: &Value) -> Result<String, String> {
             rows.extend(seeds);
             let started = std::time::Instant::now();
             let vectors = crate::utility::word_vectors::table_for(&home);
+            let encoder = crate::utility::embedding::encoder_for(&home);
             let (model, calibration_fit) =
                 crate::utility::lexical_experts::train_sourced_reported(
                     &rows,
                     vectors.as_deref(),
+                    encoder.as_deref(),
                 )
                 .ok_or_else(|| {
                     "decision train-lexical: the corpus carried no labelled rows".to_string()
