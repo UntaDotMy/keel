@@ -612,9 +612,11 @@ pub fn fetch_crates_categories(
     Ok(rows)
 }
 
-/// Cache for the crates corpus, kept beside the Stack Exchange one.
+/// Cache for the crates corpus, kept beside the Stack Exchange ones.
 pub fn crates_cache_path(claude_home: &std::path::Path) -> std::path::PathBuf {
-    external_cache_path(claude_home).with_file_name("crates-corpus.json")
+    crate::runtime::state_directory(claude_home)
+        .join("benchmarks")
+        .join("crates-corpus.json")
 }
 
 /// Every corpus trains. One provider failing must not stop training: the rows
@@ -734,12 +736,26 @@ pub fn fetch_external(
     fetch_external_site("stackoverflow", per_tag, first_page, pages)
 }
 
-/// Cache location for a fetched corpus: refetching would spend the keyless quota
-/// again and would make one run incomparable with the next.
-pub fn external_cache_path(claude_home: &std::path::Path) -> std::path::PathBuf {
+/// Cache location for a fetched corpus, named by the site it came from. One
+/// shared file let a five-site leaderboard overwrite its own corpora, and the
+/// keyless quota meant they could not be fetched back the same day. The file
+/// name cannot be reconstructed from its rows, so there is deliberately no
+/// fallback to the pre-site file: a corpus without its site is a mislabeled
+/// corpus.
+pub fn external_cache_path(claude_home: &std::path::Path, site: &str) -> std::path::PathBuf {
+    let safe_site: String = site
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '-' {
+                character.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect();
     crate::runtime::state_directory(claude_home)
         .join("benchmarks")
-        .join("stackoverflow-corpus.json")
+        .join(format!("external-corpus-{safe_site}.json"))
 }
 
 /// Training rows live apart from the evaluation rows: a model scored on the rows
@@ -1209,6 +1225,35 @@ mod tests {
         assert!(fitted
             .iter()
             .all(|row| { row.text.trim() != HOST_BENCHMARK[0].0 || row.skill.is_none() }));
+    }
+
+    #[test]
+    fn eval_corpus_cache_is_named_for_its_site() {
+        let home = std::path::PathBuf::from(r"C:\keel-home");
+        let overflow = external_cache_path(&home, "stackoverflow");
+        let design = external_cache_path(&home, "softwareengineering");
+        assert_ne!(
+            overflow, design,
+            "two sites must not share one corpus file, or the second fetch erases the first"
+        );
+        assert_eq!(
+            external_cache_path(&home, "softwareengineering"),
+            design,
+            "the same site resolves to the same file"
+        );
+        assert!(
+            overflow
+                .to_string_lossy()
+                .contains("external-corpus-stackoverflow"),
+            "the file name carries the site: {}",
+            overflow.display()
+        );
+        assert!(
+            !external_cache_path(&home, "../escape")
+                .to_string_lossy()
+                .contains(".."),
+            "a site name cannot walk out of the cache directory"
+        );
     }
 
     #[test]

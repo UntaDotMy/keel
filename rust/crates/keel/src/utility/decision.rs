@@ -2834,11 +2834,15 @@ pub fn handle_decision_tool(arguments: &Value) -> Result<String, String> {
                     .and_then(Value::as_str)
                     .unwrap_or("stackexchange")
                     .to_string();
+                let site = arguments
+                    .get("site")
+                    .and_then(Value::as_str)
+                    .unwrap_or("stackoverflow");
                 let cache = home.as_deref().map(|home| {
                     if source == "crates" {
                         crate::utility::decision_benchmark::crates_cache_path(home)
                     } else {
-                        crate::utility::decision_benchmark::external_cache_path(home)
+                        crate::utility::decision_benchmark::external_cache_path(home, site)
                     }
                 });
                 let cached = if refresh {
@@ -2854,10 +2858,6 @@ pub fn handle_decision_tool(arguments: &Value) -> Result<String, String> {
                         let fetched = if source == "crates" {
                             crate::utility::decision_benchmark::fetch_crates_categories(per_tag, 1)
                         } else {
-                            let site = arguments
-                                .get("site")
-                                .and_then(Value::as_str)
-                                .unwrap_or("stackoverflow");
                             crate::utility::decision_benchmark::fetch_external_site(
                                 site, per_tag, 1, 1,
                             )
