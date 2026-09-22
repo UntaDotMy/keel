@@ -27,6 +27,238 @@ const EARLY_STOP_PATIENCE: usize = 5;
 const MIN_WORD: usize = 3;
 const REFUSE_BELOW_ROWS: usize = 100;
 const REFUSE_BELOW_ACCURACY: f64 = 0.50;
+/// Out-of-scope rows the accept point must reject. They never train a class
+/// weight: a prompt with no skill has no label to fit, only a threshold to move.
+const PROBE_REJECTION_FLOOR: f64 = 0.9;
+/// A class below this many rows is not judged by the label-noise prune. A fold
+/// model that never saw the class contradicts it by construction, and pruning
+/// those rows deleted whole classes from the head.
+const MIN_ROWS_TO_JUDGE: usize = 10;
+
+/// Prompts whose right answer is no skill at all. Frozen here so the rejection
+/// floor is measured against text no provider and no host prompt supplied.
+pub fn abstention_probes() -> Vec<String> {
+    [
+        "What is the boiling point of water at sea level if I am only asking for the number?",
+        "Remind me of the capital of Portugal, nothing about this repository.",
+        "Write a haiku about the first snow and keep it cheerful.",
+        "My sourdough starter smells like acetone after three days, what now?",
+        "Plan a four-day walking route through Lisbon with two rest days.",
+        "Who won the 1994 world cup final and by how many penalties?",
+        "Translate good morning into Japanese and Korean.",
+        "What is the cheapest month to fly from Manila to Sydney?",
+        "Recommend a beginner-friendly recipe for refried beans.",
+        "How tall is the tallest tree in the Amazon basin?",
+        "Explain the offside rule to someone who has never watched football.",
+        "Give me a two-week strength routine with no equipment.",
+    ]
+    .iter()
+    .map(|probe| probe.to_string())
+    .collect()
+}
+
+/// Slice proportions. Validation fits the accept point and the prior weight, so
+/// it is not spare capacity; test is what gets reported and is never fitted on.
+#[derive(Clone, Copy)]
+pub struct SplitRatios {
+    pub train: f64,
+    pub validation: f64,
+    pub test: f64,
+}
+
+impl Default for SplitRatios {
+    fn default() -> Self {
+        Self {
+            train: 0.65,
+            validation: 0.15,
+            test: 0.20,
+        }
+    }
+}
+
+impl SplitRatios {
+    /// Parses `train/validation/test` percentages, which is how the CLI takes
+    /// them, and refuses anything that does not add up to 100.
+    pub fn parse(spec: &str) -> Option<Self> {
+        let parts: Vec<f64> = spec
+            .split('/')
+            .map(|part| part.trim().parse::<f64>().ok())
+            .collect::<Option<Vec<f64>>>()?;
+        if parts.len() != 3 || (parts.iter().sum::<f64>() - 100.0).abs() > 1e-6 {
+            return None;
+        }
+        if parts.iter().any(|part| *part <= 0.0) {
+            return None;
+        }
+        Some(Self {
+            train: parts[0] / 100.0,
+            validation: parts[1] / 100.0,
+            test: parts[2] / 100.0,
+        })
+    }
+}
+
+/// What a run is allowed to do, so a measured comparison names its knobs
+/// instead of comparing two builds.
+#[derive(Clone, Copy)]
+pub struct TrainConfig {
+    pub ratios: SplitRatios,
+    /// Keep every class's share in every slice. Off reproduces the unstratified
+    /// split a shuffled corpus gives, which starves the thin classes.
+    pub stratify: bool,
+    /// Reject out-of-scope probes before reporting coverage.
+    pub abstention_probes: bool,
+}
+
+impl Default for TrainConfig {
+    fn default() -> Self {
+        Self {
+            ratios: SplitRatios::default(),
+            stratify: true,
+            // Rejected by measurement: the probes raised the accept point
+            // 0.30 -> 0.55 and cost decoded answers on every surface (5/3, 20/13, 52/44).
+            abstention_probes: false,
+        }
+    }
+}
+
+/// Where a progress line goes. An enum rather than a boxed closure, so naming a
+/// destination allocates nothing and leaks nothing.
+enum Sink<'a> {
+    Silent,
+    Stderr,
+    Custom(&'a mut dyn FnMut(&str)),
+}
+
+/// The destination a training run writes progress lines to, plus the clock the
+/// phase timings are read from. Silent unless a caller supplies a sink.
+pub struct Progress<'a> {
+    sink: Sink<'a>,
+    started: std::time::Instant,
+    phases: Vec<(String, u64)>,
+    open: Option<(String, std::time::Instant)>,
+}
+
+impl<'a> Progress<'a> {
+    fn with_sink(sink: Sink<'a>) -> Self {
+        Self {
+            sink,
+            started: std::time::Instant::now(),
+            phases: Vec::new(),
+            open: None,
+        }
+    }
+
+    pub fn silent() -> Self {
+        Self::with_sink(Sink::Silent)
+    }
+
+    /// Writes progress lines to stderr, so a caller that captures stdout as
+    /// JSON still gets a clean document.
+    pub fn printing() -> Self {
+        Self::with_sink(Sink::Stderr)
+    }
+
+    /// Reports into a caller-owned sink, which is how a test reads the trace
+    /// without touching the process's streams.
+    pub fn to(sink: &'a mut dyn FnMut(&str)) -> Self {
+        Self::with_sink(Sink::Custom(sink))
+    }
+
+    /// Closes the open phase and opens `label`, so the run reports both what it
+    /// is doing now and how long each step took.
+    pub fn step(&mut self, label: &str) {
+        let now = std::time::Instant::now();
+        if let Some((previous, at)) = self.open.take() {
+            self.phases
+                .push((previous, at.elapsed().as_millis() as u64));
+        }
+        self.line(format!(
+            "[{:>7.1}s] {label}",
+            self.started.elapsed().as_secs_f64()
+        ));
+        self.open = Some((label.to_string(), now));
+    }
+
+    pub fn line(&mut self, message: String) {
+        match &mut self.sink {
+            Sink::Silent => {}
+            Sink::Stderr => eprintln!("{message}"),
+            Sink::Custom(sink) => sink(&message),
+        }
+    }
+
+    /// Every phase with the milliseconds it took, for the training header.
+    pub fn phases(&mut self) -> Vec<(String, u64)> {
+        let mut phases = self.phases.clone();
+        if let Some((label, at)) = self.open.take() {
+            phases.push((label, at.elapsed().as_millis() as u64));
+            self.open = None;
+        }
+        phases
+    }
+}
+
+/// One class's held-out score, so a run reports which skill is carrying the
+/// result and which one is only present.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ClassScore {
+    pub name: String,
+    pub support: usize,
+    pub decided: usize,
+    pub correct: usize,
+    pub precision: f64,
+    pub recall: f64,
+    pub f1: f64,
+}
+
+/// Held-out confusion over the rows the model spoke on, plus one trailing
+/// column for silence: an abstention is a decision and belongs in the matrix.
+#[derive(Clone, Default, Serialize, Deserialize)]
+pub struct Confusion {
+    pub labels: Vec<String>,
+    /// Row-major, `labels.len() + 1` wide. The last column counts silent rows.
+    pub counts: Vec<usize>,
+}
+
+impl Confusion {
+    pub fn width(&self) -> usize {
+        self.labels.len() + 1
+    }
+
+    pub fn count(&self, truth: usize, predicted: usize) -> usize {
+        self.counts
+            .get(truth * self.width() + predicted)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// The pairs a reader should look at first: what was said instead of the
+    /// right answer, most frequent first.
+    pub fn top_confusions(&self, limit: usize) -> Vec<(String, String, usize)> {
+        let mut pairs: Vec<(String, String, usize)> = Vec::new();
+        for truth in 0..self.labels.len() {
+            for predicted in 0..self.width() {
+                if predicted == truth {
+                    continue;
+                }
+                let count = self.count(truth, predicted);
+                if count == 0 {
+                    continue;
+                }
+                let said = self
+                    .labels
+                    .get(predicted)
+                    .cloned()
+                    .unwrap_or_else(|| "(silent)".to_string());
+                pairs.push((self.labels[truth].clone(), said, count));
+            }
+        }
+        pairs.sort_by(|left, right| right.2.cmp(&left.2).then(left.0.cmp(&right.0)));
+        pairs.truncate(limit);
+        pairs
+    }
+}
 
 /// Question words carry no domain signal and would otherwise dominate bigrams.
 const STOPWORDS: &[&str] = &[
@@ -71,6 +303,21 @@ pub struct HeldOut {
     /// means the global scale alone, so older artifacts behave as before.
     #[serde(default)]
     pub entropy_temperatures: Vec<(f64, f64)>,
+    /// Per-class precision, recall and F1 on this split.
+    #[serde(default)]
+    pub per_class: Vec<ClassScore>,
+    /// Averaged over classes, so a large class cannot carry the number alone.
+    #[serde(default)]
+    pub macro_f1: f64,
+    /// Averaged by support, which is the score a random row sees.
+    #[serde(default)]
+    pub weighted_f1: f64,
+    /// Confusion over decided rows, with silence as the trailing column.
+    #[serde(default)]
+    pub confusion: Confusion,
+    /// Share of the out-of-scope probes the accept point rejects.
+    #[serde(default)]
+    pub probe_rejection: f64,
 }
 
 /// Static-vs-adaptive fit report, printed by the training run so the keep
@@ -216,8 +463,38 @@ pub fn train_sourced_reported(
     vectors: Option<&crate::utility::word_vectors::WordVectors>,
     encoder: Option<&crate::utility::embedding::Encoder>,
 ) -> Option<(LexicalModel, CalibrationFit)> {
+    train_sourced_observed(
+        rows,
+        vectors,
+        encoder,
+        TrainConfig::default(),
+        &mut Progress::silent(),
+    )
+}
+
+/// The training entry point that reports itself and accepts measured knobs.
+/// Returns the model, the calibration fit, and the phase timings a run took.
+pub fn train_sourced_observed(
+    rows: &[SourcedRow],
+    vectors: Option<&crate::utility::word_vectors::WordVectors>,
+    encoder: Option<&crate::utility::embedding::Encoder>,
+    config: TrainConfig,
+    progress: &mut Progress<'_>,
+) -> Option<(LexicalModel, CalibrationFit)> {
     let priors = Priors { vectors };
-    let (train_rows, validation_rows, test_rows) = split_sourced(rows, DEFAULT_SEED);
+    progress.step("split");
+    let (train_rows, validation_rows, test_rows) =
+        split_sourced_with(rows, DEFAULT_SEED, config.ratios, config.stratify);
+    progress.line(format!(
+        "         train {} · validation {} · test {} · {:.0}/{:.0}/{:.0} stratified={}",
+        train_rows.len(),
+        validation_rows.len(),
+        test_rows.len(),
+        config.ratios.train * 100.0,
+        config.ratios.validation * 100.0,
+        config.ratios.test * 100.0,
+        config.stratify
+    ));
     // Rejected: masking crates boilerplate on this slice moved held-out
     // accuracy 0.7386 → 0.7285 and Brier 0.1380 → 0.1428 (accept 0.25 → 0.35).
     let train_pairs = pairs_of(&train_rows);
@@ -225,18 +502,32 @@ pub fn train_sourced_reported(
     let test_pairs = pairs_of(&test_rows);
     // why: community tags carry label noise, and pruning the rows the fitted
     // model confidently contradicts lifted held-out accuracy in measurement.
-    let (train_rows, _) = prune_label_noise(&train_pairs, priors);
-    let fitted = fit(&train_rows, &validation_pairs, priors)?;
+    progress.step("label-noise prune (5 folds, held out per fold)");
+    let (train_rows, pruned) = prune_label_noise(&train_pairs, priors, progress);
+    progress.line(format!(
+        "         dropped {pruned} contradicted rows, {} kept",
+        train_rows.len()
+    ));
+    progress.step("fit");
+    let fitted = fit(&train_rows, &validation_pairs, priors, progress)?;
     let centroids = match encoder {
-        Some(encoder) => build_centroids(&train_rows, encoder),
+        Some(encoder) => {
+            progress.step("class centroids (encoder)");
+            let centroids = build_centroids(&train_rows, encoder);
+            progress.line(format!("         {} centroids", centroids.len()));
+            centroids
+        }
         None => Vec::new(),
     };
+    progress.step("held-out scoring (temperature, accept point, confusion)");
     let (held_out, report) = match score_held_out(
         &fitted,
         &validation_pairs,
         &test_pairs,
         vectors.map(|table| std::sync::Arc::new(table.clone())),
         encoder.map(|encoder| std::sync::Arc::new(encoder.clone())),
+        config.abstention_probes,
+        progress,
     ) {
         Some(scored) => (Some(scored.0), scored.1),
         None => (None, CalibrationFit::default()),
@@ -340,32 +631,88 @@ fn shuffle<T>(labelled: &mut [T], seed: u64) {
     }
 }
 
-fn split_counts(len: usize) -> (usize, usize) {
-    let test_count = len / 5;
+fn split_counts(len: usize, ratios: SplitRatios) -> (usize, usize) {
+    let test_count = (len as f64 * ratios.test).round() as usize;
     // why: the accept point is fitted here, and a tenth of the corpus was thin
     // enough that the fitted floor moved on noise alone.
-    let validation_count = len * 3 / 20;
-    (test_count, validation_count)
+    let validation_count = (len as f64 * ratios.validation).round() as usize;
+    (test_count.min(len), validation_count.min(len))
 }
 
-fn split_three<T>(mut labelled: Vec<T>, seed: u64) -> (Vec<T>, Vec<T>, Vec<T>) {
+fn split_three<T>(
+    mut labelled: Vec<T>,
+    seed: u64,
+    ratios: SplitRatios,
+) -> (Vec<T>, Vec<T>, Vec<T>) {
     shuffle(&mut labelled, seed);
-    let (test_count, validation_count) = split_counts(labelled.len());
+    let (test_count, validation_count) = split_counts(labelled.len(), ratios);
     let test = labelled.split_off(labelled.len() - test_count);
     let validation = labelled.split_off(labelled.len() - validation_count);
     (labelled, validation, test)
 }
 
-fn split_sourced(
+/// Deals each class's rows into the three slices by quota. A shuffled corpus
+/// starves the thin classes: with a long tail they land in the slice that fits
+/// the accept point and the one that reports by luck, and a class absent from
+/// validation has no seat in the threshold decision at all.
+fn split_stratified<T: Clone>(
+    rows: &[(T, String)],
+    seed: u64,
+    ratios: SplitRatios,
+) -> (Vec<T>, Vec<T>, Vec<T>) {
+    let mut classes: Vec<String> = rows.iter().map(|(_, skill)| skill.clone()).collect();
+    classes.sort();
+    classes.dedup();
+    let mut train: Vec<T> = Vec::new();
+    let mut validation: Vec<T> = Vec::new();
+    let mut test: Vec<T> = Vec::new();
+    for (index, class) in classes.iter().enumerate() {
+        let mut members: Vec<T> = rows
+            .iter()
+            .filter(|(_, skill)| skill == class)
+            .map(|(row, _)| row.clone())
+            .collect();
+        let class_seed = seed.wrapping_add((index as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+        shuffle(&mut members, class_seed);
+        let len = members.len();
+        let (mut test_count, mut validation_count) = split_counts(len, ratios);
+        if len >= 3 {
+            test_count = test_count.max(1);
+            validation_count = validation_count.max(1);
+        }
+        let test_count = test_count.min(len);
+        let validation_count = validation_count.min(len - test_count);
+        let test_part = members.split_off(len - test_count);
+        let validation_part = members.split_off(members.len() - validation_count);
+        train.extend(members);
+        validation.extend(validation_part);
+        test.extend(test_part);
+    }
+    (train, validation, test)
+}
+
+fn split_sourced_with(
     rows: &[SourcedRow],
     seed: u64,
+    ratios: SplitRatios,
+    stratify: bool,
 ) -> (Vec<SourcedRow>, Vec<SourcedRow>, Vec<SourcedRow>) {
     let labelled: Vec<SourcedRow> = rows
         .iter()
         .filter(|row| row.skill.is_some())
         .cloned()
         .collect();
-    split_three(labelled, seed)
+    if !stratify {
+        return split_three(labelled, seed, ratios);
+    }
+    let keyed: Vec<(SourcedRow, String)> = labelled
+        .into_iter()
+        .map(|row| {
+            let skill = row.skill.clone().unwrap_or_default();
+            (row, skill)
+        })
+        .collect();
+    split_stratified(&keyed, seed, ratios)
 }
 
 fn pairs_of(rows: &[SourcedRow]) -> LabelledRows {
@@ -480,16 +827,17 @@ fn vectorize(
     vector
 }
 
-/// Validation Brier at the untempered scale, used only to choose the epoch. The
-/// reported Brier is still the test split's.
-fn validation_brier(
+/// Validation Brier and accuracy at the untempered scale, used only to choose
+/// the epoch. The reported Brier is still the test split's.
+fn validation_metrics(
     validation: &[(usize, HashMap<String, f64>)],
     weights: &Weights,
     biases: &[f64],
     classes: usize,
-) -> f64 {
+) -> (f64, f64) {
     let mut total = 0.0;
     let mut counted = 0usize;
+    let mut correct = 0usize;
     for (label, document) in validation {
         if document.is_empty() {
             continue;
@@ -499,16 +847,34 @@ fn validation_brier(
             .collect();
         let probabilities = softmax(&logits, 1.0);
         total += (1.0 - probabilities[*label]).powi(2);
+        let best = probabilities
+            .iter()
+            .enumerate()
+            .max_by(|left, right| {
+                left.1
+                    .partial_cmp(right.1)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map(|(index, _)| index)
+            .unwrap_or(0);
+        if best == *label {
+            correct += 1;
+        }
         counted += 1;
     }
     if counted == 0 {
-        f64::MAX
+        (f64::MAX, 0.0)
     } else {
-        total / counted as f64
+        (total / counted as f64, correct as f64 / counted as f64)
     }
 }
 
-fn fit(rows: &LabelledRows, validation_rows: &LabelledRows, priors: Priors<'_>) -> Option<Fitted> {
+fn fit(
+    rows: &LabelledRows,
+    validation_rows: &LabelledRows,
+    priors: Priors<'_>,
+    progress: &mut Progress<'_>,
+) -> Option<Fitted> {
     if rows.is_empty() {
         return None;
     }
@@ -543,7 +909,7 @@ fn fit(rows: &LabelledRows, validation_rows: &LabelledRows, priors: Priors<'_>) 
 
     let mut order: Vec<usize> = (0..documents.len()).collect();
     let mut state = DEFAULT_SEED | 1;
-    let validation: Vec<(usize, HashMap<String, f64>)> = validation_rows
+    let mut validation: Vec<(usize, HashMap<String, f64>)> = validation_rows
         .iter()
         .filter_map(|(prompt, skill)| {
             Some((
@@ -552,11 +918,26 @@ fn fit(rows: &LabelledRows, validation_rows: &LabelledRows, priors: Priors<'_>) 
             ))
         })
         .collect();
+    validation.retain(|(_, document)| !document.is_empty());
+    let features: usize = idf.len();
+    progress.line(format!(
+        "         {} rows · {} classes · {} features · {} validation rows · {} epochs max, patience {}",
+        documents.len(),
+        classes.len(),
+        features,
+        validation.len(),
+        EPOCHS,
+        EARLY_STOP_PATIENCE
+    ));
     let mut best_brier = f64::MAX;
     let mut best_weights = weights.clone();
     let mut best_biases = biases.clone();
+    let mut best_epoch = 0usize;
     let mut stale = 0usize;
-    for _ in 0..EPOCHS {
+    for epoch in 1..=EPOCHS {
+        let epoch_started = std::time::Instant::now();
+        let mut loss = 0.0f64;
+        let mut counted = 0usize;
         for index in (1..order.len()).rev() {
             state = state
                 .wrapping_mul(6364136223846793005)
@@ -570,6 +951,8 @@ fn fit(rows: &LabelledRows, validation_rows: &LabelledRows, priors: Priors<'_>) 
                 .map(|class| biases[class] + dot(&weights[class], document))
                 .collect();
             let probabilities = softmax(&logits, 1.0);
+            loss -= probabilities[*label].max(1e-12).ln();
+            counted += 1;
             for class in 0..classes.len() {
                 let observed = (class == *label) as u8 as f64;
                 let gradient = probabilities[class] - observed;
@@ -592,23 +975,51 @@ fn fit(rows: &LabelledRows, validation_rows: &LabelledRows, priors: Priors<'_>) 
         // why: a fixed epoch count trains past the point where the validation
         // slice improves, so the best epoch is kept rather than the last one.
         if !validation.is_empty() {
-            let brier = validation_brier(&validation, &weights, &biases, classes.len());
-            if brier < best_brier - 1e-6 {
+            let (brier, accuracy) =
+                validation_metrics(&validation, &weights, &biases, classes.len());
+            let improved = brier < best_brier - 1e-6;
+            if improved {
                 best_brier = brier;
                 best_weights = weights.clone();
                 best_biases = biases.clone();
+                best_epoch = epoch;
                 stale = 0;
             } else {
                 stale += 1;
-                if stale >= EARLY_STOP_PATIENCE {
-                    break;
-                }
             }
+            let epoch_seconds = epoch_started.elapsed().as_secs_f64();
+            progress.line(format!(
+                "         epoch {epoch:>2}/{EPOCHS}  loss {:>7.4}  val_brier {:>7.4}  val_acc {:>6.4}  best {:>7.4}@{}  stale {}/{}  {:>5.1}s  eta {:>5.1}s",
+                loss / counted.max(1) as f64,
+                brier,
+                accuracy,
+                best_brier,
+                best_epoch,
+                stale,
+                EARLY_STOP_PATIENCE,
+                epoch_seconds,
+                epoch_seconds * (EPOCHS - epoch) as f64
+            ));
+            if !improved && stale >= EARLY_STOP_PATIENCE {
+                progress.line(format!(
+                    "         early stop at epoch {epoch}: no validation improvement for {EARLY_STOP_PATIENCE} epochs"
+                ));
+                break;
+            }
+        } else {
+            progress.line(format!(
+                "         epoch {epoch:>2}/{EPOCHS}  loss {:>7.4}  no validation slice  {:>5.1}s",
+                loss / counted.max(1) as f64,
+                epoch_started.elapsed().as_secs_f64()
+            ));
         }
     }
     let (weights, biases) = if validation.is_empty() {
         (weights, biases)
     } else {
+        progress.line(format!(
+            "         kept epoch {best_epoch} at validation brier {best_brier:.4}"
+        ));
         (best_weights, best_biases)
     };
     // Logit adjustment for imbalance: how much the priors should count is fitted
@@ -629,12 +1040,15 @@ fn fit(rows: &LabelledRows, validation_rows: &LabelledRows, priors: Priors<'_>) 
             let adjusted: Vec<f64> = (0..classes.len())
                 .map(|class| biases[class] + alpha * priors[class])
                 .collect();
-            let brier = validation_brier(&validation, &weights, &adjusted, classes.len());
+            let (brier, _) = validation_metrics(&validation, &weights, &adjusted, classes.len());
             if brier < best {
                 best = brier;
                 best_alpha = alpha;
             }
         }
+        progress.line(format!(
+            "         prior weight alpha {best_alpha:.3} fitted on validation (brier {best:.4})"
+        ));
     }
     let biases: Vec<f64> = if validation.is_empty() {
         biases
@@ -1109,57 +1523,93 @@ struct OutOfFold {
 /// never saw it, then drop rows whose given tag that model confidently
 /// contradicts. In-sample judging finds nothing, because a fitted model agrees
 /// with the rows it memorized, so the folds are what make this worth doing.
-fn prune_label_noise(rows: &LabelledRows, priors: Priors<'_>) -> (LabelledRows, usize) {
+fn prune_label_noise(
+    rows: &LabelledRows,
+    priors: Priors<'_>,
+    progress: &mut Progress<'_>,
+) -> (LabelledRows, usize) {
     const FOLDS: usize = 5;
     if rows.len() < FOLDS {
         return (rows.clone(), 0);
     }
+    // The folds are independent and each one fits its own model, so they run
+    // at the same time: this phase was most of a training run's wall clock.
+    let fold_results: Vec<Vec<(usize, OutOfFold)>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..FOLDS)
+            .map(|fold| {
+                scope.spawn(move || {
+                    let training: LabelledRows = rows
+                        .iter()
+                        .enumerate()
+                        .filter(|(index, _)| index % FOLDS != fold)
+                        .map(|(_, row)| row.clone())
+                        .collect();
+                    let mut judged: Vec<(usize, OutOfFold)> = Vec::new();
+                    let Some(fitted) = fit(
+                        &training,
+                        &LabelledRows::new(),
+                        priors,
+                        &mut Progress::silent(),
+                    ) else {
+                        return judged;
+                    };
+                    let model = LexicalModel {
+                        schema: LEXICAL_SCHEMA,
+                        training_rows: training.len(),
+                        skills: fitted.experts.len(),
+                        experts: fitted.experts,
+                        idf: fitted.idf,
+                        held_out: None,
+                        usable: true,
+                        vector_rows: 0,
+                        embedding_dim: 0,
+                        centroids: Vec::new(),
+                    };
+                    let scorer = Scorer::new(&model, None);
+                    for (index, (prompt, skill)) in rows.iter().enumerate() {
+                        if index % FOLDS != fold {
+                            continue;
+                        }
+                        let document = scorer.vectorize(prompt);
+                        if document.is_empty() {
+                            continue;
+                        }
+                        let Some(given) = scorer.names.iter().position(|name| name == skill) else {
+                            continue;
+                        };
+                        let probabilities = scorer.probabilities(&document, 1.0);
+                        let (best, confidence) = best_of(&probabilities);
+                        judged.push((
+                            index,
+                            OutOfFold {
+                                best,
+                                confidence,
+                                given,
+                                given_probability: probabilities[given],
+                            },
+                        ));
+                    }
+                    judged
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap_or_default())
+            .collect()
+    });
     let mut judgements: Vec<Option<OutOfFold>> = Vec::new();
     judgements.resize_with(rows.len(), || None);
-    for fold in 0..FOLDS {
-        let training: LabelledRows = rows
-            .iter()
-            .enumerate()
-            .filter(|(index, _)| index % FOLDS != fold)
-            .map(|(_, row)| row.clone())
-            .collect();
-        let Some(fitted) = fit(&training, &LabelledRows::new(), priors) else {
-            return (rows.clone(), 0);
-        };
-        let model = LexicalModel {
-            schema: LEXICAL_SCHEMA,
-            training_rows: training.len(),
-            skills: fitted.experts.len(),
-            experts: fitted.experts,
-            idf: fitted.idf,
-            held_out: None,
-            usable: true,
-            vector_rows: 0,
-            embedding_dim: 0,
-            centroids: Vec::new(),
-        };
-        let scorer = Scorer::new(&model, None);
-        for (index, (prompt, skill)) in rows.iter().enumerate() {
-            if index % FOLDS != fold {
-                continue;
-            }
-            let document = scorer.vectorize(prompt);
-            if document.is_empty() {
-                continue;
-            }
-            let Some(given) = scorer.names.iter().position(|name| name == skill) else {
-                continue;
-            };
-            let probabilities = scorer.probabilities(&document, 1.0);
-            let (best, confidence) = best_of(&probabilities);
-            judgements[index] = Some(OutOfFold {
-                best,
-                confidence,
-                given,
-                given_probability: probabilities[given],
-            });
+    for judged in fold_results {
+        for (index, judgement) in judged {
+            judgements[index] = Some(judgement);
         }
     }
+    progress.line(format!(
+        "         {} of {} rows judged by a fold that never saw them",
+        judgements.iter().filter(|entry| entry.is_some()).count(),
+        rows.len()
+    ));
     let mut self_confidence: HashMap<&str, (f64, usize)> = HashMap::new();
     for ((_, skill), judgement) in rows.iter().zip(&judgements) {
         if let Some(judgement) = judgement {
@@ -1168,9 +1618,23 @@ fn prune_label_noise(rows: &LabelledRows, priors: Priors<'_>) -> (LabelledRows, 
             entry.1 += 1;
         }
     }
+    let mut class_size: HashMap<&str, usize> = HashMap::new();
+    for (_, skill) in rows {
+        *class_size.entry(skill.as_str()).or_default() += 1;
+    }
     let mut kept = Vec::with_capacity(rows.len());
     let mut pruned = 0usize;
+    let mut exempt = 0usize;
+    let mut exempt_classes: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for ((prompt, skill), judgement) in rows.iter().zip(&judgements) {
+        // A class this thin has no evidence to be contradicted by: the fold that
+        // never saw it erased 29 of the corpus's 52 classes without this floor.
+        if class_size.get(skill.as_str()).copied().unwrap_or(0) < MIN_ROWS_TO_JUDGE {
+            exempt += 1;
+            exempt_classes.insert(skill.as_str());
+            kept.push((prompt.clone(), skill.clone()));
+            continue;
+        }
         let suspect = judgement.as_ref().is_some_and(|judgement| {
             let mean = self_confidence
                 .get(skill.as_str())
@@ -1184,6 +1648,10 @@ fn prune_label_noise(rows: &LabelledRows, priors: Priors<'_>) -> (LabelledRows, 
             kept.push((prompt.clone(), skill.clone()));
         }
     }
+    progress.line(format!(
+        "         kept {exempt} rows in {} class(es) too thin to judge (under {MIN_ROWS_TO_JUDGE} rows)",
+        exempt_classes.len()
+    ));
     (kept, pruned)
 }
 
@@ -1196,6 +1664,8 @@ fn score_held_out(
     test_rows: &LabelledRows,
     vectors: Option<std::sync::Arc<crate::utility::word_vectors::WordVectors>>,
     encoder: Option<std::sync::Arc<crate::utility::embedding::Encoder>>,
+    with_probes: bool,
+    progress: &mut Progress<'_>,
 ) -> Option<(HeldOut, CalibrationFit)> {
     if test_rows.is_empty() {
         return None;
@@ -1223,6 +1693,16 @@ fn score_held_out(
     };
     let calibration = vectorize(calibration_rows);
     let documents = vectorize(test_rows);
+    let probes: Vec<HashMap<String, f64>> = if with_probes {
+        // Every probe counts, including one whose words the model has never
+        // seen: a prompt the model cannot place is still a prompt it must refuse.
+        abstention_probes()
+            .iter()
+            .map(|probe| scorer.vectorize(probe))
+            .collect()
+    } else {
+        Vec::new()
+    };
     let mut best_scale = 1.0f64;
     let mut best_brier = f64::MAX;
     if calibration.iter().any(|(_, document)| !document.is_empty()) {
@@ -1235,9 +1715,13 @@ fn score_held_out(
             }
         }
     }
+    progress.line(format!(
+        "         temperature {best_scale:.2} by validation brier {best_brier:.4} · {} probes",
+        probes.len()
+    ));
     let candidate = fit_entropy_temperatures(&scorer, &calibration, best_scale);
-    let static_fit = fit_accept(&scorer, &calibration, best_scale, &[]);
-    let adaptive_fit = fit_accept(&scorer, &calibration, best_scale, &candidate);
+    let static_fit = fit_accept(&scorer, &calibration, &probes, best_scale, &[]);
+    let adaptive_fit = fit_accept(&scorer, &calibration, &probes, best_scale, &candidate);
     let static_ece = ece_for_documents(&scorer, &calibration, best_scale, &[]);
     let adaptive_ece = ece_for_documents(&scorer, &calibration, best_scale, &candidate);
     let static_coverage = coverage_for(&scorer, &calibration, best_scale, &[], static_fit.accept);
@@ -1254,23 +1738,97 @@ fn score_held_out(
     let adaptive_test_ece = ece_for_documents(&scorer, &documents, best_scale, &candidate);
     let bins: Vec<(f64, f64)> = if kept { candidate } else { Vec::new() };
     let fit = if kept { adaptive_fit } else { static_fit };
+    let labels = scorer.names.clone();
+    let width = labels.len() + 1;
+    let mut counts = vec![0usize; width * width];
     let mut correct = 0usize;
+    let mut scored = 0usize;
     for (skill, document) in &documents {
         if document.is_empty() {
             continue;
         }
-        let (best, _) = best_of(&probabilities_for(&scorer, document, best_scale, &bins));
-        if &scorer.names[best] == skill {
+        let Some(truth) = labels.iter().position(|name| name == skill) else {
+            continue;
+        };
+        scored += 1;
+        let (best, confidence) = best_of(&probabilities_for(&scorer, document, best_scale, &bins));
+        let column = if confidence >= fit.accept {
+            best
+        } else {
+            width - 1
+        };
+        counts[truth * width + column] += 1;
+        if column == truth {
             correct += 1;
         }
     }
-    let decided = documents
-        .iter()
-        .filter(|(_, document)| !document.is_empty())
-        .count();
+    let mut per_class: Vec<ClassScore> = Vec::new();
+    for (class, name) in labels.iter().enumerate() {
+        let support: usize = (0..width)
+            .map(|column| counts[class * width + column])
+            .sum();
+        let true_positive = counts[class * width + class];
+        let predicted: usize = (0..labels.len())
+            .map(|row| counts[row * width + class])
+            .sum();
+        let precision = if predicted == 0 {
+            0.0
+        } else {
+            true_positive as f64 / predicted as f64
+        };
+        let recall = if support == 0 {
+            0.0
+        } else {
+            true_positive as f64 / support as f64
+        };
+        let f1 = if precision + recall == 0.0 {
+            0.0
+        } else {
+            2.0 * precision * recall / (precision + recall)
+        };
+        per_class.push(ClassScore {
+            name: name.clone(),
+            support,
+            decided: predicted,
+            correct: true_positive,
+            precision,
+            recall,
+            f1,
+        });
+    }
+    let scored_classes: Vec<&ClassScore> =
+        per_class.iter().filter(|score| score.support > 0).collect();
+    let macro_f1 = if scored_classes.is_empty() {
+        0.0
+    } else {
+        scored_classes.iter().map(|score| score.f1).sum::<f64>() / scored_classes.len() as f64
+    };
+    let support_total: usize = scored_classes.iter().map(|score| score.support).sum();
+    let weighted_f1 = if support_total == 0 {
+        0.0
+    } else {
+        scored_classes
+            .iter()
+            .map(|score| score.f1 * score.support as f64)
+            .sum::<f64>()
+            / support_total as f64
+    };
+    let probe_rejection = if probes.is_empty() {
+        0.0
+    } else {
+        let rejected = probes
+            .iter()
+            .filter(|document| {
+                let (_, confidence) =
+                    best_of(&probabilities_for(&scorer, document, best_scale, &bins));
+                confidence < fit.accept
+            })
+            .count();
+        rejected as f64 / probes.len() as f64
+    };
     let held_out = HeldOut {
         rows: test_rows.len(),
-        decided,
+        decided: scored,
         correct,
         accuracy: correct as f64 / test_rows.len() as f64,
         brier: brier_for_documents(&scorer, &documents, best_scale, &bins),
@@ -1280,7 +1838,13 @@ fn score_held_out(
         operating_points: fit.operating_points,
         ece: ece_for_documents(&scorer, &documents, best_scale, &bins),
         entropy_temperatures: bins,
+        per_class,
+        macro_f1,
+        weighted_f1,
+        confusion: Confusion { labels, counts },
+        probe_rejection,
     };
+    report_held_out(progress, &held_out, scored);
     let report = CalibrationFit {
         static_validation_ece: static_ece,
         static_validation_coverage: static_coverage,
@@ -1295,6 +1859,136 @@ fn score_held_out(
     Some((held_out, report))
 }
 
+/// Prints the end-of-run report a reader uses to judge the model: the score,
+/// the per-class table, and where the classes were confused with each other.
+fn report_held_out(progress: &mut Progress<'_>, held_out: &HeldOut, scored: usize) {
+    let confusion = &held_out.confusion;
+    progress.line(String::new());
+    progress.line(format!(
+        "held-out  {} rows · {} scored · decided {} · correct {} · accuracy {:.4} · brier {:.4} · ece {:.4}",
+        held_out.rows,
+        scored,
+        held_out.decided,
+        held_out.correct,
+        held_out.accuracy,
+        held_out.brier,
+        held_out.ece
+    ));
+    progress.line(format!(
+        "          macro F1 {:.4} · weighted F1 {:.4} · scale {:.2} · accept {:.2} · probe rejection {:.0}%",
+        held_out.macro_f1,
+        held_out.weighted_f1,
+        held_out.scale,
+        held_out.accept,
+        held_out.probe_rejection * 100.0
+    ));
+    let scored_classes: Vec<&ClassScore> = held_out
+        .per_class
+        .iter()
+        .filter(|score| score.support > 0)
+        .collect();
+    progress.line(format!(
+        "          {:<34} {:>6} {:>6} {:>6} {:>7} {:>7} {:>6}",
+        "class", "rows", "said", "right", "prec", "recall", "f1"
+    ));
+    let mut ordered = scored_classes.clone();
+    ordered.sort_by(|left, right| {
+        right
+            .support
+            .cmp(&left.support)
+            .then(left.name.cmp(&right.name))
+    });
+    for score in &ordered {
+        progress.line(format!(
+            "          {:<34} {:>6} {:>6} {:>6} {:>7.3} {:>7.3} {:>6.3}",
+            truncate_name(&score.name, 34),
+            score.support,
+            score.decided,
+            score.correct,
+            score.precision,
+            score.recall,
+            score.f1
+        ));
+    }
+    let confusions = confusion.top_confusions(12);
+    if !confusions.is_empty() {
+        progress.line("          most confused:".to_string());
+        for (truth, said, count) in confusions {
+            progress.line(format!(
+                "            {:<30} → {:<30} {count}",
+                truncate_name(&truth, 30),
+                truncate_name(&said, 30)
+            ));
+        }
+    }
+    progress.line(render_confusion(confusion));
+}
+
+/// A count matrix with the classes as rows and the said classes as columns, so
+/// a systematic mistake reads off the diagonal instead of hiding in an average.
+fn render_confusion(confusion: &Confusion) -> String {
+    let width = confusion.width();
+    let mut used: Vec<usize> = Vec::new();
+    for column in 0..width {
+        let total: usize = (0..confusion.labels.len())
+            .map(|row| confusion.count(row, column))
+            .sum();
+        if total > 0 {
+            used.push(column);
+        }
+    }
+    let mut lines: Vec<String> = Vec::new();
+    let header: Vec<String> = used
+        .iter()
+        .map(|column| format!("{:>6}", column + 1))
+        .collect();
+    lines.push(format!(
+        "          confusion (rows = expected, 1..{} = prediction order, {} = silent)",
+        confusion.labels.len(),
+        width
+    ));
+    lines.push(format!("          {:<34}{}", "", header.join("")));
+    for row in 0..confusion.labels.len() {
+        let total: usize = used
+            .iter()
+            .map(|column| confusion.count(row, *column))
+            .sum();
+        if total == 0 {
+            continue;
+        }
+        let cells: Vec<String> = used
+            .iter()
+            .map(|column| format!("{:>6}", confusion.count(row, *column)))
+            .collect();
+        lines.push(format!(
+            "          {:<34}{}",
+            truncate_name(&confusion.labels[row], 34),
+            cells.join("")
+        ));
+    }
+    lines.push(format!(
+        "          legend: {}",
+        confusion
+            .labels
+            .iter()
+            .enumerate()
+            .map(|(index, name)| format!("{}={}", index + 1, truncate_name(name, 24)))
+            .collect::<Vec<String>>()
+            .join("  ")
+    ));
+    lines.join("\n")
+}
+
+fn truncate_name(name: &str, limit: usize) -> String {
+    if name.chars().count() <= limit {
+        return name.to_string();
+    }
+    name.chars()
+        .take(limit.saturating_sub(1))
+        .collect::<String>()
+        + "…"
+}
+
 /// The accept point and its trade, fitted under one temperature mapping.
 struct AcceptFit {
     accept: f64,
@@ -1305,6 +1999,7 @@ struct AcceptFit {
 fn fit_accept(
     scorer: &Scorer,
     calibration: &[(String, HashMap<String, f64>)],
+    probes: &[HashMap<String, f64>],
     scale: f64,
     bins: &[(f64, f64)],
 ) -> AcceptFit {
@@ -1312,6 +2007,7 @@ fn fit_accept(
     // floor, because a hand-picked 0.80 threw most correct answers away.
     const PRECISION_FLOOR: f64 = 0.75;
     let mut accept = 1.0f64;
+    let mut probing_accept = 1.0f64;
     let mut operating_points = Vec::new();
     for step in 1..=19 {
         let threshold = step as f64 * 0.05;
@@ -1344,7 +2040,32 @@ fn fit_accept(
         if precision >= PRECISION_FLOOR && accept == 1.0 {
             accept = threshold;
         }
+        // Out-of-scope prompts have no class to be right about, so they only
+        // ever raise this point: a threshold that answers them is too low.
+        if accept == 1.0 || probing_accept == 1.0 {
+            let rejected = probes
+                .iter()
+                .filter(|document| {
+                    let (_, confidence) =
+                        best_of(&probabilities_for(scorer, document, scale, bins));
+                    confidence < threshold
+                })
+                .count();
+            let rejection = if probes.is_empty() {
+                1.0
+            } else {
+                rejected as f64 / probes.len() as f64
+            };
+            if rejection >= PROBE_REJECTION_FLOOR && probing_accept == 1.0 {
+                probing_accept = threshold;
+            }
+        }
     }
+    let accept = if probes.is_empty() {
+        accept
+    } else {
+        accept.max(probing_accept)
+    };
     let mut accept_per_skill: Vec<(String, f64)> = Vec::new();
     for (class, name) in scorer.names.iter().enumerate() {
         let mut accept_for_class = 1.0f64;
@@ -1626,7 +2347,12 @@ mod tests {
                 provider: String::new(),
             })
             .collect();
-        let (train_rows, validation_rows, test_rows) = split_sourced(&rows, DEFAULT_SEED);
+        let (train_rows, validation_rows, test_rows) = split_sourced_with(
+            &rows,
+            DEFAULT_SEED,
+            crate::utility::lexical_experts::SplitRatios::default(),
+            false,
+        );
         assert_eq!(
             train_rows.len() + validation_rows.len() + test_rows.len(),
             rows.len(),
@@ -1643,6 +2369,175 @@ mod tests {
             );
             seen.push(&row.text);
         }
+    }
+
+    #[test]
+    fn stratified_split_keeps_a_rare_class_in_every_slice() {
+        // 60 rows over one dominant class and a class with exactly three rows:
+        // the unstratified split can put all three on one side of the fence.
+        let mut rows: Vec<SourcedRow> = (0..57)
+            .map(|index| SourcedRow {
+                text: format!("common title {index}"),
+                skill: Some("common".to_string()),
+                provider: String::new(),
+            })
+            .collect();
+        rows.extend((0..3).map(|index| SourcedRow {
+            text: format!("rare title {index}"),
+            skill: Some("rare".to_string()),
+            provider: String::new(),
+        }));
+        let (train_rows, validation_rows, test_rows) =
+            split_sourced_with(&rows, DEFAULT_SEED, SplitRatios::default(), true);
+        for (slice, name) in [
+            (&train_rows, "train"),
+            (&validation_rows, "validation"),
+            (&test_rows, "test"),
+        ] {
+            assert!(
+                slice.iter().any(|row| row.skill.as_deref() == Some("rare")),
+                "the rare class has no seat in {name}: the accept point and the \
+                 reported score are then fitted without it"
+            );
+        }
+    }
+
+    #[test]
+    fn held_out_reports_a_confusion_matrix_that_accounts_for_every_row() {
+        let samples = separable_rows();
+        let model = train(&samples).expect("model");
+        let held_out = model.held_out.as_ref().expect("held out");
+        let width = held_out.confusion.width();
+        assert_eq!(width, held_out.confusion.labels.len() + 1);
+        assert_eq!(
+            held_out.confusion.counts.len(),
+            width * width,
+            "the matrix is square over classes plus the silent column"
+        );
+        let total: usize = held_out.confusion.counts.iter().sum();
+        assert!(
+            total > 0,
+            "a scored held-out split must fill its own matrix"
+        );
+        let diagonal: usize = (0..held_out.confusion.labels.len())
+            .map(|class| held_out.confusion.count(class, class))
+            .sum();
+        assert_eq!(
+            diagonal, held_out.correct,
+            "the diagonal is the correct count and nothing else"
+        );
+        assert!(
+            held_out.macro_f1 > 0.0 && held_out.weighted_f1 > 0.0,
+            "both averages are reported: {} {}",
+            held_out.macro_f1,
+            held_out.weighted_f1
+        );
+    }
+
+    #[test]
+    fn probes_bound_the_accept_point_above_the_precision_floor() {
+        let corpus = separable_rows();
+        let sourced_rows: Vec<SourcedRow> = corpus
+            .iter()
+            .map(|(text, skill)| sourced_row(text, skill.as_deref()))
+            .collect();
+        let config = TrainConfig {
+            abstention_probes: true,
+            ..TrainConfig::default()
+        };
+        let (model, _) =
+            train_sourced_observed(&sourced_rows, None, None, config, &mut Progress::silent())
+                .expect("corpus trains");
+        let held_out = model.held_out.as_ref().expect("held out");
+        assert!(
+            held_out.probe_rejection >= PROBE_REJECTION_FLOOR,
+            "the accept point must reject the out-of-scope probes: {}",
+            held_out.probe_rejection
+        );
+        assert!(
+            held_out.decided > 0,
+            "rejecting probes must not turn into refusing the corpus: {} decided",
+            held_out.decided
+        );
+    }
+
+    #[test]
+    fn split_spec_parses_percentages_and_refuses_what_does_not_add_up() {
+        let ratios = SplitRatios::parse("70/15/15").expect("valid");
+        assert!((ratios.train - 0.70).abs() < 1e-9);
+        assert!((ratios.validation - 0.15).abs() < 1e-9);
+        assert!((ratios.test - 0.15).abs() < 1e-9);
+        assert!(SplitRatios::parse("70/20/20").is_none(), "sums to 110");
+        assert!(SplitRatios::parse("70/30").is_none(), "two slices");
+        assert!(
+            SplitRatios::parse("70/30/0").is_none(),
+            "an empty test split"
+        );
+    }
+
+    #[test]
+    fn training_reports_every_epoch_it_ran() {
+        let training_corpus = separable_rows();
+        let sourced_rows: Vec<SourcedRow> = training_corpus
+            .iter()
+            .map(|(text, skill)| sourced_row(text, skill.as_deref()))
+            .collect();
+        let mut trace: Vec<String> = Vec::new();
+        {
+            let mut sink = |line: &str| trace.push(line.to_string());
+            let mut progress = Progress::to(&mut sink);
+            let _ = train_sourced_observed(
+                &sourced_rows,
+                None,
+                None,
+                TrainConfig::default(),
+                &mut progress,
+            );
+        }
+        let epochs = trace.iter().filter(|line| line.contains("epoch ")).count();
+        assert!(
+            epochs >= 1,
+            "a run says which epoch it is on, and this trace has none: {trace:?}"
+        );
+        assert!(
+            trace.iter().any(|line| line.contains("held-out")),
+            "the run ends with its score: {trace:?}"
+        );
+        assert!(
+            trace.iter().any(|line| line.contains("confusion")),
+            "the run ends with the confusion matrix: {trace:?}"
+        );
+    }
+
+    #[test]
+    fn thin_classes_survive_the_label_noise_prune() {
+        // A fold that never sees the thin class contradicts it, so an unguarded
+        // prune deletes the class outright.
+        let mut rows: LabelledRows = separable_rows()
+            .into_iter()
+            .map(|(text, skill)| (text, skill.unwrap_or_default()))
+            .collect();
+        for index in 0..3 {
+            rows.push((
+                format!("quantum teleport handler sprocket {index}"),
+                "thin".to_string(),
+            ));
+        }
+        let mut trace: Vec<String> = Vec::new();
+        let (kept, _) = {
+            let mut sink = |line: &str| trace.push(line.to_string());
+            let mut progress = Progress::to(&mut sink);
+            prune_label_noise(&rows, Priors { vectors: None }, &mut progress)
+        };
+        assert_eq!(
+            kept.iter().filter(|(_, skill)| skill == "thin").count(),
+            3,
+            "every thin-class row is kept: {trace:?}"
+        );
+        assert!(
+            trace.iter().any(|line| line.contains("too thin to judge")),
+            "the run says how many rows the floor held back: {trace:?}"
+        );
     }
 
     #[test]
@@ -1737,7 +2632,12 @@ mod tests {
                 provider: "stackexchange:stackoverflow".to_string(),
             });
         }
-        let (train_rows, validation_rows, _) = split_sourced(&rows, DEFAULT_SEED);
+        let (train_rows, validation_rows, _) = split_sourced_with(
+            &rows,
+            DEFAULT_SEED,
+            crate::utility::lexical_experts::SplitRatios::default(),
+            false,
+        );
         let crates_train = train_rows.iter().any(|row| row.provider == CRATES_PROVIDER);
         assert!(crates_train, "the training slice still knows the provider");
         assert!(
@@ -1934,6 +2834,11 @@ mod tests {
                 operating_points: Vec::new(),
                 ece: 0.2,
                 entropy_temperatures: vec![(f64::MAX, 2.0)],
+                per_class: Vec::new(),
+                macro_f1: 0.0,
+                weighted_f1: 0.0,
+                confusion: Confusion::default(),
+                probe_rejection: 0.0,
             }),
             usable: true,
         };

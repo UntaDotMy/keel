@@ -2715,6 +2715,18 @@ pub fn handle_decision_tool(arguments: &Value) -> Result<String, String> {
                 .get("refresh")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
+            // why: the split and the probe floor change what a run measures, so
+            // a comparison names them instead of comparing two builds.
+            let split_spec = arguments
+                .get("split")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|spec| !spec.is_empty())
+                .map(str::to_string);
+            let quiet = arguments
+                .get("quiet")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
             let home = crate::runtime::resolve_claude_home("")
                 .map_err(|error| format!("resolve home: {error}"))?;
             // Rejected by measurement: the abstract corpus raised held-out accuracy
@@ -2781,6 +2793,10 @@ pub fn handle_decision_tool(arguments: &Value) -> Result<String, String> {
                 crate::utility::decision_benchmark::lexical_rows_to_fit(&rows, &|skill| {
                     crate::utility::skill_match::installed_skill_path(&home, skill).is_some()
                 });
+            // why: the eval corpora are fetched from the same pages, so a row can
+            // land in both; a benchmark scoring it would report memorization.
+            let (rows, dropped_eval_leak) =
+                crate::utility::decision_benchmark::drop_eval_rows(&rows, &home);
             // why: a class per installed skill, so a prompt for a skill keel owns
             // but never trained on can still be named by the head.
             let mut rows = rows;
@@ -2795,15 +2811,46 @@ pub fn handle_decision_tool(arguments: &Value) -> Result<String, String> {
             let started = std::time::Instant::now();
             let vectors = crate::utility::word_vectors::table_for(&home);
             let encoder = crate::utility::embedding::encoder_for(&home);
-            let (model, calibration_fit) =
-                crate::utility::lexical_experts::train_sourced_reported(
+            let ratios = match split_spec.as_deref() {
+                Some(spec) => crate::utility::lexical_experts::SplitRatios::parse(spec)
+                    .ok_or_else(|| {
+                        format!(
+                            "decision train-lexical: --split '{spec}' must be train/validation/test percentages summing to 100"
+                        )
+                    })?,
+                None => crate::utility::lexical_experts::SplitRatios::default(),
+            };
+            let phases: Vec<(String, u64)>;
+            let config = crate::utility::lexical_experts::TrainConfig {
+                ratios,
+                stratify: !arguments
+                    .get("no_stratify")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                abstention_probes: arguments
+                    .get("probes")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+            };
+            let (model, calibration_fit) = {
+                let mut progress = if quiet {
+                    crate::utility::lexical_experts::Progress::silent()
+                } else {
+                    crate::utility::lexical_experts::Progress::printing()
+                };
+                let trained = crate::utility::lexical_experts::train_sourced_observed(
                     &rows,
                     vectors.as_deref(),
                     encoder.as_deref(),
+                    config,
+                    &mut progress,
                 )
                 .ok_or_else(|| {
                     "decision train-lexical: the corpus carried no labelled rows".to_string()
                 })?;
+                phases = progress.phases();
+                trained
+            };
             let elapsed = started.elapsed();
             let artifact = crate::utility::lexical_experts::artifact_path(&home);
             crate::utility::lexical_experts::save(&artifact, &model)?;
@@ -2813,13 +2860,27 @@ pub fn handle_decision_tool(arguments: &Value) -> Result<String, String> {
                 "dropped_ambiguous": dropped_ambiguous,
                 "dropped_uninstalled": dropped_uninstalled,
                 "dropped_benchmark": dropped_benchmark,
+                "dropped_eval_leak": dropped_eval_leak,
                 "training_rows": model.training_rows,
                 "skills": model.skills,
                 "seeded_skills": seeded_skills,
                 "vector_rows": model.vector_rows,
                 "usable": model.usable,
+                "config": {
+                    "split": {
+                        "train": config.ratios.train,
+                        "validation": config.ratios.validation,
+                        "test": config.ratios.test,
+                    },
+                    "stratify": config.stratify,
+                    "abstention_probes": config.abstention_probes,
+                },
                 "held_out": model.held_out,
                 "calibration_fit": calibration_fit,
+                "phases": phases
+                    .iter()
+                    .map(|(name, millis)| serde_json::json!({ "phase": name, "ms": millis }))
+                    .collect::<Vec<_>>(),
                 "elapsed_ms": elapsed.as_millis() as u64,
                 "rows_per_second": rows.len() as f64 / elapsed.as_secs_f64().max(1e-6),
                 "class_balance": crate::utility::lexical_experts::class_balance_sourced(&rows),
@@ -3149,6 +3210,10 @@ pub fn run_decision_command(
             flag_set.bool_flag("refresh", false);
             flag_set.bool_flag("openalex", false);
             flag_set.string_flag("per-tag", "100");
+            flag_set.string_flag("split", "");
+            flag_set.bool_flag("no-stratify", false);
+            flag_set.bool_flag("probes", false);
+            flag_set.bool_flag("quiet", false);
             flag_set.string_flag("pages", "2");
         }
         other => {
@@ -3323,6 +3388,10 @@ pub fn run_decision_command(
             "per_tag": flag_set.string_value("per-tag").trim().parse::<u64>().unwrap_or(100),
             "pages": flag_set.string_value("pages").trim().parse::<u64>().unwrap_or(2),
             "refresh": flag_set.bool_value("refresh"),
+            "split": flag_set.string_value("split").trim().to_string(),
+            "no_stratify": flag_set.bool_value("no-stratify"),
+            "probes": flag_set.bool_value("probes"),
+            "quiet": flag_set.bool_value("quiet"),
             "openalex": flag_set.bool_value("openalex"),
         }),
         "conformal" => {

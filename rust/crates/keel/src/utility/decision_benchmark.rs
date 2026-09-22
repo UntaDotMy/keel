@@ -976,6 +976,67 @@ pub fn read_external_cache(path: &std::path::Path) -> Option<Vec<(String, Option
     (!cases.is_empty()).then_some(cases)
 }
 
+/// Every held-out evaluation text under this home: one file per site, plus the
+/// crates shell. A later fetch can pull the same text into the training cache,
+/// and a benchmark that scores a memorized row reports the memory, not the model.
+pub fn eval_corpus_texts(claude_home: &std::path::Path) -> Vec<String> {
+    let directory = crate::runtime::state_directory(claude_home).join("benchmarks");
+    let mut texts: Vec<String> = Vec::new();
+    let Ok(entries) = std::fs::read_dir(&directory) else {
+        return texts;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let is_external = name.starts_with("external-corpus-") || name == "crates-corpus.json";
+        if !is_external || !name.ends_with(".json") {
+            continue;
+        }
+        if let Some(cases) = read_external_cache(&entry.path()) {
+            texts.extend(cases.into_iter().map(|(text, _)| text));
+        }
+    }
+    texts
+}
+
+/// Drops training rows whose text is an evaluation row: the two are fetched from
+/// the same pages, so an overlap is a fetch artefact, and scoring a row the model
+/// was fitted on reports memory instead of generalization.
+pub fn drop_eval_rows(
+    rows: &[crate::utility::lexical_experts::SourcedRow],
+    claude_home: &std::path::Path,
+) -> (Vec<crate::utility::lexical_experts::SourcedRow>, usize) {
+    let held_out: std::collections::HashSet<String> = eval_corpus_texts(claude_home)
+        .into_iter()
+        .map(|text| normalize_text(&text))
+        .collect();
+    if held_out.is_empty() {
+        return (rows.to_vec(), 0);
+    }
+    let mut dropped = 0usize;
+    let kept = rows
+        .iter()
+        .filter(|row| {
+            if held_out.contains(&normalize_text(&row.text)) {
+                dropped += 1;
+                false
+            } else {
+                true
+            }
+        })
+        .cloned()
+        .collect();
+    (kept, dropped)
+}
+
+/// Case and punctuation collapse, so a title that differs only in formatting
+/// still reads as the same row.
+pub fn normalize_text(text: &str) -> String {
+    text.chars()
+        .filter(|character| character.is_alphanumeric())
+        .flat_map(|character| character.to_lowercase())
+        .collect()
+}
+
 pub fn read_sourced_cache(
     path: &std::path::Path,
 ) -> Option<Vec<crate::utility::lexical_experts::SourcedRow>> {
@@ -1543,6 +1604,49 @@ mod tests {
         assert!(fitted
             .iter()
             .all(|row| { row.text.trim() != HOST_BENCHMARK[0].0 || row.skill.is_none() }));
+    }
+
+    #[test]
+    fn training_rows_that_are_eval_rows_are_dropped() {
+        const DEBUGGING: &str = "systematic-debugging";
+        let home = std::env::temp_dir().join(format!("keel-eval-leak-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let benchmarks = crate::runtime::state_directory(&home).join("benchmarks");
+        std::fs::create_dir_all(&benchmarks).expect("benchmark dir");
+        let eval_rows = vec![
+            (
+                "How do I stop a long migration from locking the ledger?".to_string(),
+                Some("postgres-migration-safety".to_string()),
+            ),
+            (
+                "The retry handler never fires twice".to_string(),
+                Some(DEBUGGING.to_string()),
+            ),
+        ];
+        write_external_cache(
+            &benchmarks.join("external-corpus-softwareengineering.json"),
+            &eval_rows,
+        )
+        .expect("write eval cache");
+        let training_row = |text: &str, skill: &str| crate::utility::lexical_experts::SourcedRow {
+            text: text.to_string(),
+            skill: Some(skill.to_string()),
+            provider: "stackexchange".to_string(),
+        };
+        let rows = vec![
+            training_row(
+                "How do I stop a long migration from locking the ledger?",
+                "postgres-migration-safety",
+            ),
+            // Same row, different punctuation and case: still the eval row.
+            training_row("the retry handler never fires twice.", DEBUGGING),
+            training_row("a genuinely independent training row", DEBUGGING),
+        ];
+        let (kept, dropped) = drop_eval_rows(&rows, &home);
+        assert_eq!(dropped, 2, "both overlapping rows leave the corpus");
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].text, "a genuinely independent training row");
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]
