@@ -786,6 +786,44 @@ pub fn fetch_openalex_topic(
 
 pub const OPENALEX_USER_AGENT: &str = "keel-benchmark/0.1 (evaluation harness)";
 
+/// Rows per installed skill, built from that skill's own description. A prompt
+/// can only route to a class the head has, and most installed skills had none:
+/// the head emitted eleven classes for fifty-three installed skills, so a
+/// reviewer or git prompt could not be named by the trained tier at all. The
+/// seeds are keel's own text, tagged so a run shows how much of the corpus they
+/// are, and they never include the benchmark prompts.
+pub const SKILL_SEED_PROVIDER: &str = "keel-skill-seed";
+const SKILL_SEED_ROWS: usize = 40;
+
+pub fn skill_seed_rows(
+    catalog: &[crate::utility::skill_match::SkillCatalogEntry],
+) -> Vec<crate::utility::lexical_experts::SourcedRow> {
+    let mut rows = Vec::new();
+    for entry in catalog {
+        let mut texts: Vec<String> = Vec::new();
+        // why: the name is the strongest cue a skill owns, and it is two words
+        // joined by hyphens, which the tokenizer would otherwise see as one.
+        texts.push(entry.name.replace('-', " "));
+        for source in [&entry.description, &entry.when_to_use] {
+            for sentence in source.split(['.', '\n']) {
+                let sentence = sentence.trim();
+                if sentence.len() >= 24 {
+                    texts.push(sentence.to_string());
+                }
+            }
+        }
+        texts.truncate(SKILL_SEED_ROWS);
+        for text in texts {
+            rows.push(crate::utility::lexical_experts::SourcedRow {
+                text,
+                skill: Some(entry.name.clone()),
+                provider: SKILL_SEED_PROVIDER.to_string(),
+            });
+        }
+    }
+    rows
+}
+
 /// OpenAlex stores an abstract as word to positions. Rebuild it in position
 /// order, which is the only order that reproduces the sentence.
 fn abstract_from_inverted_index(index: &serde_json::Value) -> String {
@@ -1337,6 +1375,47 @@ fn truncate(text: &str, width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn skill_seeds_label_every_row_with_its_own_skill() {
+        let home = crate::runtime::resolve_claude_home("").expect("home");
+        let catalog = crate::utility::skill_match::load_skill_catalog_for_home(&home);
+        assert!(!catalog.is_empty(), "an installed corpus exists");
+        let rows = skill_seed_rows(&catalog);
+        assert!(!rows.is_empty(), "seeds exist");
+        let labelled: std::collections::HashSet<&str> =
+            rows.iter().filter_map(|row| row.skill.as_deref()).collect();
+        assert!(
+            labelled.len() >= catalog.len() * 3 / 4,
+            "seeds cover the catalogue: {} of {}",
+            labelled.len(),
+            catalog.len()
+        );
+        for row in &rows {
+            assert!(
+                row.skill.is_some(),
+                "a seed without a label teaches nothing: {}",
+                row.text
+            );
+            assert_eq!(row.provider, SKILL_SEED_PROVIDER);
+            assert!(!row.text.trim().is_empty(), "an empty seed teaches nothing");
+            assert!(
+                !HOST_BENCHMARK
+                    .iter()
+                    .any(|(prompt, _)| row.text.trim() == prompt.trim()),
+                "a benchmark prompt must never be a training row"
+            );
+        }
+        let biggest = rows
+            .iter()
+            .filter(|row| row.skill.as_deref() == Some(catalog[0].name.as_str()))
+            .count();
+        assert!(biggest <= SKILL_SEED_ROWS, "the per-skill cap holds");
+        assert!(
+            rows.iter().any(|row| row.text.len() >= 24),
+            "descriptions contribute sentence rows, not only names"
+        );
+    }
 
     #[test]
     fn abstract_inverted_index_rebuilds_in_position_order() {

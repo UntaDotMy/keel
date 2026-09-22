@@ -28,6 +28,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::proxy::token_meter::TokenMeter;
@@ -2241,10 +2242,47 @@ pub fn load_skill_terms(skills_dir: &Path) -> Vec<SkillTerms> {
     .terms
 }
 
+/// Every installed skill's own description, for the training seeds: a class per
+/// installed skill is what lets the head name a skill with no public corpus.
+pub fn load_skill_catalog_for_home(claude_home: &Path) -> Vec<SkillCatalogEntry> {
+    load_skill_corpus_for_home(claude_home).catalog
+}
+
 fn load_skill_corpus_for_home(claude_home: &Path) -> LoadedSkillCorpus {
     let skills_dir = skills_directory(claude_home);
-    load_skill_corpus(&skills_dir, Some(&skill_catalog_cache_path(claude_home)))
+    let cache_path = skill_catalog_cache_path(claude_home);
+    // why: the on-disk cache still costs a parse and an index build per prompt,
+    // and an edited skill changes the fingerprint exactly as it changes the file.
+    let fingerprint = skill_corpus_fingerprint(&skills_dir, &cache_path);
+    if let (Some(fingerprint), Ok(cache)) = (fingerprint.as_ref(), SKILL_CORPUS_CACHE.lock()) {
+        if let Some((cached, corpus)) = cache.as_ref() {
+            if cached == fingerprint {
+                return (**corpus).clone();
+            }
+        }
+    }
+    let corpus = load_skill_corpus(&skills_dir, Some(&cache_path));
+    if let (Some(fingerprint), Ok(mut cache)) = (fingerprint, SKILL_CORPUS_CACHE.lock()) {
+        *cache = Some((fingerprint, Arc::new(corpus.clone())));
+    }
+    corpus
 }
+
+/// The skills listing is the identity: the loader itself rewrites the on-disk
+/// cache, so a fingerprint that included that file's own timestamp would miss
+/// on every call.
+fn skill_corpus_fingerprint(skills_dir: &Path, cache_path: &Path) -> Option<String> {
+    let files = discover_skill_files(skills_dir)?;
+    let generation = skill_catalog_generation(&files);
+    Some(format!(
+        "{}::{generation}::{}",
+        skills_dir.display(),
+        cache_path.display()
+    ))
+}
+
+type SkillCorpusCache = Option<(String, Arc<LoadedSkillCorpus>)>;
+static SKILL_CORPUS_CACHE: LazyLock<Mutex<SkillCorpusCache>> = LazyLock::new(|| Mutex::new(None));
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct SkillCatalogCache {
@@ -2272,7 +2310,7 @@ struct SkillFileMetadata {
     modified_at_nanos: u128,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 struct LoadedSkillCorpus {
     terms: Vec<SkillTerms>,
     catalog: Vec<SkillCatalogEntry>,

@@ -2781,6 +2781,17 @@ pub fn handle_decision_tool(arguments: &Value) -> Result<String, String> {
                 crate::utility::decision_benchmark::lexical_rows_to_fit(&rows, &|skill| {
                     crate::utility::skill_match::installed_skill_path(&home, skill).is_some()
                 });
+            // why: a class per installed skill, so a prompt for a skill keel owns
+            // but never trained on can still be named by the head.
+            let mut rows = rows;
+            let catalog = crate::utility::skill_match::load_skill_catalog_for_home(&home);
+            let seeds = crate::utility::decision_benchmark::skill_seed_rows(&catalog);
+            let seeded_skills = seeds
+                .iter()
+                .filter_map(|row| row.skill.clone())
+                .collect::<std::collections::HashSet<_>>()
+                .len();
+            rows.extend(seeds);
             let started = std::time::Instant::now();
             let (model, calibration_fit) =
                 crate::utility::lexical_experts::train_sourced_reported(&rows).ok_or_else(|| {
@@ -2797,6 +2808,7 @@ pub fn handle_decision_tool(arguments: &Value) -> Result<String, String> {
                 "dropped_benchmark": dropped_benchmark,
                 "training_rows": model.training_rows,
                 "skills": model.skills,
+                "seeded_skills": seeded_skills,
                 "usable": model.usable,
                 "held_out": model.held_out,
                 "calibration_fit": calibration_fit,
