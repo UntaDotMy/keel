@@ -568,14 +568,22 @@ pub fn match_skill_for_prompt(claude_home: &Path, prompt: &str) -> Option<SkillM
 
 /// Curated confirmation for the J03 confidence gate: a sub-0.60 statistical
 /// winner still routes when the independent curated phrase tier names the
-/// same skill and no outcomes were ever recorded for it. Recorded failures
+/// same skill and that skill has never recorded a failure. Recorded failures
 /// always keep the gate shut: learned evidence beats phrase agreement.
 fn confirmed_by_curated_tier(prompt: &str, skill_name: &str, claude_home: &Path) -> bool {
     if curated_skill_for_prompt(prompt) != Some(skill_name) {
         return false;
     }
     let record = crate::utility::decision::load_skill_calibration(claude_home, skill_name);
-    record.skill_totals().0 == 0
+    if record.epoch < crate::utility::calibration::OUTCOME_SEMANTICS_EPOCH {
+        // Pre-epoch evidence counted a silence as a failure, so it carries no
+        // authority here either: the curated tier stands on its own.
+        return true;
+    }
+    // why: a successful record is not a reason to withhold confirmation. That
+    // read counted every use, so a 14-of-14 skill was treated as a failed one.
+    let (total, correct) = record.skill_totals();
+    total == correct
 }
 
 /// Resolve and record a cost-aware activation decision for an installed corpus.
@@ -4099,6 +4107,18 @@ mod tests {
             &home
         ));
         let _ = fs::remove_dir_all(&home);
+        // A used-and-correct skill keeps its confirmation: only failures shut it.
+        const PROVEN: &str = "reviewer";
+        let proven = home_with_skills("confirm-proven", &[(PROVEN, "review code diffs")]);
+        for _ in 0..6 {
+            crate::utility::decision::record_and_save_skill_calibration(&proven, PROVEN, 0.8, true)
+                .expect("record calibration");
+        }
+        assert!(
+            confirmed_by_curated_tier("please review this diff", PROVEN, &proven),
+            "six correct outcomes must not read as a poisoned record"
+        );
+        let _ = fs::remove_dir_all(&proven);
     }
 
     #[test]
