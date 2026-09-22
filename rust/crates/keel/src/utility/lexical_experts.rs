@@ -583,6 +583,10 @@ fn fit(rows: &LabelledRows, validation_rows: &LabelledRows) -> Option<Fitted> {
                     .partial_cmp(&left.1.abs())
                     .unwrap_or(std::cmp::Ordering::Equal)
             });
+            // why: a weight for every feature a class ever saw is millions of
+            // near-zero numbers the router would parse on every prompt.
+            terms.retain(|(_, weight)| weight.abs() >= MIN_TERM_WEIGHT);
+            terms.truncate(MAX_TERMS_PER_EXPERT);
             LexicalExpert {
                 name: name.clone(),
                 bias: biases[class],
@@ -594,6 +598,27 @@ fn fit(rows: &LabelledRows, validation_rows: &LabelledRows) -> Option<Fitted> {
         experts,
         idf: idf_pairs,
     })
+}
+
+/// A term whose weight cannot move a decision past a thousandth is weight the
+/// router pays to parse on every prompt.
+pub const MIN_TERM_WEIGHT: f64 = 1e-3;
+/// Cap per expert, so one huge vocabulary cannot inflate the artifact without
+/// bound. The retained terms are the largest by absolute weight.
+pub const MAX_TERMS_PER_EXPERT: usize = 20_000;
+
+/// Shrink an already fitted model in place. Returns the number of terms kept,
+/// which the training header reports next to the artifact size.
+pub fn prune_terms(model: &mut LexicalModel) -> usize {
+    let mut kept = 0usize;
+    for expert in &mut model.experts {
+        expert
+            .terms
+            .retain(|(_, weight)| weight.abs() >= MIN_TERM_WEIGHT);
+        expert.terms.truncate(MAX_TERMS_PER_EXPERT);
+        kept += expert.terms.len();
+    }
+    kept
 }
 
 fn dot(weights: &HashMap<String, f64>, document: &HashMap<String, f64>) -> f64 {
@@ -740,28 +765,116 @@ pub fn predict(model: &LexicalModel, prompt: &str) -> Option<(String, f64)> {
 /// Every class probability, highest first. Empty when the prompt shares no
 /// feature with the training rows.
 pub fn rank(model: &LexicalModel, prompt: &str) -> Option<Vec<(String, f64)>> {
-    let (scale, bins) = match model.held_out.as_ref() {
-        Some(metrics) => (metrics.scale, metrics.entropy_temperatures.as_slice()),
-        None => (1.0, &[] as &[(f64, f64)]),
-    };
-    let scorer = Scorer::new(model);
-    let document = scorer.vectorize(prompt);
-    if document.is_empty() {
-        return None;
+    Head::from_model(model).rank(prompt)
+}
+
+/// A model plus everything the router needs to score a prompt: the fitted
+/// temperature, the entropy bins, the accept point, and the feature-major index
+/// that scoring reads.
+pub struct Head {
+    scorer: Scorer,
+    scale: f64,
+    bins: Vec<(f64, f64)>,
+    accept: f64,
+}
+
+impl Head {
+    fn from_model(model: &LexicalModel) -> Self {
+        let (scale, bins, accept) = match model.held_out.as_ref() {
+            Some(metrics) => (
+                metrics.scale,
+                metrics.entropy_temperatures.clone(),
+                metrics.accept,
+            ),
+            None => (1.0, Vec::new(), 1.0),
+        };
+        Self {
+            scorer: Scorer::new(model),
+            scale,
+            bins,
+            accept,
+        }
     }
-    let mut ranked: Vec<(String, f64)> = scorer
-        .names
-        .iter()
-        .cloned()
-        .zip(probabilities_for(&scorer, &document, scale, bins))
-        .collect();
-    ranked.sort_by(|left, right| {
-        right
-            .1
-            .partial_cmp(&left.1)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    Some(ranked)
+
+    /// Every class probability, highest first, or `None` when the prompt shares
+    /// no feature with the training rows.
+    pub fn rank(&self, prompt: &str) -> Option<Vec<(String, f64)>> {
+        let document = self.scorer.vectorize(prompt);
+        if document.is_empty() {
+            return None;
+        }
+        let mut ranked: Vec<(String, f64)> = self
+            .scorer
+            .names
+            .iter()
+            .cloned()
+            .zip(probabilities_for(
+                &self.scorer,
+                &document,
+                self.scale,
+                &self.bins,
+            ))
+            .collect();
+        ranked.sort_by(|left, right| {
+            right
+                .1
+                .partial_cmp(&left.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        Some(ranked)
+    }
+
+    /// Lowest confidence that held the precision floor on the training split.
+    pub fn accept(&self) -> f64 {
+        self.accept
+    }
+}
+
+/// The router consults the head on every prompt. Parsing the artifact and
+/// building the feature-major index costs more than the scoring does, and the
+/// file only changes when a training run writes it, so the built head is cached
+/// under the file's own fingerprint: same file, same head.
+type HeadCache = Option<(String, std::sync::Arc<Head>)>;
+static HEAD_CACHE: std::sync::LazyLock<std::sync::Mutex<HeadCache>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
+
+/// The cached head for an artifact path, rebuilt when the file changes. `None`
+/// means no usable artifact, which reads as "no learned evidence" upstream.
+pub fn head(path: &Path) -> Option<std::sync::Arc<Head>> {
+    let fingerprint = head_fingerprint(path)?;
+    if let Ok(cache) = HEAD_CACHE.lock() {
+        if let Some((cached, head)) = cache.as_ref() {
+            if cached == &fingerprint {
+                return Some(std::sync::Arc::clone(head));
+            }
+        }
+    }
+    let model = load(path)?;
+    let head = std::sync::Arc::new(Head::from_model(&model));
+    if let Ok(mut cache) = HEAD_CACHE.lock() {
+        *cache = Some((fingerprint, std::sync::Arc::clone(&head)));
+    }
+    Some(head)
+}
+
+/// The file's identity: path, length, modification time. A fingerprint without
+/// a timestamp is weaker but still usable, so an unavailable mtime is zero
+/// rather than a reason to stop serving the head.
+fn head_fingerprint(path: &Path) -> Option<String> {
+    // why: an unreadable path is the absence of a head, not an error to report.
+    let metadata = std::fs::metadata(path).ok()?;
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0);
+    Some(format!(
+        "{}:{}:{}",
+        path.display(),
+        metadata.len(),
+        modified
+    ))
 }
 
 /// Highest class that is a real keel skill and still clears the accept point.
@@ -1444,6 +1557,70 @@ mod tests {
         );
         let model = train_sourced(&rows).expect("sourced corpus trains");
         assert!(model.held_out.is_some());
+    }
+
+    #[test]
+    fn prune_terms_drops_weights_that_cannot_move_a_decision() {
+        let mut model = train(&separable_rows()).expect("model");
+        for (index, expert) in model.experts.iter_mut().enumerate() {
+            expert
+                .terms
+                .push((format!("noise{index}"), MIN_TERM_WEIGHT / 100.0));
+            expert
+                .terms
+                .push((format!("signal{index}"), MIN_TERM_WEIGHT * 100.0));
+        }
+        let before: usize = model.experts.iter().map(|expert| expert.terms.len()).sum();
+        let kept = prune_terms(&mut model);
+        assert_eq!(
+            kept,
+            before - model.experts.len(),
+            "one noise term each goes"
+        );
+        assert!(
+            model.experts.iter().all(|expert| expert
+                .terms
+                .iter()
+                .all(|(term, _)| !term.starts_with("noise"))),
+            "a weight below the floor does not survive"
+        );
+        assert!(
+            model.experts.iter().all(|expert| expert
+                .terms
+                .iter()
+                .any(|(term, _)| term.starts_with("signal"))),
+            "a weight above the floor does"
+        );
+    }
+
+    #[test]
+    fn head_is_cached_per_artifact_version() {
+        let dir = std::env::temp_dir().join(format!("keel-head-{}", std::process::id()));
+        let path = dir.join("lexical-experts.json");
+        let model = train(&separable_rows()).expect("model");
+        save(&path, &model).unwrap();
+        let first = head(&path).expect("head");
+        let second = head(&path).expect("head");
+        assert!(
+            std::sync::Arc::ptr_eq(&first, &second),
+            "an unchanged artifact is parsed once"
+        );
+        let (name, _) = first
+            .rank("postgres autovacuum bloat")
+            .expect("ranks")
+            .into_iter()
+            .next()
+            .expect("a class");
+        assert_eq!(name, "postgres", "the cached head still scores");
+        let mut changed = model;
+        changed.usable = false;
+        save(&path, &changed).unwrap();
+        assert!(
+            head(&path).is_none(),
+            "a rewritten artifact is rebuilt, and an unusable one reads as absent"
+        );
+        assert!(head(&dir.join("absent.json")).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

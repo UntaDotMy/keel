@@ -2717,6 +2717,12 @@ pub fn handle_decision_tool(arguments: &Value) -> Result<String, String> {
                 .unwrap_or(false);
             let home = crate::runtime::resolve_claude_home("")
                 .map_err(|error| format!("resolve home: {error}"))?;
+            // Rejected by measurement: the abstract corpus raised held-out accuracy
+            // 0.7244 to 0.8026 while the design corpus fell 23/125 to 15/125.
+            let with_prose = arguments
+                .get("openalex")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
             let corpus = crate::utility::decision_benchmark::training_cache_path(&home);
             let cached = if refresh {
                 None
@@ -2729,7 +2735,7 @@ pub fn handle_decision_tool(arguments: &Value) -> Result<String, String> {
                     // why: every corpus trains, so no class is left with zero
                     // evidence; each site's page one stays held out for scoring.
                     let mut fetched = crate::utility::decision_benchmark::fetch_all_corpora(
-                        per_tag, pages,
+                        per_tag, pages, with_prose,
                     )
                     .map_err(|error| format!("decision train-lexical: {error}"))?;
                     // why: rows already fetched stay in the corpus even when a
@@ -3121,6 +3127,7 @@ pub fn run_decision_command(
         }
         "train-lexical" => {
             flag_set.bool_flag("refresh", false);
+            flag_set.bool_flag("openalex", false);
             flag_set.string_flag("per-tag", "100");
             flag_set.string_flag("pages", "2");
         }
@@ -3296,6 +3303,7 @@ pub fn run_decision_command(
             "per_tag": flag_set.string_value("per-tag").trim().parse::<u64>().unwrap_or(100),
             "pages": flag_set.string_value("pages").trim().parse::<u64>().unwrap_or(2),
             "refresh": flag_set.bool_value("refresh"),
+            "openalex": flag_set.bool_value("openalex"),
         }),
         "conformal" => {
             let conf = flag_set

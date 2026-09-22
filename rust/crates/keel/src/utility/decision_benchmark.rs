@@ -624,6 +624,7 @@ pub fn crates_cache_path(claude_home: &std::path::Path) -> std::path::PathBuf {
 pub fn fetch_all_corpora(
     per_tag: usize,
     pages: usize,
+    with_prose: bool,
 ) -> Result<Vec<crate::utility::lexical_experts::SourcedRow>, String> {
     let mut rows = Vec::new();
     let mut failures: Vec<String> = Vec::new();
@@ -655,10 +656,175 @@ pub fn fetch_all_corpora(
             Err(error) => failures.push(format!("crates page {page}: {error}")),
         }
     }
+    // why: the only provider whose rows read like host prompts, and opt-in
+    // because it lost on both product corpora when it trained by default.
+    if with_prose {
+        for (topic, skill) in OPENALEX_TOPICS {
+            match fetch_openalex_topic(topic, OPENALEX_PAGES) {
+                Ok(fetched) => {
+                    let provider = format!("{OPENALEX_PROVIDER_PREFIX}{topic}");
+                    rows.extend(fetched.into_iter().map(|(text, _)| {
+                        crate::utility::lexical_experts::SourcedRow {
+                            text,
+                            skill: Some((*skill).to_string()),
+                            provider: provider.clone(),
+                        }
+                    }));
+                }
+                Err(error) => failures.push(format!("openalex {topic}: {error}")),
+            }
+        }
+    }
     if rows.is_empty() {
         return Err(failures.join("; "));
     }
     Ok(rows)
+}
+
+/// OpenAlex topic id to the installed skill that owns that research domain.
+/// The rule is the same as the tag maps: a public vocabulary names the domain
+/// and the skill owns the domain, so the label is the community's, not keel's.
+/// Only names that state one domain are listed; a topic naming two skills at
+/// once would teach the head a decision keel does not have.
+const OA_SECURITY: &str = "adversarial-security-review";
+const OA_AUTH: &str = "authentication-and-identity";
+const OA_BACKEND: &str = "backend-and-data-architecture";
+const OA_CLOUD: &str = "cloud-and-devops-expert";
+const OA_ML: &str = "data-and-ml-engineering";
+pub const OPENALEX_TOPICS: &[(&str, &str)] = &[
+    ("T10237", OA_SECURITY),
+    ("T10734", OA_SECURITY),
+    ("T10400", OA_SECURITY),
+    ("T11800", OA_AUTH),
+    ("T11504", OA_AUTH),
+    ("T10317", OA_BACKEND),
+    ("T11106", OA_BACKEND),
+    ("T10772", OA_CLOUD),
+    ("T10101", OA_CLOUD),
+    ("T12127", "observability-and-incident-response"),
+    ("T13373", OA_ML),
+    ("T11689", OA_ML),
+    ("T10470", "ui-design-systems-and-responsive-interfaces"),
+    ("T10743", "systematic-debugging"),
+];
+
+pub const OPENALEX_PROVIDER_PREFIX: &str = "openalex:";
+/// Pages per topic at two hundred works a page. Enough prose to change the
+/// feature vocabulary without burying the title and blurb providers.
+const OPENALEX_PAGES: usize = 5;
+const OPENALEX_ENDPOINT: &str = "https://api.openalex.org/works";
+const OPENALEX_PAGE_SIZE: usize = 200;
+/// Abstract words kept per row. A whole abstract would drown the title.
+const OPENALEX_TEXT_CHARS: usize = 600;
+
+/// One topic's works, newest first, as `title plus abstract` rows. OpenAlex is
+/// open, needs no key, and answers a cursor page at a time; the polite pool
+/// header identifies the caller.
+pub fn fetch_openalex_topic(
+    topic: &str,
+    pages: usize,
+) -> Result<Vec<(String, Option<String>)>, String> {
+    let mut rows = Vec::new();
+    let mut cursor = "*".to_string();
+    for _ in 0..pages {
+        let url = format!(
+            "{OPENALEX_ENDPOINT}?filter=primary_topic.id:{topic}&per-page={OPENALEX_PAGE_SIZE}&cursor={cursor}\
+             &select=title,abstract_inverted_index,publication_year"
+        );
+        let output = Command::new("curl")
+            .args([
+                "-s",
+                "--compressed",
+                "--max-time",
+                EXTERNAL_TIMEOUT_SECS,
+                "-A",
+                OPENALEX_USER_AGENT,
+                &url,
+            ])
+            .output()
+            .map_err(|error| format!("curl failed: {error}"))?;
+        if !output.status.success() {
+            return Err("curl failed".to_string());
+        }
+        let parsed: serde_json::Value = serde_json::from_slice(&output.stdout)
+            .map_err(|error| format!("unreadable response: {error}"))?;
+        let results = parsed
+            .get("results")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| "no results array".to_string())?;
+        for work in results {
+            let title = work
+                .get("title")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .unwrap_or_default();
+            let abstract_text = work
+                .get("abstract_inverted_index")
+                .map(abstract_from_inverted_index)
+                .unwrap_or_default();
+            let composed = compose_abstract_row(title, &abstract_text);
+            if !composed.is_empty() {
+                rows.push((composed, None));
+            }
+        }
+        let next = parsed
+            .get("meta")
+            .and_then(|meta| meta.get("next_cursor"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        if next.is_empty() {
+            break;
+        }
+        cursor = next;
+    }
+    if rows.is_empty() {
+        return Err("returned no works".to_string());
+    }
+    Ok(rows)
+}
+
+pub const OPENALEX_USER_AGENT: &str = "keel-benchmark/0.1 (evaluation harness)";
+
+/// OpenAlex stores an abstract as word to positions. Rebuild it in position
+/// order, which is the only order that reproduces the sentence.
+fn abstract_from_inverted_index(index: &serde_json::Value) -> String {
+    let mut positioned: Vec<(u64, &str)> = Vec::new();
+    for (word, positions) in index.as_object().into_iter().flatten() {
+        for position in positions.as_array().into_iter().flatten() {
+            if let Some(position) = position.as_u64() {
+                positioned.push((position, word.as_str()));
+            }
+        }
+    }
+    positioned.sort_by_key(|(position, _)| *position);
+    let text: Vec<&str> = positioned.into_iter().map(|(_, word)| word).collect();
+    text.join(" ")
+}
+
+/// A row is the title plus as much abstract as the cap allows, cut at a word.
+fn compose_abstract_row(title: &str, abstract_text: &str) -> String {
+    let mut composed = String::with_capacity(title.len() + OPENALEX_TEXT_CHARS);
+    composed.push_str(title.trim());
+    if abstract_text.is_empty() {
+        return composed;
+    }
+    composed.push(' ');
+    let remaining = OPENALEX_TEXT_CHARS.saturating_sub(composed.len());
+    if abstract_text.len() <= remaining {
+        composed.push_str(abstract_text);
+        return composed;
+    }
+    // why: cutting mid-word teaches the tokenizer a word that does not exist.
+    let cut = abstract_text
+        .char_indices()
+        .take_while(|(index, _)| *index < remaining)
+        .filter(|(_, character)| character.is_whitespace())
+        .map(|(index, _)| index)
+        .last()
+        .unwrap_or(0);
+    composed.push_str(&abstract_text[..cut]);
+    composed
 }
 
 /// Descriptions from the crates.io training pages, used to attribute an old
@@ -1171,6 +1337,73 @@ fn truncate(text: &str, width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn abstract_inverted_index_rebuilds_in_position_order() {
+        let index = serde_json::json!({
+            "consistency": [3],
+            "Distributed": [0],
+            "systems": [1],
+            "trade": [2],
+            "off": [4],
+            "and": [5],
+            "latency.": [6],
+        });
+        assert_eq!(
+            abstract_from_inverted_index(&index),
+            "Distributed systems trade consistency off and latency."
+        );
+        assert_eq!(
+            abstract_from_inverted_index(&serde_json::json!({})),
+            "",
+            "an abstract the record does not carry is empty, never guessed"
+        );
+    }
+
+    #[test]
+    fn abstract_rows_keep_the_title_and_cut_on_a_word() {
+        let abstract_text = "word ".repeat(400);
+        let composed = compose_abstract_row("A title", &abstract_text);
+        assert!(composed.starts_with("A title "), "{composed}");
+        assert!(
+            composed.len() <= OPENALEX_TEXT_CHARS,
+            "row stays inside the cap: {}",
+            composed.len()
+        );
+        assert!(
+            !composed.ends_with("wor"),
+            "the cut lands on a word boundary: {composed}"
+        );
+        assert_eq!(
+            compose_abstract_row("Only a title", ""),
+            "Only a title",
+            "a work with no abstract keeps its title"
+        );
+    }
+
+    #[test]
+    fn openalex_topic_map_names_one_domain_each() {
+        let mut topics: Vec<&str> = Vec::new();
+        for (topic, skill) in OPENALEX_TOPICS {
+            assert!(
+                topic.starts_with('T') && topic.len() > 1,
+                "{topic} is not a topic id"
+            );
+            assert!(!skill.is_empty(), "{topic} maps to nothing");
+            assert!(!topics.contains(topic), "{topic} appears twice");
+            topics.push(topic);
+        }
+        assert!(
+            topics.len() >= 10,
+            "breadth is the point of a second prose provider"
+        );
+        assert!(
+            OPENALEX_TOPICS
+                .iter()
+                .all(|(_, skill)| *skill != "rust" && !skill.is_empty()),
+            "every label is an installed skill, never a phantom one"
+        );
+    }
 
     #[test]
     fn host_benchmark_is_disjoint_from_the_training_cache() {

@@ -600,12 +600,14 @@ pub fn match_skill_for_prompt_with_details(
     ) -> Option<SkillSelectionDecision> {
         // The learned expert is the only evidence trained on real phrasing, so it
         // speaks only where the term model and the curated tier fall silent.
+        // why: the head is cached per artifact version; parsing and indexing it
+        // per prompt was the router's dominant cost.
         let verdict = || -> Option<(String, f64)> {
-            let model = crate::utility::lexical_experts::load(
+            let head = crate::utility::lexical_experts::head(
                 &crate::utility::lexical_experts::artifact_path(claude_home),
             )?;
-            let accept = crate::utility::lexical_experts::accept_threshold(&model);
-            let ranked = crate::utility::lexical_experts::rank(&model, prompt)?;
+            let accept = head.accept();
+            let ranked = head.rank(prompt)?;
             let (name, confidence) =
                 crate::utility::lexical_experts::select_installed(&ranked, accept, &|name| {
                     resolve_skill_path(claude_home, name).is_some_and(|path| path.is_file())
