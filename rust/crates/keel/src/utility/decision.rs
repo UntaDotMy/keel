@@ -2776,9 +2776,10 @@ pub fn handle_decision_tool(arguments: &Value) -> Result<String, String> {
                     crate::utility::skill_match::installed_skill_path(&home, skill).is_some()
                 });
             let started = std::time::Instant::now();
-            let model = crate::utility::lexical_experts::train_sourced(&rows).ok_or_else(|| {
-                "decision train-lexical: the corpus carried no labelled rows".to_string()
-            })?;
+            let (model, calibration_fit) =
+                crate::utility::lexical_experts::train_sourced_reported(&rows).ok_or_else(|| {
+                    "decision train-lexical: the corpus carried no labelled rows".to_string()
+                })?;
             let elapsed = started.elapsed();
             let artifact = crate::utility::lexical_experts::artifact_path(&home);
             crate::utility::lexical_experts::save(&artifact, &model)?;
@@ -2792,6 +2793,7 @@ pub fn handle_decision_tool(arguments: &Value) -> Result<String, String> {
                 "skills": model.skills,
                 "usable": model.usable,
                 "held_out": model.held_out,
+                "calibration_fit": calibration_fit,
                 "elapsed_ms": elapsed.as_millis() as u64,
                 "rows_per_second": rows.len() as f64 / elapsed.as_secs_f64().max(1e-6),
                 "class_balance": crate::utility::lexical_experts::class_balance_sourced(&rows),

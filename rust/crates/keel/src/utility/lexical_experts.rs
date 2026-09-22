@@ -64,8 +64,29 @@ pub struct HeldOut {
     pub accept_per_skill: Vec<(String, f64)>,
     /// The trade the accept point was chosen from, so the choice is inspectable.
     pub operating_points: Vec<OperatingPoint>,
+    /// Test ECE under the shipped mapping. Older artifacts predate the field.
+    #[serde(default)]
+    pub ece: f64,
+    /// Entropy-bin upper edges with fitted temperatures, ascending. Empty
+    /// means the global scale alone, so older artifacts behave as before.
+    #[serde(default)]
+    pub entropy_temperatures: Vec<(f64, f64)>,
 }
 
+/// Static-vs-adaptive fit report, printed by the training run so the keep
+/// decision is inspectable. Selection reads validation; test only reports.
+#[derive(Clone, Default, Serialize)]
+pub struct CalibrationFit {
+    pub static_validation_ece: f64,
+    pub static_validation_coverage: f64,
+    pub adaptive_validation_ece: f64,
+    pub adaptive_validation_coverage: f64,
+    pub static_test_brier: f64,
+    pub static_test_ece: f64,
+    pub adaptive_test_brier: f64,
+    pub adaptive_test_ece: f64,
+    pub kept_adaptive: bool,
+}
 #[derive(Clone, Serialize, Deserialize)]
 pub struct OperatingPoint {
     pub threshold: f64,
@@ -162,6 +183,12 @@ pub fn train(rows: &RawRows) -> Option<LexicalModel> {
 
 /// Train from rows that name their provider.
 pub fn train_sourced(rows: &[SourcedRow]) -> Option<LexicalModel> {
+    train_sourced_reported(rows).map(|(model, _)| model)
+}
+
+/// Train and report the calibration fit, so the run output shows the keep
+/// decision instead of only the mapping that won.
+pub fn train_sourced_reported(rows: &[SourcedRow]) -> Option<(LexicalModel, CalibrationFit)> {
     let (train_rows, validation_rows, test_rows) = split_sourced(rows, DEFAULT_SEED);
     // Rejected: masking crates boilerplate on this slice moved held-out
     // accuracy 0.7386 → 0.7285 and Brier 0.1380 → 0.1428 (accept 0.25 → 0.35).
@@ -172,20 +199,26 @@ pub fn train_sourced(rows: &[SourcedRow]) -> Option<LexicalModel> {
     // model confidently contradicts lifted held-out accuracy in measurement.
     let (train_rows, _) = prune_label_noise(&train_pairs);
     let fitted = fit(&train_rows, &validation_pairs)?;
-    let held_out = score_held_out(&fitted, &validation_pairs, &test_pairs);
+    let (held_out, report) = match score_held_out(&fitted, &validation_pairs, &test_pairs) {
+        Some(scored) => (Some(scored.0), scored.1),
+        None => (None, CalibrationFit::default()),
+    };
     let usable = rows.len() >= REFUSE_BELOW_ROWS
         && held_out
             .as_ref()
             .is_some_and(|metrics| metrics.accuracy >= REFUSE_BELOW_ACCURACY);
-    Some(LexicalModel {
-        schema: LEXICAL_SCHEMA,
-        training_rows: train_rows.len(),
-        skills: fitted.experts.len(),
-        experts: fitted.experts,
-        idf: fitted.idf,
-        held_out,
-        usable,
-    })
+    Some((
+        LexicalModel {
+            schema: LEXICAL_SCHEMA,
+            training_rows: train_rows.len(),
+            skills: fitted.experts.len(),
+            experts: fitted.experts,
+            idf: fitted.idf,
+            held_out,
+            usable,
+        },
+        report,
+    ))
 }
 
 /// A question carrying two mapped tags appears under both classes, which teaches
@@ -646,6 +679,58 @@ fn best_of(probabilities: &[f64]) -> (usize, f64) {
         .unwrap_or((0, 0.0))
 }
 
+/// Shannon entropy in nats. High entropy means the head is spread thin.
+fn entropy(probabilities: &[f64]) -> f64 {
+    probabilities
+        .iter()
+        .filter(|probability| **probability > 0.0)
+        .map(|probability| -probability * probability.ln())
+        .sum()
+}
+
+/// Temperature applied after softmax: sharpen or soften without refitting.
+/// A bad temperature reads as no change, never as a wrong probability.
+fn rescale(probabilities: &[f64], temperature: f64) -> Vec<f64> {
+    if !temperature.is_finite() || temperature <= 0.0 {
+        return probabilities.to_vec();
+    }
+    let powered: Vec<f64> = probabilities
+        .iter()
+        .map(|probability| probability.powf(1.0 / temperature))
+        .collect();
+    let total: f64 = powered.iter().sum();
+    if !total.is_finite() || total <= 0.0 {
+        return probabilities.to_vec();
+    }
+    powered.into_iter().map(|value| value / total).collect()
+}
+
+/// The fitted temperature for this entropy, or 1.0 when no bin claims it.
+fn entropy_temperature(entropy: f64, bins: &[(f64, f64)]) -> f64 {
+    if !entropy.is_finite() {
+        return 1.0;
+    }
+    bins.iter()
+        .find(|(edge, _)| entropy <= *edge)
+        .map(|(_, temperature)| *temperature)
+        .unwrap_or(1.0)
+}
+
+/// Static probabilities when no bins are fitted, adaptive ones otherwise.
+fn probabilities_for(
+    scorer: &Scorer,
+    document: &HashMap<String, f64>,
+    scale: f64,
+    bins: &[(f64, f64)],
+) -> Vec<f64> {
+    let probabilities = scorer.probabilities(document, scale);
+    if bins.is_empty() {
+        return probabilities;
+    }
+    let temperature = entropy_temperature(entropy(&probabilities), bins);
+    rescale(&probabilities, temperature)
+}
+
 /// Best skill and its temperature-calibrated confidence. `None` when the prompt
 /// shares no feature with the training rows: silence beats a coin flip.
 pub fn predict(model: &LexicalModel, prompt: &str) -> Option<(String, f64)> {
@@ -655,11 +740,10 @@ pub fn predict(model: &LexicalModel, prompt: &str) -> Option<(String, f64)> {
 /// Every class probability, highest first. Empty when the prompt shares no
 /// feature with the training rows.
 pub fn rank(model: &LexicalModel, prompt: &str) -> Option<Vec<(String, f64)>> {
-    let scale = model
-        .held_out
-        .as_ref()
-        .map(|metrics| metrics.scale)
-        .unwrap_or(1.0);
+    let (scale, bins) = match model.held_out.as_ref() {
+        Some(metrics) => (metrics.scale, metrics.entropy_temperatures.as_slice()),
+        None => (1.0, &[] as &[(f64, f64)]),
+    };
     let scorer = Scorer::new(model);
     let document = scorer.vectorize(prompt);
     if document.is_empty() {
@@ -669,7 +753,7 @@ pub fn rank(model: &LexicalModel, prompt: &str) -> Option<Vec<(String, f64)>> {
         .names
         .iter()
         .cloned()
-        .zip(scorer.probabilities(&document, scale))
+        .zip(probabilities_for(&scorer, &document, scale, bins))
         .collect();
     ranked.sort_by(|left, right| {
         right
@@ -813,7 +897,7 @@ fn score_held_out(
     fitted: &Fitted,
     calibration_rows: &LabelledRows,
     test_rows: &LabelledRows,
-) -> Option<HeldOut> {
+) -> Option<(HeldOut, CalibrationFit)> {
     if test_rows.is_empty() {
         return None;
     }
@@ -839,41 +923,100 @@ fn score_held_out(
     if calibration.iter().any(|(_, document)| !document.is_empty()) {
         for step in 1..=40 {
             let scale = step as f64 * 0.05;
-            let brier = brier_for_documents(&scorer, &calibration, scale);
+            let brier = brier_for_documents(&scorer, &calibration, scale, &[]);
             if brier < best_brier {
                 best_scale = scale;
                 best_brier = brier;
             }
         }
     }
+    let candidate = fit_entropy_temperatures(&scorer, &calibration, best_scale);
+    let static_fit = fit_accept(&scorer, &calibration, best_scale, &[]);
+    let adaptive_fit = fit_accept(&scorer, &calibration, best_scale, &candidate);
+    let static_ece = ece_for_documents(&scorer, &calibration, best_scale, &[]);
+    let adaptive_ece = ece_for_documents(&scorer, &calibration, best_scale, &candidate);
+    let static_coverage = coverage_for(&scorer, &calibration, best_scale, &[], static_fit.accept);
+    let adaptive_coverage = coverage_for(
+        &scorer,
+        &calibration,
+        best_scale,
+        &candidate,
+        adaptive_fit.accept,
+    );
+    let kept = !candidate.is_empty()
+        && keep_adaptive(static_ece, static_coverage, adaptive_ece, adaptive_coverage);
+    let adaptive_test_brier = brier_for_documents(&scorer, &documents, best_scale, &candidate);
+    let adaptive_test_ece = ece_for_documents(&scorer, &documents, best_scale, &candidate);
+    let bins: Vec<(f64, f64)> = if kept { candidate } else { Vec::new() };
+    let fit = if kept { adaptive_fit } else { static_fit };
     let mut correct = 0usize;
     for (skill, document) in &documents {
         if document.is_empty() {
             continue;
         }
-        let (best, _) = best_of(&scorer.probabilities(document, best_scale));
+        let (best, _) = best_of(&probabilities_for(&scorer, document, best_scale, &bins));
         if &scorer.names[best] == skill {
             correct += 1;
         }
     }
-    // Fitted, never assumed: the lowest confidence whose precision clears the
-    // floor, because a hand-picked 0.80 threw most correct answers away.
-    const PRECISION_FLOOR: f64 = 0.75;
     let decided = documents
         .iter()
         .filter(|(_, document)| !document.is_empty())
         .count();
+    let held_out = HeldOut {
+        rows: test_rows.len(),
+        decided,
+        correct,
+        accuracy: correct as f64 / test_rows.len() as f64,
+        brier: brier_for_documents(&scorer, &documents, best_scale, &bins),
+        scale: best_scale,
+        accept: fit.accept,
+        accept_per_skill: fit.accept_per_skill,
+        operating_points: fit.operating_points,
+        ece: ece_for_documents(&scorer, &documents, best_scale, &bins),
+        entropy_temperatures: bins,
+    };
+    let report = CalibrationFit {
+        static_validation_ece: static_ece,
+        static_validation_coverage: static_coverage,
+        adaptive_validation_ece: adaptive_ece,
+        adaptive_validation_coverage: adaptive_coverage,
+        static_test_brier: brier_for_documents(&scorer, &documents, best_scale, &[]),
+        static_test_ece: ece_for_documents(&scorer, &documents, best_scale, &[]),
+        adaptive_test_brier,
+        adaptive_test_ece,
+        kept_adaptive: kept,
+    };
+    Some((held_out, report))
+}
+
+/// The accept point and its trade, fitted under one temperature mapping.
+struct AcceptFit {
+    accept: f64,
+    operating_points: Vec<OperatingPoint>,
+    accept_per_skill: Vec<(String, f64)>,
+}
+
+fn fit_accept(
+    scorer: &Scorer,
+    calibration: &[(String, HashMap<String, f64>)],
+    scale: f64,
+    bins: &[(f64, f64)],
+) -> AcceptFit {
+    // Fitted, never assumed: the lowest confidence whose precision clears the
+    // floor, because a hand-picked 0.80 threw most correct answers away.
+    const PRECISION_FLOOR: f64 = 0.75;
     let mut accept = 1.0f64;
     let mut operating_points = Vec::new();
     for step in 1..=19 {
         let threshold = step as f64 * 0.05;
         let mut answered = 0usize;
         let mut right = 0usize;
-        for (skill, document) in &calibration {
+        for (skill, document) in calibration {
             if document.is_empty() {
                 continue;
             }
-            let (best, confidence) = best_of(&scorer.probabilities(document, best_scale));
+            let (best, confidence) = best_of(&probabilities_for(scorer, document, scale, bins));
             if confidence < threshold {
                 continue;
             }
@@ -904,11 +1047,11 @@ fn score_held_out(
             let threshold = step as f64 * 0.05;
             let mut answered = 0usize;
             let mut right = 0usize;
-            for (skill, document) in &calibration {
+            for (skill, document) in calibration {
                 if document.is_empty() {
                     continue;
                 }
-                let (best, confidence) = best_of(&scorer.probabilities(document, best_scale));
+                let (best, confidence) = best_of(&probabilities_for(scorer, document, scale, bins));
                 if best != class || confidence < threshold {
                     continue;
                 }
@@ -928,17 +1071,125 @@ fn score_held_out(
         }
         accept_per_skill.push((name.clone(), accept_for_class));
     }
-    Some(HeldOut {
-        rows: test_rows.len(),
-        decided,
-        correct,
-        accuracy: correct as f64 / test_rows.len() as f64,
-        brier: brier_for_documents(&scorer, &documents, best_scale),
-        scale: best_scale,
+    AcceptFit {
         accept,
-        accept_per_skill,
         operating_points,
-    })
+        accept_per_skill,
+    }
+}
+
+/// One temperature per entropy quartile, fitted by bin Brier on validation.
+/// Thin bins keep 1.0: a temperature fitted on a handful of rows is noise.
+fn fit_entropy_temperatures(
+    scorer: &Scorer,
+    calibration: &[(String, HashMap<String, f64>)],
+    scale: f64,
+) -> Vec<(f64, f64)> {
+    const BINS: usize = 4;
+    const MIN_BIN_ROWS: usize = 50;
+    let rows: Vec<(String, Vec<f64>, f64)> = calibration
+        .iter()
+        .filter(|(_, document)| !document.is_empty())
+        .map(|(skill, document)| {
+            let probabilities = scorer.probabilities(document, scale);
+            let value = entropy(&probabilities);
+            (skill.clone(), probabilities, value)
+        })
+        .collect();
+    if rows.len() < MIN_BIN_ROWS * BINS {
+        return Vec::new();
+    }
+    let mut sorted: Vec<f64> = rows.iter().map(|(_, _, value)| *value).collect();
+    sorted.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
+    let mut fitted = Vec::with_capacity(BINS);
+    let mut lower = f64::MIN;
+    for bin in 1..=BINS {
+        let edge = sorted[(bin * sorted.len() / BINS).min(sorted.len() - 1)];
+        let members: Vec<(&String, &Vec<f64>)> = rows
+            .iter()
+            .filter(|(_, _, value)| *value > lower && *value <= edge)
+            .map(|(skill, probabilities, _)| (skill, probabilities))
+            .collect();
+        lower = edge;
+        if members.len() < MIN_BIN_ROWS {
+            fitted.push((edge, 1.0));
+            continue;
+        }
+        let mut best_temperature = 1.0f64;
+        let mut best = f64::MAX;
+        for step in 1..=30 {
+            let temperature = step as f64 * 0.1;
+            let brier = bin_brier(&members, &scorer.names, temperature);
+            if brier < best {
+                best = brier;
+                best_temperature = temperature;
+            }
+        }
+        fitted.push((edge, best_temperature));
+    }
+    fitted
+}
+
+/// Top-1 Brier over bin members at one candidate temperature.
+fn bin_brier(rows: &[(&String, &Vec<f64>)], names: &[String], temperature: f64) -> f64 {
+    let mut sum = 0.0;
+    for (skill, probabilities) in rows {
+        let (best, confidence) = best_of(&rescale(probabilities, temperature));
+        let correct = (&names[best] == *skill) as u8 as f64;
+        sum += (confidence - correct).powi(2);
+    }
+    sum / rows.len() as f64
+}
+
+/// Pre-registered keep rule: adaptive ships only when validation ECE falls
+/// without coverage collapsing. Selection reads validation; test only reports.
+fn keep_adaptive(
+    static_ece: f64,
+    static_coverage: f64,
+    adaptive_ece: f64,
+    adaptive_coverage: f64,
+) -> bool {
+    const MAX_COVERAGE_LOSS: f64 = 0.05;
+    adaptive_ece < static_ece && adaptive_coverage >= static_coverage - MAX_COVERAGE_LOSS
+}
+
+/// Fraction of rows speaking at or above the fitted accept point.
+fn coverage_for(
+    scorer: &Scorer,
+    calibration: &[(String, HashMap<String, f64>)],
+    scale: f64,
+    bins: &[(f64, f64)],
+    accept: f64,
+) -> f64 {
+    if calibration.is_empty() {
+        return 0.0;
+    }
+    let answered = calibration
+        .iter()
+        .filter(|(_, document)| {
+            !document.is_empty()
+                && best_of(&probabilities_for(scorer, document, scale, bins)).1 >= accept
+        })
+        .count();
+    answered as f64 / calibration.len() as f64
+}
+
+/// ECE over decided rows: stated confidence against what actually happened.
+fn ece_for_documents(
+    scorer: &Scorer,
+    documents: &[(String, HashMap<String, f64>)],
+    scale: f64,
+    bins: &[(f64, f64)],
+) -> f64 {
+    let pairs: Vec<(f64, bool)> = documents
+        .iter()
+        .filter(|(_, document)| !document.is_empty())
+        .map(|(skill, document)| {
+            let (best, confidence) = best_of(&probabilities_for(scorer, document, scale, bins));
+            (confidence, &scorer.names[best] == skill)
+        })
+        .collect();
+    crate::utility::decision_model::expected_calibration_error(&pairs)
 }
 
 /// Brier over the rows the model actually answered: a silent row has no stated
@@ -947,6 +1198,7 @@ fn brier_for_documents(
     scorer: &Scorer,
     documents: &[(String, HashMap<String, f64>)],
     scale: f64,
+    bins: &[(f64, f64)],
 ) -> f64 {
     let mut sum = 0.0;
     let mut scored = 0usize;
@@ -954,7 +1206,7 @@ fn brier_for_documents(
         if document.is_empty() {
             continue;
         }
-        let (best, confidence) = best_of(&scorer.probabilities(document, scale));
+        let (best, confidence) = best_of(&probabilities_for(scorer, document, scale, bins));
         let correct = (&scorer.names[best] == skill) as u8 as f64;
         sum += (confidence - correct).powi(2);
         scored += 1;
@@ -991,6 +1243,10 @@ mod tests {
     use super::*;
     const PHANTOM_LABEL: &str = "rust";
     const POSTGRES_LABEL: &str = "postgres-migration-safety";
+    const BIN_A: &str = "alpha";
+    const BIN_B: &str = "beta";
+    const BIN_FEATURE_A: &str = "aaa";
+    const BIN_FEATURE_B: &str = "bbb";
     fn sourced_row(text: &str, skill: Option<&str>) -> SourcedRow {
         SourcedRow {
             text: text.to_string(),
@@ -1202,5 +1458,180 @@ mod tests {
         save(&path, &model).unwrap();
         assert!(load(&path).is_some());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn entropy_spans_zero_to_uniform() {
+        assert_eq!(entropy(&[1.0, 0.0, 0.0]), 0.0);
+        assert!((entropy(&[0.25, 0.25, 0.25, 0.25]) - 4f64.ln()).abs() < 1e-12);
+    }
+
+    #[test]
+    fn rescale_keeps_the_winner_and_renormalizes() {
+        let sharp = vec![0.7, 0.2, 0.1];
+        let identical = rescale(&sharp, 1.0);
+        for (left, right) in identical.iter().zip(&sharp) {
+            assert!((left - right).abs() < 1e-12);
+        }
+        let softened = rescale(&sharp, 2.0);
+        assert!((softened.iter().sum::<f64>() - 1.0).abs() < 1e-12);
+        assert!(softened[0] < sharp[0], "heat spreads the mass");
+        assert_eq!(best_of(&softened).0, 0, "rescaling never flips the argmax");
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert_eq!(rescale(&sharp, bad), sharp, "bad temperature {bad}");
+        }
+    }
+
+    #[test]
+    fn entropy_temperature_selects_the_first_covering_bin() {
+        let bins = vec![(0.5, 0.5), (1.0, 2.0)];
+        assert_eq!(entropy_temperature(0.3, &bins), 0.5);
+        assert_eq!(entropy_temperature(0.7, &bins), 2.0);
+        assert_eq!(entropy_temperature(5.0, &bins), 1.0);
+        assert_eq!(entropy_temperature(0.3, &[]), 1.0);
+        assert_eq!(entropy_temperature(f64::NAN, &bins), 1.0);
+    }
+
+    #[test]
+    fn keep_rule_pins_ece_down_and_coverage_held() {
+        assert!(keep_adaptive(0.20, 0.90, 0.15, 0.88));
+        assert!(
+            !keep_adaptive(0.20, 0.90, 0.15, 0.80),
+            "coverage collapse vetoes"
+        );
+        assert!(!keep_adaptive(0.20, 0.90, 0.25, 0.90), "rising ECE vetoes");
+        assert!(
+            keep_adaptive(0.20, 0.90, 0.15, 0.85),
+            "five points lost still ships"
+        );
+    }
+
+    #[test]
+    fn adaptive_rank_softens_through_fitted_bins() {
+        let model = train(&separable_rows()).expect("model");
+        // why: a one-sided prompt saturates to exactly 1.0, where heat is identity.
+        let prompt = "postgres borrow";
+        let static_winner = predict(&model, prompt).expect("predicts");
+        assert!(
+            static_winner.1 > 0.5 && static_winner.1 < 1.0,
+            "mixed prompt stays unsaturated: {}",
+            static_winner.1
+        );
+        let mut adaptive = model;
+        let held_out = adaptive.held_out.as_mut().expect("held out");
+        held_out.entropy_temperatures = vec![(f64::MAX, 2.0)];
+        let adaptive_winner = predict(&adaptive, prompt).expect("still predicts");
+        assert_eq!(static_winner.0, adaptive_winner.0);
+        assert!(
+            adaptive_winner.1 < static_winner.1,
+            "heat lowers the stated confidence"
+        );
+    }
+
+    #[test]
+    fn old_artifact_without_calibration_fields_ranks_static() {
+        let model = LexicalModel {
+            schema: LEXICAL_SCHEMA,
+            training_rows: 240,
+            skills: 2,
+            experts: vec![
+                LexicalExpert {
+                    name: BIN_A.to_string(),
+                    bias: 0.0,
+                    terms: vec![(BIN_FEATURE_A.to_string(), 2.0)],
+                },
+                LexicalExpert {
+                    name: BIN_B.to_string(),
+                    bias: 0.0,
+                    terms: vec![(BIN_FEATURE_B.to_string(), 2.0)],
+                },
+            ],
+            idf: vec![
+                (BIN_FEATURE_A.to_string(), 1.0),
+                (BIN_FEATURE_B.to_string(), 1.0),
+            ],
+            held_out: Some(HeldOut {
+                rows: 10,
+                decided: 10,
+                correct: 9,
+                accuracy: 0.9,
+                brier: 0.1,
+                scale: 1.5,
+                accept: 0.25,
+                accept_per_skill: Vec::new(),
+                operating_points: Vec::new(),
+                ece: 0.2,
+                entropy_temperatures: vec![(f64::MAX, 2.0)],
+            }),
+            usable: true,
+        };
+        // why: an artifact written before the fields existed has neither key.
+        let mut value = serde_json::to_value(&model).expect("serializes");
+        let held_out = value
+            .get_mut("held_out")
+            .and_then(|held_out| held_out.as_object_mut())
+            .expect("held out object");
+        held_out.remove("ece");
+        held_out.remove("entropy_temperatures");
+        let old: LexicalModel = serde_json::from_value(value).expect("old shape loads");
+        let held_out = old.held_out.as_ref().expect("held out");
+        assert_eq!(held_out.ece, 0.0);
+        assert!(held_out.entropy_temperatures.is_empty());
+        let (name, _) = predict(&old, BIN_FEATURE_A).expect("ranks");
+        assert_eq!(name, BIN_A);
+    }
+
+    #[test]
+    fn entropy_temperatures_fit_deterministically() {
+        let model = LexicalModel {
+            schema: LEXICAL_SCHEMA,
+            training_rows: 0,
+            skills: 2,
+            experts: vec![
+                LexicalExpert {
+                    name: BIN_A.to_string(),
+                    bias: 0.0,
+                    terms: vec![(BIN_FEATURE_A.to_string(), 2.0)],
+                },
+                LexicalExpert {
+                    name: BIN_B.to_string(),
+                    bias: 0.0,
+                    terms: vec![(BIN_FEATURE_B.to_string(), 2.0)],
+                },
+            ],
+            idf: vec![
+                (BIN_FEATURE_A.to_string(), 1.0),
+                (BIN_FEATURE_B.to_string(), 1.0),
+            ],
+            held_out: None,
+            usable: true,
+        };
+        let scorer = Scorer::new(&model);
+        let calibration: Vec<(String, HashMap<String, f64>)> = (0..400)
+            .map(|index| {
+                let weight = (index % 200) as f64 / 200.0;
+                let mut document = HashMap::new();
+                document.insert(BIN_FEATURE_A.to_string(), weight);
+                document.insert(BIN_FEATURE_B.to_string(), 1.0 - weight);
+                let label = if index % 2 == 0 { BIN_A } else { BIN_B };
+                (label.to_string(), document)
+            })
+            .collect();
+        let first = fit_entropy_temperatures(&scorer, &calibration, 1.0);
+        let second = fit_entropy_temperatures(&scorer, &calibration, 1.0);
+        assert_eq!(first, second, "the same rows fit the same bins");
+        assert_eq!(first.len(), 4);
+        for (edge, temperature) in &first {
+            assert!(edge.is_finite());
+            assert!(
+                (0.1..=3.0).contains(temperature),
+                "grid temperature {temperature}"
+            );
+        }
+        assert!(
+            first.windows(2).all(|pair| pair[0].0 <= pair[1].0),
+            "edges ascend"
+        );
+        assert!(fit_entropy_temperatures(&scorer, &calibration[..100], 1.0).is_empty());
     }
 }
