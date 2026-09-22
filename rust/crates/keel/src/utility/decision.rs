@@ -2793,8 +2793,13 @@ pub fn handle_decision_tool(arguments: &Value) -> Result<String, String> {
                 .len();
             rows.extend(seeds);
             let started = std::time::Instant::now();
+            let vectors = crate::utility::word_vectors::table_for(&home);
             let (model, calibration_fit) =
-                crate::utility::lexical_experts::train_sourced_reported(&rows).ok_or_else(|| {
+                crate::utility::lexical_experts::train_sourced_reported(
+                    &rows,
+                    vectors.as_deref(),
+                )
+                .ok_or_else(|| {
                     "decision train-lexical: the corpus carried no labelled rows".to_string()
                 })?;
             let elapsed = started.elapsed();
@@ -2809,6 +2814,7 @@ pub fn handle_decision_tool(arguments: &Value) -> Result<String, String> {
                 "training_rows": model.training_rows,
                 "skills": model.skills,
                 "seeded_skills": seeded_skills,
+                "vector_rows": model.vector_rows,
                 "usable": model.usable,
                 "held_out": model.held_out,
                 "calibration_fit": calibration_fit,

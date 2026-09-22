@@ -41,6 +41,7 @@ pub mod stats;
 pub mod system_map;
 pub(crate) mod task_ticket;
 pub mod ui_verify;
+pub mod word_vectors;
 pub mod working_brief;
 pub mod workspace_index;
 

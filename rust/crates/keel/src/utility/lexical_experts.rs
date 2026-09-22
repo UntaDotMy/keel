@@ -105,6 +105,11 @@ pub struct LexicalModel {
     pub idf: Vec<(String, f64)>,
     pub held_out: Option<HeldOut>,
     pub usable: bool,
+    /// Words in the word-vector table this model was trained with. Zero means
+    /// no embedding block, and a reader that cannot find the table for a model
+    /// with rows refuses to score rather than scoring half the features.
+    #[serde(default)]
+    pub vector_rows: usize,
 }
 
 /// A prompt with its weak label: a community tag mapped to a keel skill.
@@ -183,12 +188,15 @@ pub fn train(rows: &RawRows) -> Option<LexicalModel> {
 
 /// Train from rows that name their provider.
 pub fn train_sourced(rows: &[SourcedRow]) -> Option<LexicalModel> {
-    train_sourced_reported(rows).map(|(model, _)| model)
+    train_sourced_reported(rows, None).map(|(model, _)| model)
 }
 
 /// Train and report the calibration fit, so the run output shows the keep
 /// decision instead of only the mapping that won.
-pub fn train_sourced_reported(rows: &[SourcedRow]) -> Option<(LexicalModel, CalibrationFit)> {
+pub fn train_sourced_reported(
+    rows: &[SourcedRow],
+    vectors: Option<&crate::utility::word_vectors::WordVectors>,
+) -> Option<(LexicalModel, CalibrationFit)> {
     let (train_rows, validation_rows, test_rows) = split_sourced(rows, DEFAULT_SEED);
     // Rejected: masking crates boilerplate on this slice moved held-out
     // accuracy 0.7386 → 0.7285 and Brier 0.1380 → 0.1428 (accept 0.25 → 0.35).
@@ -197,9 +205,14 @@ pub fn train_sourced_reported(rows: &[SourcedRow]) -> Option<(LexicalModel, Cali
     let test_pairs = pairs_of(&test_rows);
     // why: community tags carry label noise, and pruning the rows the fitted
     // model confidently contradicts lifted held-out accuracy in measurement.
-    let (train_rows, _) = prune_label_noise(&train_pairs);
-    let fitted = fit(&train_rows, &validation_pairs)?;
-    let (held_out, report) = match score_held_out(&fitted, &validation_pairs, &test_pairs) {
+    let (train_rows, _) = prune_label_noise(&train_pairs, vectors);
+    let fitted = fit(&train_rows, &validation_pairs, vectors)?;
+    let (held_out, report) = match score_held_out(
+        &fitted,
+        &validation_pairs,
+        &test_pairs,
+        vectors.map(|table| std::sync::Arc::new(table.clone())),
+    ) {
         Some(scored) => (Some(scored.0), scored.1),
         None => (None, CalibrationFit::default()),
     };
@@ -216,6 +229,7 @@ pub fn train_sourced_reported(rows: &[SourcedRow]) -> Option<(LexicalModel, Cali
             idf: fitted.idf,
             held_out,
             usable,
+            vector_rows: vectors.map(|table| table.rows()).unwrap_or(0),
         },
         report,
     ))
@@ -348,15 +362,20 @@ pub fn mask_crates_boilerplate(text: &str) -> String {
     out
 }
 
-/// Unigrams plus adjacent bigrams: a bigram is what separates `borrow checker`
-/// from a page that merely mentions both words.
-fn features(prompt: &str) -> Vec<String> {
-    let words: Vec<String> = prompt
+/// Words a row carries, before bigrams: the embedding block reads these.
+fn words(prompt: &str) -> Vec<String> {
+    prompt
         .to_ascii_lowercase()
         .split(|character: char| !character.is_ascii_alphanumeric())
         .filter(|word| word.len() >= MIN_WORD && !STOPWORDS.contains(word))
         .map(str::to_string)
-        .collect();
+        .collect()
+}
+
+/// Unigrams plus adjacent bigrams: a bigram is what separates `borrow checker`
+/// from a page that merely mentions both words.
+fn features(prompt: &str) -> Vec<String> {
+    let words = words(prompt);
     let mut features: Vec<String> = words.clone();
     for pair in words.windows(2) {
         features.push(format!("{}_{}", pair[0], pair[1]));
@@ -383,9 +402,14 @@ fn inverse_document_frequency(rows: &LabelledRows) -> Vec<(String, f64)> {
     idf
 }
 
-/// Sublinear term frequency against the fitted document frequencies, L2
-/// normalized so a long title cannot outvote a short one.
-fn vectorize(prompt: &str, idf: &HashMap<String, f64>) -> HashMap<String, f64> {
+/// Sublinear term frequency against the fitted document frequencies, plus the
+/// averaged word-vector block, L2 normalized so a long title cannot outvote a
+/// short one and so neither block outweighs the other.
+fn vectorize(
+    prompt: &str,
+    idf: &HashMap<String, f64>,
+    vectors: Option<&crate::utility::word_vectors::WordVectors>,
+) -> HashMap<String, f64> {
     let mut counts: HashMap<String, f64> = HashMap::new();
     for feature in features(prompt) {
         if idf.contains_key(&feature) {
@@ -396,6 +420,21 @@ fn vectorize(prompt: &str, idf: &HashMap<String, f64>) -> HashMap<String, f64> {
         .into_iter()
         .map(|(feature, count)| (feature.clone(), (1.0 + count.ln()) * idf[&feature]))
         .collect();
+    // why: the block carries words the idf never saw, which is the whole point
+    // of a prior; without a table this is exactly the model it was before.
+    if let Some(embedding) =
+        vectors.and_then(|table| table.average(words(prompt).iter().map(String::as_str)))
+    {
+        for (index, value) in embedding.iter().enumerate() {
+            vector.insert(
+                format!(
+                    "{}{index}",
+                    crate::utility::word_vectors::VECTOR_FEATURE_PREFIX
+                ),
+                *value,
+            );
+        }
+    }
     let norm = vector
         .values()
         .map(|value| value * value)
@@ -437,7 +476,11 @@ fn validation_brier(
     }
 }
 
-fn fit(rows: &LabelledRows, validation_rows: &LabelledRows) -> Option<Fitted> {
+fn fit(
+    rows: &LabelledRows,
+    validation_rows: &LabelledRows,
+    vectors: Option<&crate::utility::word_vectors::WordVectors>,
+) -> Option<Fitted> {
     if rows.is_empty() {
         return None;
     }
@@ -456,7 +499,7 @@ fn fit(rows: &LabelledRows, validation_rows: &LabelledRows) -> Option<Fitted> {
         .collect();
     let documents: Vec<(usize, HashMap<String, f64>)> = rows
         .iter()
-        .map(|(prompt, skill)| (class_index[skill], vectorize(prompt, &idf)))
+        .map(|(prompt, skill)| (class_index[skill], vectorize(prompt, &idf, vectors)))
         .collect();
 
     let mut weights: Weights = vec![HashMap::new(); classes.len()];
@@ -474,7 +517,9 @@ fn fit(rows: &LabelledRows, validation_rows: &LabelledRows) -> Option<Fitted> {
     let mut state = DEFAULT_SEED | 1;
     let validation: Vec<(usize, HashMap<String, f64>)> = validation_rows
         .iter()
-        .filter_map(|(prompt, skill)| Some((*class_index.get(skill)?, vectorize(prompt, &idf))))
+        .filter_map(|(prompt, skill)| {
+            Some((*class_index.get(skill)?, vectorize(prompt, &idf, vectors)))
+        })
         .collect();
     let mut best_brier = f64::MAX;
     let mut best_weights = weights.clone();
@@ -643,10 +688,14 @@ struct Scorer {
     biases: Vec<f64>,
     weights: HashMap<String, Vec<f64>>,
     idf: HashMap<String, f64>,
+    vectors: Option<std::sync::Arc<crate::utility::word_vectors::WordVectors>>,
 }
 
 impl Scorer {
-    fn new(model: &LexicalModel) -> Self {
+    fn new(
+        model: &LexicalModel,
+        vectors: Option<std::sync::Arc<crate::utility::word_vectors::WordVectors>>,
+    ) -> Self {
         let mut weights: HashMap<String, Vec<f64>> = HashMap::new();
         for (class, expert) in model.experts.iter().enumerate() {
             for (feature, weight) in &expert.terms {
@@ -665,11 +714,12 @@ impl Scorer {
             biases: model.experts.iter().map(|expert| expert.bias).collect(),
             weights,
             idf: model.idf.iter().cloned().collect(),
+            vectors,
         }
     }
 
     fn vectorize(&self, prompt: &str) -> HashMap<String, f64> {
-        vectorize(prompt, &self.idf)
+        vectorize(prompt, &self.idf, self.vectors.as_deref())
     }
 
     fn probabilities(&self, document: &HashMap<String, f64>, temperature: f64) -> Vec<f64> {
@@ -765,7 +815,7 @@ pub fn predict(model: &LexicalModel, prompt: &str) -> Option<(String, f64)> {
 /// Every class probability, highest first. Empty when the prompt shares no
 /// feature with the training rows.
 pub fn rank(model: &LexicalModel, prompt: &str) -> Option<Vec<(String, f64)>> {
-    Head::from_model(model).rank(prompt)
+    Head::from_model(model, None).rank(prompt)
 }
 
 /// A model plus everything the router needs to score a prompt: the fitted
@@ -779,7 +829,10 @@ pub struct Head {
 }
 
 impl Head {
-    fn from_model(model: &LexicalModel) -> Self {
+    fn from_model(
+        model: &LexicalModel,
+        vectors: Option<std::sync::Arc<crate::utility::word_vectors::WordVectors>>,
+    ) -> Self {
         let (scale, bins, accept) = match model.held_out.as_ref() {
             Some(metrics) => (
                 metrics.scale,
@@ -789,7 +842,7 @@ impl Head {
             None => (1.0, Vec::new(), 1.0),
         };
         Self {
-            scorer: Scorer::new(model),
+            scorer: Scorer::new(model, vectors),
             scale,
             bins,
             accept,
@@ -850,7 +903,14 @@ pub fn head(path: &Path) -> Option<std::sync::Arc<Head>> {
         }
     }
     let model = load(path)?;
-    let head = std::sync::Arc::new(Head::from_model(&model));
+    // why: a model trained with the embedding block needs the same table to
+    // score; serving it without one would score half the features.
+    let vectors = if model.vector_rows > 0 {
+        Some(crate::utility::word_vectors::table_beside(path)?)
+    } else {
+        None
+    };
+    let head = std::sync::Arc::new(Head::from_model(&model, vectors));
     if let Ok(mut cache) = HEAD_CACHE.lock() {
         *cache = Some((fingerprint, std::sync::Arc::clone(&head)));
     }
@@ -928,7 +988,10 @@ struct OutOfFold {
 /// never saw it, then drop rows whose given tag that model confidently
 /// contradicts. In-sample judging finds nothing, because a fitted model agrees
 /// with the rows it memorized, so the folds are what make this worth doing.
-fn prune_label_noise(rows: &LabelledRows) -> (LabelledRows, usize) {
+fn prune_label_noise(
+    rows: &LabelledRows,
+    vectors: Option<&crate::utility::word_vectors::WordVectors>,
+) -> (LabelledRows, usize) {
     const FOLDS: usize = 5;
     if rows.len() < FOLDS {
         return (rows.clone(), 0);
@@ -942,7 +1005,7 @@ fn prune_label_noise(rows: &LabelledRows) -> (LabelledRows, usize) {
             .filter(|(index, _)| index % FOLDS != fold)
             .map(|(_, row)| row.clone())
             .collect();
-        let Some(fitted) = fit(&training, &LabelledRows::new()) else {
+        let Some(fitted) = fit(&training, &LabelledRows::new(), vectors) else {
             return (rows.clone(), 0);
         };
         let model = LexicalModel {
@@ -953,8 +1016,9 @@ fn prune_label_noise(rows: &LabelledRows) -> (LabelledRows, usize) {
             idf: fitted.idf,
             held_out: None,
             usable: true,
+            vector_rows: 0,
         };
-        let scorer = Scorer::new(&model);
+        let scorer = Scorer::new(&model, None);
         for (index, (prompt, skill)) in rows.iter().enumerate() {
             if index % FOLDS != fold {
                 continue;
@@ -1010,6 +1074,7 @@ fn score_held_out(
     fitted: &Fitted,
     calibration_rows: &LabelledRows,
     test_rows: &LabelledRows,
+    vectors: Option<std::sync::Arc<crate::utility::word_vectors::WordVectors>>,
 ) -> Option<(HeldOut, CalibrationFit)> {
     if test_rows.is_empty() {
         return None;
@@ -1022,8 +1087,9 @@ fn score_held_out(
         idf: fitted.idf.clone(),
         held_out: None,
         usable: true,
+        vector_rows: vectors.as_ref().map(|table| table.rows()).unwrap_or(0),
     };
-    let scorer = Scorer::new(&model);
+    let scorer = Scorer::new(&model, vectors);
     let vectorize = |rows: &LabelledRows| -> Vec<(String, HashMap<String, f64>)> {
         rows.iter()
             .map(|(prompt, skill)| (skill.clone(), scorer.vectorize(prompt)))
@@ -1711,6 +1777,7 @@ mod tests {
             schema: LEXICAL_SCHEMA,
             training_rows: 240,
             skills: 2,
+            vector_rows: 0,
             experts: vec![
                 LexicalExpert {
                     name: BIN_A.to_string(),
@@ -1764,6 +1831,7 @@ mod tests {
             schema: LEXICAL_SCHEMA,
             training_rows: 0,
             skills: 2,
+            vector_rows: 0,
             experts: vec![
                 LexicalExpert {
                     name: BIN_A.to_string(),
@@ -1783,7 +1851,7 @@ mod tests {
             held_out: None,
             usable: true,
         };
-        let scorer = Scorer::new(&model);
+        let scorer = Scorer::new(&model, None);
         let calibration: Vec<(String, HashMap<String, f64>)> = (0..400)
             .map(|index| {
                 let weight = (index % 200) as f64 / 200.0;
