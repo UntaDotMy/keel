@@ -3830,7 +3830,8 @@ mod tests {
 
     #[test]
     fn skill_routing_cache_hit_skips_recompute() {
-        // Lower bounds only: concurrent tests share the process-global counters.
+        // Lower bounds only: concurrent tests share the process-global counters,
+        // and a full cache can evict this key between two calls.
         let home = home_with_skills(
             "hit",
             &[
@@ -3839,10 +3840,16 @@ mod tests {
             ],
         );
         let prompt = "reviewer review this code diff j02-hit";
+        let skills_dir = skills_directory(&home);
+        let key = skill_routing_cache_key(&skills_dir, prompt).expect("listing fingerprint");
         let before = skill_routing_cache_stats();
         let first = match_skill_for_prompt_with_details(&home, prompt);
-        let second = match_skill_for_prompt_with_details(&home, prompt);
-        assert_eq!(first, second);
+        // why: presence under this key is deterministic where a global hit
+        // counter is not, and it is what makes the repeat prompt cheap.
+        assert!(
+            skill_routing_cache_get(&key, now_unix_secs()).is_some(),
+            "the first call must publish the decision under its key"
+        );
         let after = skill_routing_cache_stats();
         assert!(
             after.misses > before.misses,
@@ -3852,7 +3859,12 @@ mod tests {
             after.recomputes > before.recomputes,
             "one miss must recompute at least once"
         );
-        assert!(after.hits > before.hits, "repeat prompt must hit");
+        assert!(
+            after.hits > before.hits,
+            "the repeated lookup must count as a hit"
+        );
+        let second = match_skill_for_prompt_with_details(&home, prompt);
+        assert_eq!(first, second, "a cache hit returns the same decision");
         let _ = fs::remove_dir_all(&home);
     }
 
