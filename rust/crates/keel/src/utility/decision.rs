@@ -2721,9 +2721,9 @@ pub fn handle_decision_tool(arguments: &Value) -> Result<String, String> {
             let cached = if refresh {
                 None
             } else {
-                crate::utility::decision_benchmark::read_external_cache(&corpus)
+                crate::utility::decision_benchmark::read_sourced_cache(&corpus)
             };
-            let rows = match cached {
+            let mut rows = match cached {
                 Some(rows) => rows,
                 None => {
                     // why: every corpus trains, so no class is left with zero
@@ -2734,23 +2734,49 @@ pub fn handle_decision_tool(arguments: &Value) -> Result<String, String> {
                     .map_err(|error| format!("decision train-lexical: {error}"))?;
                     // why: rows already fetched stay in the corpus even when a
                     // provider is rate-limited and cannot serve them again.
-                    if let Some(existing) =
-                        crate::utility::decision_benchmark::read_external_cache(&corpus)
+                    if let Some(mut existing) =
+                        crate::utility::decision_benchmark::read_sourced_cache(&corpus)
                     {
-                        fetched.extend(existing);
-                        fetched.sort_by(|left, right| left.0.cmp(&right.0));
-                        fetched.dedup_by(|left, right| left.0 == right.0);
+                        fetched.append(&mut existing);
+                        crate::utility::decision_benchmark::merge_sourced_rows(&mut fetched);
                     }
-                    let _ = crate::utility::decision_benchmark::write_external_cache(
+                    // why: a failed cache write costs a refetch, not this run.
+                    let _ = crate::utility::decision_benchmark::write_sourced_cache(
                         &corpus, &fetched,
                     );
                     fetched
                 }
             };
-            let (rows, dropped_ambiguous) =
-                crate::utility::lexical_experts::drop_ambiguous_tags(&rows);
+            let mut crates_tagged = rows
+                .iter()
+                .filter(|row| row.provider == crate::utility::lexical_experts::CRATES_PROVIDER)
+                .count();
+            if rows.iter().any(|row| row.provider.is_empty()) {
+                if let Ok(descriptions) =
+                    crate::utility::decision_benchmark::fetch_crates_training_descriptions(per_tag)
+                {
+                    crate::utility::decision_benchmark::assign_providers_from_crates(
+                        &mut rows,
+                        &descriptions,
+                    );
+                    crates_tagged = rows
+                        .iter()
+                        .filter(|row| {
+                            row.provider == crate::utility::lexical_experts::CRATES_PROVIDER
+                        })
+                        .count();
+                    // why: attribution retries next run when this write fails.
+                    let _ = crate::utility::decision_benchmark::write_sourced_cache(
+                        &corpus, &rows,
+                    );
+                }
+            }
+            let (rows, dropped_ambiguous, dropped_uninstalled, dropped_benchmark) =
+                crate::utility::decision_benchmark::lexical_rows_to_fit(&rows, &|skill| {
+                    crate::utility::skill_match::installed_skill_path(&home, skill).is_some()
+                });
             let started = std::time::Instant::now();
-            let model = crate::utility::lexical_experts::train(&rows).ok_or_else(|| {
+            let model = crate::utility::lexical_experts::train_sourced(&rows).ok_or_else(|| {
                 "decision train-lexical: the corpus carried no labelled rows".to_string()
             })?;
             let elapsed = started.elapsed();
@@ -2760,13 +2786,17 @@ pub fn handle_decision_tool(arguments: &Value) -> Result<String, String> {
                 "action": "train-lexical",
                 "rows": rows.len(),
                 "dropped_ambiguous": dropped_ambiguous,
+                "dropped_uninstalled": dropped_uninstalled,
+                "dropped_benchmark": dropped_benchmark,
                 "training_rows": model.training_rows,
                 "skills": model.skills,
                 "usable": model.usable,
                 "held_out": model.held_out,
                 "elapsed_ms": elapsed.as_millis() as u64,
                 "rows_per_second": rows.len() as f64 / elapsed.as_secs_f64().max(1e-6),
-                "class_balance": crate::utility::lexical_experts::class_balance(&rows),
+                "class_balance": crate::utility::lexical_experts::class_balance_sourced(&rows),
+                "provider_counts": crate::utility::lexical_experts::provider_counts(&rows),
+                "crates_tagged": crates_tagged,
                 "artifact": artifact.display().to_string(),
             });
             serde_json::to_string_pretty(&out)
@@ -2782,7 +2812,13 @@ pub fn handle_decision_tool(arguments: &Value) -> Result<String, String> {
                 .get("external")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
-            let report = if external {
+            let host = arguments
+                .get("host")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let report = if host {
+                crate::utility::decision_benchmark::run_host(home.as_deref(), remote)
+            } else if external {
                 let refresh = arguments
                     .get("refresh")
                     .and_then(Value::as_bool)
@@ -3003,7 +3039,7 @@ pub fn run_decision_command(
                 samples             Show labeled decision samples collected for offline training\n  \
                 train               Fit the per-surface calibration experts over the sample corpus\n  \
                 model               Show the trained decision model or calibrate one signal\n  \
-                benchmark           Score routing: keel fixtures, or the --external stackoverflow corpus, against classifier.dev (--remote, --per-tag N, --refresh)\n  \
+                benchmark           Score routing: keel fixtures, --host prompts, or the --external corpus, against classifier.dev (--remote, --per-tag N, --refresh)\n  \
                 train-lexical       Fetch real labelled rows and train the per-skill lexical experts (--per-tag N, --pages N, --refresh)\n  \
                 calibration-report  Show calibration health across routing, review, composition, shell, conformal"
         );
@@ -3073,6 +3109,7 @@ pub fn run_decision_command(
         }
         "benchmark" => {
             flag_set.bool_flag("remote", false);
+            flag_set.bool_flag("host", false);
             flag_set.bool_flag("external", false);
             flag_set.bool_flag("refresh", false);
             flag_set.string_flag("per-tag", "25");
@@ -3244,6 +3281,7 @@ pub fn run_decision_command(
         "benchmark" => serde_json::json!({
             "action": "benchmark",
             "remote": flag_set.bool_value("remote"),
+            "host": flag_set.bool_value("host"),
             "external": flag_set.bool_value("external"),
             "refresh": flag_set.bool_value("refresh"),
             "per_tag": flag_set.string_value("per-tag").trim().parse::<u64>().unwrap_or(25),

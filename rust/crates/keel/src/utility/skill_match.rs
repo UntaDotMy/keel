@@ -597,12 +597,12 @@ pub fn match_skill_for_prompt_with_details(
                 &crate::utility::lexical_experts::artifact_path(claude_home),
             )?;
             let accept = crate::utility::lexical_experts::accept_threshold(&model);
-            let (name, confidence) = crate::utility::lexical_experts::predict(&model, prompt)?;
-            if confidence < accept {
-                return None;
-            }
-            let path = resolve_skill_path(claude_home, &name)?;
-            path.is_file().then_some((name, confidence))
+            let ranked = crate::utility::lexical_experts::rank(&model, prompt)?;
+            let (name, confidence) =
+                crate::utility::lexical_experts::select_installed(&ranked, accept, &|name| {
+                    resolve_skill_path(claude_home, name).is_some_and(|path| path.is_file())
+                })?;
+            Some((name.to_string(), confidence))
         };
         match decision {
             Some(found) if found.confidence < 0.60 => {

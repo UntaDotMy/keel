@@ -16,7 +16,7 @@ const REMOTE_ENDPOINT: &str = "https://classifier.dev";
 /// Label the remote model picks when no supplied label fits (its documented
 /// way to model a none-of-the-above outcome).
 const REMOTE_NONE_LABEL: &str = "none of these";
-const REMOTE_TIMEOUT_SECS: &str = "20";
+const REMOTE_TIMEOUT_SECS: &str = "60";
 
 /// Prompts that must stay unrouted. The test asserts every one is silent, so a
 /// prompt that starts tripping the curated tier fails here, not on the network.
@@ -51,6 +51,8 @@ pub struct BenchmarkReport {
     pub controls: usize,
     pub local_correct: usize,
     pub remote_available: bool,
+    /// Set when `--remote` was asked and the service did not return a batch.
+    pub remote_error: Option<String>,
     pub remote_correct: usize,
     pub remote_model: Option<String>,
     pub remote_p50_ms: Option<u64>,
@@ -105,6 +107,168 @@ pub fn run_external(
     score_cases(home, cases, 0, SOURCE_EXTERNAL, remote)
 }
 
+/// Where the host-prompt benchmark came from. It is not a tag shell and not
+/// the curated-trigger lookup.
+pub const SOURCE_HOST: &str = "host prompts (disjoint from lexical training)";
+
+/// Host sentences a person would type at an agent, each an installed skill or
+/// silence. None of these strings are lexical training rows.
+pub const HOST_BENCHMARK: &[(&str, Option<&str>)] = &[
+    (
+        "Our nightly checkout job is waiting on a row lock in the payments ledger. Show the statement that holds it and the migration that should stop taking that lock.",
+        Some("postgres-migration-safety"),
+    ),
+    (
+        "The expand step added a column and the backfill is rewriting the whole orders table. I need the safe sequence before we add the constraint.",
+        Some("postgres-migration-safety"),
+    ),
+    (
+        "The worker dies only after the third retry of the same invoice message, and the stack I have is truncated. Find what state survives between retries.",
+        Some("systematic-debugging"),
+    ),
+    (
+        "This failure shows up only when two people save the same draft a second apart. I need the race that causes it.",
+        Some("systematic-debugging"),
+    ),
+    (
+        "Before I change the refund calculator, I want a failing example for a partial refund that rounds half up.",
+        Some("test-driven-development"),
+    ),
+    (
+        "Pin an example for an empty cart total before the implementation of that total moves.",
+        Some("test-driven-development"),
+    ),
+    (
+        "A partner sent a webhook with a signature header we have never checked. Walk the verification and what we must reject.",
+        Some("adversarial-security-review"),
+    ),
+    (
+        "The admin export includes raw session tokens in the CSV. Close that exposure before customers can download it.",
+        Some("adversarial-security-review"),
+    ),
+    (
+        "Clients send both the old and new field names for the same address. Decide the compatibility rule for one more release.",
+        Some("api-contract-design"),
+    ),
+    (
+        "The list endpoint returns a bare array and the mobile client cannot tell when a page ends. Specify the pagination contract.",
+        Some("api-contract-design"),
+    ),
+    (
+        "The order service calls inventory, then payment, then email, and a failure in email leaves money captured. Where should that orchestration live?",
+        Some("backend-and-data-architecture"),
+    ),
+    (
+        "We are splitting the billing module out of the monolith. Name the boundary so inventory does not start owning invoices.",
+        Some("backend-and-data-architecture"),
+    ),
+    (
+        "The lockfile resolved two copies of the http stack and the build pulls the vulnerable one. I want a single resolved version.",
+        Some("dependency-and-supply-chain"),
+    ),
+    (
+        "The live cursor channel drops clients whenever we deploy, and reconnects replay the whole history. Design the resume behavior.",
+        Some("websocket-realtime-design"),
+    ),
+    (
+        "The deploy rolls every pod at once and the health check still hits the old path. Keep one healthy replica during the rollout.",
+        Some("cloud-and-devops-expert"),
+    ),
+    (
+        "Latency jumped after the last release but the dashboard only has a five-minute average. Which signals show the bad shard?",
+        Some("observability-and-incident-response"),
+    ),
+    (
+        "The invoice date is showing in the server locale for customers in Japan. Format it for their locale without changing the stored instant.",
+        Some("internationalization-and-localization"),
+    ),
+    (
+        "Please review this diff that changes how we persist drafts and tell me if that patch is safe to land.",
+        Some("reviewer"),
+    ),
+    (
+        "I committed the migration on the wrong branch and I have not pushed. Move that one commit onto the release branch without dragging the other two.",
+        Some("git-expert"),
+    ),
+    (
+        "What is the boiling point of water at sea level if I am only asking for the number?",
+        None,
+    ),
+    (
+        "Remind me of the capital of Portugal, nothing about this repository.",
+        None,
+    ),
+];
+
+pub fn host_benchmark_cases() -> Vec<(String, Option<String>)> {
+    HOST_BENCHMARK
+        .iter()
+        .map(|(prompt, skill)| ((*prompt).to_string(), skill.map(str::to_string)))
+        .collect()
+}
+
+pub fn host_benchmark_controls() -> usize {
+    HOST_BENCHMARK
+        .iter()
+        .filter(|(_, skill)| skill.is_none())
+        .count()
+}
+
+/// Score the fixed host prompts. This path does not read or write an eval cache.
+pub fn run_host(home: Option<&std::path::Path>, remote: bool) -> BenchmarkReport {
+    score_cases(
+        home,
+        &host_benchmark_cases(),
+        host_benchmark_controls(),
+        SOURCE_HOST,
+        remote,
+    )
+}
+
+/// Drop labelled rows whose text is a host-benchmark prompt. Unlabelled rows stay.
+pub fn omit_host_benchmark_labels(
+    rows: &[crate::utility::lexical_experts::SourcedRow],
+) -> (Vec<crate::utility::lexical_experts::SourcedRow>, usize) {
+    let reserved: std::collections::HashSet<&str> =
+        HOST_BENCHMARK.iter().map(|(prompt, _)| *prompt).collect();
+    let mut dropped = 0usize;
+    let kept = rows
+        .iter()
+        .filter(|row| {
+            let blocked = row.skill.is_some() && reserved.contains(row.text.trim());
+            if blocked {
+                dropped += 1;
+            }
+            !blocked
+        })
+        .cloned()
+        .collect();
+    (kept, dropped)
+}
+
+/// The row list `train-lexical` fits: ambiguous titles out, uninstalled skills
+/// out, host-benchmark prompts out of the labelled set.
+pub fn lexical_rows_to_fit(
+    rows: &[crate::utility::lexical_experts::SourcedRow],
+    installed: &dyn Fn(&str) -> bool,
+) -> (
+    Vec<crate::utility::lexical_experts::SourcedRow>,
+    usize,
+    usize,
+    usize,
+) {
+    let (rows, dropped_ambiguous) = crate::utility::lexical_experts::drop_ambiguous_sourced(rows);
+    let (rows, dropped_uninstalled) =
+        crate::utility::lexical_experts::drop_uninstalled_skills(&rows, installed);
+    let (rows, dropped_benchmark) = omit_host_benchmark_labels(&rows);
+    (
+        rows,
+        dropped_ambiguous,
+        dropped_uninstalled,
+        dropped_benchmark,
+    )
+}
+
 fn score_cases(
     home: Option<&std::path::Path>,
     cases: &[(String, Option<String>)],
@@ -113,10 +277,13 @@ fn score_cases(
     remote: bool,
 ) -> BenchmarkReport {
     let prompts: Vec<String> = cases.iter().map(|(prompt, _)| prompt.clone()).collect();
-    let remote_batch = if remote {
-        run_remote(&prompts, &expected_labels(cases), REMOTE_ENDPOINT)
+    let (remote_batch, remote_error) = if remote {
+        match run_remote(&prompts, &expected_labels(cases), REMOTE_ENDPOINT) {
+            Ok(batch) => (Some(batch), None),
+            Err(error) => (None, Some(error)),
+        }
     } else {
-        None
+        (None, None)
     };
     let remote_items = remote_batch.as_ref().map(|batch| batch.items.as_slice());
 
@@ -189,6 +356,7 @@ fn score_cases(
         controls,
         local_correct,
         remote_available: remote_batch.is_some(),
+        remote_error,
         remote_correct,
         remote_model: remote_batch.and_then(|batch| batch.model),
         remote_p50_ms: percentile_ms(&rows, 50),
@@ -235,11 +403,9 @@ pub const SOURCE_EXTERNAL: &str = "stackoverflow tags (external ground truth)";
 const EXTERNAL_ENDPOINT: &str = "https://api.stackexchange.com/2.3/questions";
 const EXTERNAL_TIMEOUT_SECS: &str = "20";
 
-/// Community tags mapped to the keel skill that owns that work. The mapping is
-/// mechanical: the tag names the domain and the skill owns the domain, so the
-/// labels are the community's, not keel's own vocabulary.
+/// Community tag → the installed skill that owns that work.
+/// A tag with no installed skill is not collected. `rust` was removed for that reason.
 pub const EXTERNAL_TAGS: &[(&str, &str)] = &[
-    ("rust", "rust"),
     ("unit-testing", "test-driven-development"),
     ("debugging", "systematic-debugging"),
     ("security", "adversarial-security-review"),
@@ -456,19 +622,34 @@ pub fn crates_cache_path(claude_home: &std::path::Path) -> std::path::PathBuf {
 pub fn fetch_all_corpora(
     per_tag: usize,
     pages: usize,
-) -> Result<Vec<(String, Option<String>)>, String> {
+) -> Result<Vec<crate::utility::lexical_experts::SourcedRow>, String> {
     let mut rows = Vec::new();
     let mut failures: Vec<String> = Vec::new();
     for site in EXTERNAL_SITES {
         match fetch_external_site(site, per_tag, 2, pages) {
-            Ok(fetched) => rows.extend(fetched),
+            Ok(fetched) => {
+                let provider = format!("stackexchange:{site}");
+                rows.extend(fetched.into_iter().map(|(text, skill)| {
+                    crate::utility::lexical_experts::SourcedRow {
+                        text,
+                        skill,
+                        provider: provider.clone(),
+                    }
+                }));
+            }
             Err(error) => failures.push(format!("{site}: {error}")),
         }
     }
     // why: pages two and up train while page one stays the evaluation shell.
     for page in 2..=CRATES_TRAINING_PAGES {
         match fetch_crates_categories(per_tag, page) {
-            Ok(fetched) => rows.extend(fetched),
+            Ok(fetched) => rows.extend(fetched.into_iter().map(|(text, skill)| {
+                crate::utility::lexical_experts::SourcedRow {
+                    text,
+                    skill,
+                    provider: crate::utility::lexical_experts::CRATES_PROVIDER.to_string(),
+                }
+            })),
             Err(error) => failures.push(format!("crates page {page}: {error}")),
         }
     }
@@ -476,6 +657,72 @@ pub fn fetch_all_corpora(
         return Err(failures.join("; "));
     }
     Ok(rows)
+}
+
+/// Descriptions from the crates.io training pages, used to attribute an old
+/// cache that stored titles without a provider.
+pub fn fetch_crates_training_descriptions(per_category: usize) -> Result<Vec<String>, String> {
+    let mut texts = Vec::new();
+    let mut failures: Vec<String> = Vec::new();
+    for page in 2..=CRATES_TRAINING_PAGES {
+        match fetch_crates_categories(per_category, page) {
+            Ok(fetched) => texts.extend(fetched.into_iter().map(|(text, _)| text)),
+            Err(error) => failures.push(format!("crates page {page}: {error}")),
+        }
+    }
+    if texts.is_empty() {
+        return Err(failures.join("; "));
+    }
+    Ok(texts)
+}
+
+/// Tag rows whose text is a known crate description. Everything else in an
+/// untagged cache is Stack Exchange. Returns how many rows were crates.io.
+pub fn assign_providers_from_crates(
+    rows: &mut [crate::utility::lexical_experts::SourcedRow],
+    descriptions: &[String],
+) -> usize {
+    let known: std::collections::HashSet<String> = descriptions
+        .iter()
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty())
+        .collect();
+    if known.is_empty() {
+        return 0;
+    }
+    let mut tagged = 0usize;
+    for row in rows.iter_mut() {
+        if !row.provider.is_empty() {
+            continue;
+        }
+        if known.contains(row.text.trim()) {
+            row.provider = crate::utility::lexical_experts::CRATES_PROVIDER.to_string();
+            tagged += 1;
+        } else {
+            row.provider = "stackexchange".to_string();
+        }
+    }
+    tagged
+}
+
+pub fn merge_sourced_rows(rows: &mut Vec<crate::utility::lexical_experts::SourcedRow>) {
+    rows.sort_by(|left, right| left.text.cmp(&right.text));
+    let mut merged: Vec<crate::utility::lexical_experts::SourcedRow> = Vec::new();
+    for row in rows.drain(..) {
+        if let Some(last) = merged.last_mut() {
+            if last.text == row.text {
+                if last.provider.is_empty() {
+                    last.provider = row.provider;
+                }
+                if last.skill.is_none() {
+                    last.skill = row.skill;
+                }
+                continue;
+            }
+        }
+        merged.push(row);
+    }
+    *rows = merged;
 }
 
 /// Developer-corpus fetch, the corpus the models are trained on.
@@ -509,6 +756,40 @@ pub fn read_external_cache(path: &std::path::Path) -> Option<Vec<(String, Option
     (!cases.is_empty()).then_some(cases)
 }
 
+pub fn read_sourced_cache(
+    path: &std::path::Path,
+) -> Option<Vec<crate::utility::lexical_experts::SourcedRow>> {
+    let text = std::fs::read_to_string(path).ok()?; // why: an absent cache means fetch
+    if let Ok(rows) =
+        serde_json::from_str::<Vec<crate::utility::lexical_experts::SourcedRow>>(&text)
+    {
+        return (!rows.is_empty()).then_some(rows);
+    }
+    let pairs: Vec<(String, Option<String>)> = serde_json::from_str(&text).ok()?; // why: an unreadable cache means fetch
+    let rows: Vec<crate::utility::lexical_experts::SourcedRow> = pairs
+        .into_iter()
+        .map(
+            |(text, skill)| crate::utility::lexical_experts::SourcedRow {
+                text,
+                skill,
+                provider: String::new(),
+            },
+        )
+        .collect();
+    (!rows.is_empty()).then_some(rows)
+}
+
+pub fn write_sourced_cache(
+    path: &std::path::Path,
+    rows: &[crate::utility::lexical_experts::SourcedRow],
+) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| format!("create cache dir: {error}"))?;
+    }
+    let text = serde_json::to_string(rows).map_err(|error| format!("serialize corpus: {error}"))?;
+    std::fs::write(path, text).map_err(|error| format!("write corpus cache: {error}"))
+}
+
 pub fn write_external_cache(
     path: &std::path::Path,
     cases: &[(String, Option<String>)],
@@ -537,25 +818,74 @@ fn expected_labels(cases: &[(String, Option<String>)]) -> Vec<String> {
     unique_labels(&labels)
 }
 
-fn run_remote(prompts: &[String], labels: &[String], endpoint: &str) -> Option<RemoteBatch> {
+fn run_remote(
+    prompts: &[String],
+    labels: &[String],
+    endpoint: &str,
+) -> Result<RemoteBatch, String> {
+    // The service currently refuses a body above 20 inputs.
+    const CHUNK: usize = 20;
+    if prompts.is_empty() {
+        return Err("remote classify: no prompts".to_string());
+    }
+    let mut items = Vec::with_capacity(prompts.len());
+    let mut model = None;
+    for (index, chunk) in prompts.chunks(CHUNK).enumerate() {
+        let batch = run_remote_chunk(chunk, labels, endpoint, index)?;
+        if model.is_none() {
+            model = batch.model;
+        }
+        items.extend(batch.items);
+    }
+    if items.len() != prompts.len() {
+        return Err(format!(
+            "remote classify: expected {} results, got {}",
+            prompts.len(),
+            items.len()
+        ));
+    }
+    Ok(RemoteBatch { model, items })
+}
+
+fn run_remote_chunk(
+    prompts: &[String],
+    labels: &[String],
+    endpoint: &str,
+    index: usize,
+) -> Result<RemoteBatch, String> {
     let body = json!({ "inputs": prompts, "labels": labels }).to_string();
+    let path =
+        std::env::temp_dir().join(format!("keel-classify-{}-{index}.json", std::process::id()));
+    std::fs::write(&path, &body).map_err(|error| format!("write classify body: {error}"))?;
+    let file_arg = format!("@{}", path.display());
+    // why: a JSON body on the Windows command line is reparsed and the service rejects it.
     let output = Command::new("curl")
         .args([
-            "-s",
+            "-sS",
             "--max-time",
             REMOTE_TIMEOUT_SECS,
             "-H",
             "content-type: application/json",
-            "-d",
-            &body,
+            "--data-binary",
+            &file_arg,
             endpoint,
         ])
-        // why: an unavailable curl reads as "no remote column", never an error.
-        .output()
-        .ok()?;
-    // why: a non-JSON body is an outage page or a rate limit, not a parse bug.
-    let parsed: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
-    parse_remote_response(&parsed)
+        .output();
+    let _ = std::fs::remove_file(&path); // why: temp-body cleanup is best-effort
+    let output = output.map_err(|error| format!("curl: {error}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("curl status {}: {}", output.status, stderr.trim()));
+    }
+    let parsed: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("remote body was not JSON: {error}"))?;
+    parse_remote_response(&parsed).ok_or_else(|| {
+        let text = String::from_utf8_lossy(&output.stdout);
+        format!(
+            "remote response had no results: {}",
+            text.chars().take(240).collect::<String>()
+        )
+    })
 }
 
 fn unique_labels(labels: &[String]) -> Vec<String> {
@@ -711,6 +1041,8 @@ pub fn render(report: &BenchmarkReport) -> String {
             report.remote_p50_ms.unwrap_or(0),
             report.remote_model.as_deref().unwrap_or("unknown")
         ));
+    } else if let Some(error) = &report.remote_error {
+        out.push_str(&format!("classifier.dev   failed: {error}\n"));
     } else {
         out.push_str("classifier.dev   not run (pass --remote to spend one live call)\n");
     }
@@ -825,6 +1157,61 @@ mod tests {
     use super::*;
 
     #[test]
+    fn host_benchmark_is_disjoint_from_the_training_cache() {
+        let home = crate::runtime::resolve_claude_home("").expect("home");
+        let cached = read_sourced_cache(&training_cache_path(&home)).expect("training cache");
+        let texts: std::collections::HashSet<String> = cached
+            .iter()
+            .map(|row| row.text.trim().to_string())
+            .collect();
+        assert!(HOST_BENCHMARK.iter().any(|(_, skill)| skill.is_none()));
+        assert!(HOST_BENCHMARK.iter().any(|(_, skill)| skill.is_some()));
+        for (prompt, skill) in HOST_BENCHMARK {
+            match skill {
+                Some("rust") => panic!("rust is not a host-benchmark label"),
+                Some(name) => {
+                    assert!(
+                        crate::utility::skill_match::installed_skill_path(&home, name).is_some(),
+                        "{name} is not installed"
+                    );
+                }
+                None => {}
+            }
+            assert!(
+                !texts.contains((*prompt).trim()),
+                "host prompt is already a training row"
+            );
+        }
+    }
+
+    #[test]
+    fn lexical_fit_rows_omit_host_benchmark_prompts() {
+        let home = crate::runtime::resolve_claude_home("").expect("home");
+        let cached = read_sourced_cache(&training_cache_path(&home)).expect("training cache");
+        let reserved: std::collections::HashSet<&str> =
+            HOST_BENCHMARK.iter().map(|(prompt, _)| *prompt).collect();
+        let (fitted, _, _, _) = lexical_rows_to_fit(&cached, &|skill| {
+            crate::utility::skill_match::installed_skill_path(&home, skill).is_some()
+        });
+        assert!(fitted
+            .iter()
+            .all(|row| { row.skill.is_none() || !reserved.contains(row.text.trim()) }));
+        let mut injected = cached;
+        injected.push(crate::utility::lexical_experts::SourcedRow {
+            text: HOST_BENCHMARK[0].0.to_string(),
+            skill: Some("postgres-migration-safety".to_string()),
+            provider: "stackexchange".to_string(),
+        });
+        let (fitted, _, _, dropped_benchmark) = lexical_rows_to_fit(&injected, &|skill| {
+            crate::utility::skill_match::installed_skill_path(&home, skill).is_some()
+        });
+        assert!(dropped_benchmark >= 1);
+        assert!(fitted
+            .iter()
+            .all(|row| { row.text.trim() != HOST_BENCHMARK[0].0 || row.skill.is_none() }));
+    }
+
+    #[test]
     fn external_tag_map_is_mechanical_and_unique() {
         let mut tags: Vec<&str> = Vec::new();
         for (tag, skill) in EXTERNAL_TAGS {
@@ -836,8 +1223,12 @@ mod tests {
             tags.push(tag);
         }
         assert!(
-            tags.len() >= 8,
+            tags.len() >= 7,
             "a real benchmark needs breadth, not one tag"
+        );
+        assert!(
+            EXTERNAL_TAGS.iter().all(|(_, skill)| *skill != "rust"),
+            "rust is not an installed skill, so it is not a training label"
         );
         assert_ne!(
             SOURCE_EXTERNAL, SOURCE_FIXTURES,
@@ -871,6 +1262,35 @@ mod tests {
             "question-shaped titles route to nothing, and silence must be counted as silence"
         );
         assert_eq!(report.rows.len(), 2);
+    }
+
+    #[test]
+    fn sourced_cache_attributes_an_old_pair_file() {
+        let dir = std::env::temp_dir().join(format!("keel-sourced-cache-{}", std::process::id()));
+        let path = dir.join("corpus.json");
+        let pairs = vec![
+            (
+                "  A rust library for vacuuming. ".to_string(),
+                Some("postgres-migration-safety".to_string()),
+            ),
+            (
+                "How do I borrow in Rust?".to_string(),
+                Some("rust".to_string()),
+            ),
+        ];
+        write_external_cache(&path, &pairs).unwrap();
+        let mut rows = read_sourced_cache(&path).expect("pairs still load");
+        assert!(rows.iter().all(|row| row.provider.is_empty()));
+        let tagged =
+            assign_providers_from_crates(&mut rows, &["A rust library for vacuuming.".to_string()]);
+        assert_eq!(tagged, 1);
+        assert_eq!(rows[0].provider, "crates.io");
+        assert_eq!(rows[1].provider, "stackexchange");
+        write_sourced_cache(&path, &rows).unwrap();
+        let again = read_sourced_cache(&path).expect("objects load");
+        assert_eq!(again[0].provider, "crates.io");
+        assert_eq!(again[1].skill.as_deref(), Some("rust"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

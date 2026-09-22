@@ -14,6 +14,9 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 pub const LEXICAL_SCHEMA: u32 = 3;
+/// crates.io rows share this tag. Their descriptions name the language
+/// ("a rust library") even when the skill is websocket or postgres.
+pub const CRATES_PROVIDER: &str = "crates.io";
 const DEFAULT_SEED: u64 = 42;
 const EPOCHS: usize = 30;
 const LEARNING_RATE: f64 = 0.5;
@@ -89,6 +92,19 @@ pub type LabelledRows = Vec<(String, String)>;
 /// Raw rows as fetched, where an unlabelled row is allowed and then dropped.
 pub type RawRows = [(String, Option<String>)];
 
+/// One fetched row plus the provider it came from. An empty provider is an
+/// old cache row that has not been attributed yet.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SourcedRow {
+    pub text: String,
+    pub skill: Option<String>,
+    #[serde(default)]
+    pub provider: String,
+}
+
+/// Words that mean "this crate is written in Rust", not which skill owns it.
+const CRATES_BOILERPLATE: &[&str] = &["rust", "crate", "crates", "library", "libraries"];
+
 type Weights = Vec<HashMap<String, f64>>;
 type Accumulators = Vec<HashMap<String, f64>>;
 
@@ -99,30 +115,64 @@ struct Fitted {
 
 /// Label support per class, so a training run shows which skills have evidence
 /// and which are running on fumes.
-pub fn class_balance(rows: &RawRows) -> Vec<(String, usize)> {
+fn tally(labels: impl Iterator<Item = String>) -> Vec<(String, usize)> {
     let mut counts: Vec<(String, usize)> = Vec::new();
-    for (_, skill) in rows {
-        let Some(skill) = skill else {
-            continue;
-        };
-        match counts.iter().position(|(name, _)| name == skill) {
+    for label in labels {
+        match counts.iter().position(|(name, _)| name == &label) {
             Some(index) => counts[index].1 += 1,
-            None => counts.push((skill.clone(), 1)),
+            None => counts.push((label, 1)),
         }
     }
     counts.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
     counts
 }
 
+pub fn class_balance(rows: &RawRows) -> Vec<(String, usize)> {
+    tally(rows.iter().filter_map(|(_, skill)| skill.clone()))
+}
+
+pub fn class_balance_sourced(rows: &[SourcedRow]) -> Vec<(String, usize)> {
+    tally(rows.iter().filter_map(|row| row.skill.clone()))
+}
+
+/// Rows per provider, so a training run shows which source the evidence came from.
+pub fn provider_counts(rows: &[SourcedRow]) -> Vec<(String, usize)> {
+    tally(rows.iter().map(|row| {
+        if row.provider.is_empty() {
+            "untagged".to_string()
+        } else {
+            row.provider.clone()
+        }
+    }))
+}
+
 /// Train the experts. Returns `None` when the corpus cannot support a model at
 /// all: a held-out score over a handful of rows would be a guess.
 pub fn train(rows: &RawRows) -> Option<LexicalModel> {
-    let (train_rows, validation_rows, test_rows) = split(rows, DEFAULT_SEED);
+    let sourced: Vec<SourcedRow> = rows
+        .iter()
+        .map(|(text, skill)| SourcedRow {
+            text: text.clone(),
+            skill: skill.clone(),
+            provider: String::new(),
+        })
+        .collect();
+    train_sourced(&sourced)
+}
+
+/// Train from rows that name their provider.
+pub fn train_sourced(rows: &[SourcedRow]) -> Option<LexicalModel> {
+    let (train_rows, validation_rows, test_rows) = split_sourced(rows, DEFAULT_SEED);
+    // Rejected: masking crates boilerplate on this slice moved held-out
+    // accuracy 0.7386 → 0.7285 and Brier 0.1380 → 0.1428 (accept 0.25 → 0.35).
+    let train_pairs = pairs_of(&train_rows);
+    let validation_pairs = pairs_of(&validation_rows);
+    let test_pairs = pairs_of(&test_rows);
     // why: community tags carry label noise, and pruning the rows the fitted
     // model confidently contradicts lifted held-out accuracy in measurement.
-    let (train_rows, _) = prune_label_noise(&train_rows);
-    let fitted = fit(&train_rows, &validation_rows)?;
-    let held_out = score_held_out(&fitted, &validation_rows, &test_rows);
+    let (train_rows, _) = prune_label_noise(&train_pairs);
+    let fitted = fit(&train_rows, &validation_pairs)?;
+    let held_out = score_held_out(&fitted, &validation_pairs, &test_pairs);
     let usable = rows.len() >= REFUSE_BELOW_ROWS
         && held_out
             .as_ref()
@@ -142,12 +192,48 @@ pub fn train(rows: &RawRows) -> Option<LexicalModel> {
 /// the model that one row owns two skills. Keep single-tag rows only, and report
 /// how many were dropped so the loss is visible rather than silent.
 pub fn drop_ambiguous_tags(rows: &RawRows) -> (Vec<(String, Option<String>)>, usize) {
+    let sourced: Vec<SourcedRow> = rows
+        .iter()
+        .map(|(text, skill)| SourcedRow {
+            text: text.clone(),
+            skill: skill.clone(),
+            provider: String::new(),
+        })
+        .collect();
+    let (kept, dropped) = drop_ambiguous_sourced(&sourced);
+    (
+        kept.into_iter().map(|row| (row.text, row.skill)).collect(),
+        dropped,
+    )
+}
+
+/// Keep unlabelled rows. Drop a labelled row whose skill is not installed.
+pub fn drop_uninstalled_skills(
+    rows: &[SourcedRow],
+    installed: &dyn Fn(&str) -> bool,
+) -> (Vec<SourcedRow>, usize) {
+    let mut dropped = 0usize;
+    let kept = rows
+        .iter()
+        .filter(|row| match row.skill.as_deref() {
+            Some(skill) if !installed(skill) => {
+                dropped += 1;
+                false
+            }
+            _ => true,
+        })
+        .cloned()
+        .collect();
+    (kept, dropped)
+}
+
+pub fn drop_ambiguous_sourced(rows: &[SourcedRow]) -> (Vec<SourcedRow>, usize) {
     let mut owners: HashMap<String, Vec<&str>> = HashMap::new();
-    for (prompt, skill) in rows {
-        if let Some(skill) = skill {
-            let entry = owners.entry(prompt.clone()).or_default();
-            if !entry.contains(&skill.as_str()) {
-                entry.push(skill.as_str());
+    for row in rows {
+        if let Some(skill) = row.skill.as_deref() {
+            let entry = owners.entry(row.text.clone()).or_default();
+            if !entry.contains(&skill) {
+                entry.push(skill);
             }
         }
     }
@@ -156,20 +242,16 @@ pub fn drop_ambiguous_tags(rows: &RawRows) -> (Vec<(String, Option<String>)>, us
         .filter(|(_, skills)| skills.len() > 1)
         .map(|(title, _)| title)
         .collect();
-    let kept: Vec<(String, Option<String>)> = rows
+    let kept: Vec<SourcedRow> = rows
         .iter()
-        .filter(|(prompt, _)| !ambiguous.iter().any(|title| title == prompt))
+        .filter(|row| !ambiguous.iter().any(|title| title == &row.text))
         .cloned()
         .collect();
     let dropped = rows.len().saturating_sub(kept.len());
     (kept, dropped)
 }
 
-fn split(rows: &RawRows, seed: u64) -> (LabelledRows, LabelledRows, LabelledRows) {
-    let mut labelled: LabelledRows = rows
-        .iter()
-        .filter_map(|(prompt, skill)| Some((prompt.clone(), skill.clone()?)))
-        .collect();
+fn shuffle<T>(labelled: &mut [T], seed: u64) {
     let mut state = seed | 1;
     for index in (1..labelled.len()).rev() {
         state = state
@@ -178,13 +260,59 @@ fn split(rows: &RawRows, seed: u64) -> (LabelledRows, LabelledRows, LabelledRows
         let swap = (state >> 33) as usize % (index + 1);
         labelled.swap(index, swap);
     }
-    let test_count = labelled.len() / 5;
+}
+
+fn split_counts(len: usize) -> (usize, usize) {
+    let test_count = len / 5;
     // why: the accept point is fitted here, and a tenth of the corpus was thin
     // enough that the fitted floor moved on noise alone.
-    let validation_count = labelled.len() * 3 / 20;
+    let validation_count = len * 3 / 20;
+    (test_count, validation_count)
+}
+
+fn split_three<T>(mut labelled: Vec<T>, seed: u64) -> (Vec<T>, Vec<T>, Vec<T>) {
+    shuffle(&mut labelled, seed);
+    let (test_count, validation_count) = split_counts(labelled.len());
     let test = labelled.split_off(labelled.len() - test_count);
     let validation = labelled.split_off(labelled.len() - validation_count);
     (labelled, validation, test)
+}
+
+fn split_sourced(
+    rows: &[SourcedRow],
+    seed: u64,
+) -> (Vec<SourcedRow>, Vec<SourcedRow>, Vec<SourcedRow>) {
+    let labelled: Vec<SourcedRow> = rows
+        .iter()
+        .filter(|row| row.skill.is_some())
+        .cloned()
+        .collect();
+    split_three(labelled, seed)
+}
+
+fn pairs_of(rows: &[SourcedRow]) -> LabelledRows {
+    rows.iter()
+        .filter_map(|row| Some((row.text.clone(), row.skill.clone()?)))
+        .collect()
+}
+
+/// Drop language boilerplate from a crates.io description. `cargo` stays: it is
+/// the dependency skill's own word, not the language the crate is written in.
+pub fn mask_crates_boilerplate(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for word in text.split_inclusive(|character: char| !character.is_ascii_alphanumeric()) {
+        let core_len = word
+            .trim_end_matches(|character: char| !character.is_ascii_alphanumeric())
+            .len();
+        let (core, tail) = word.split_at(core_len);
+        if CRATES_BOILERPLATE.contains(&core.to_ascii_lowercase().as_str()) {
+            out.push(' ');
+            out.push_str(tail);
+        } else {
+            out.push_str(word);
+        }
+    }
+    out
 }
 
 /// Unigrams plus adjacent bigrams: a bigram is what separates `borrow checker`
@@ -503,15 +631,6 @@ impl Scorer {
             .collect();
         softmax(&logits, temperature)
     }
-
-    fn predict(&self, prompt: &str, temperature: f64) -> Option<(String, f64)> {
-        let document = self.vectorize(prompt);
-        if document.is_empty() {
-            return None;
-        }
-        let (best, probability) = best_of(&self.probabilities(&document, temperature));
-        Some((self.names[best].clone(), probability))
-    }
 }
 
 fn best_of(probabilities: &[f64]) -> (usize, f64) {
@@ -530,12 +649,48 @@ fn best_of(probabilities: &[f64]) -> (usize, f64) {
 /// Best skill and its temperature-calibrated confidence. `None` when the prompt
 /// shares no feature with the training rows: silence beats a coin flip.
 pub fn predict(model: &LexicalModel, prompt: &str) -> Option<(String, f64)> {
+    rank(model, prompt).and_then(|ranked| ranked.into_iter().next())
+}
+
+/// Every class probability, highest first. Empty when the prompt shares no
+/// feature with the training rows.
+pub fn rank(model: &LexicalModel, prompt: &str) -> Option<Vec<(String, f64)>> {
     let scale = model
         .held_out
         .as_ref()
         .map(|metrics| metrics.scale)
         .unwrap_or(1.0);
-    Scorer::new(model).predict(prompt, scale)
+    let scorer = Scorer::new(model);
+    let document = scorer.vectorize(prompt);
+    if document.is_empty() {
+        return None;
+    }
+    let mut ranked: Vec<(String, f64)> = scorer
+        .names
+        .iter()
+        .cloned()
+        .zip(scorer.probabilities(&document, scale))
+        .collect();
+    ranked.sort_by(|left, right| {
+        right
+            .1
+            .partial_cmp(&left.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    Some(ranked)
+}
+
+/// Highest class that is a real keel skill and still clears the accept point.
+/// A phantom class can win the head and must not erase a skill that cleared it.
+pub fn select_installed<'a>(
+    ranked: &'a [(String, f64)],
+    accept: f64,
+    installed: &dyn Fn(&str) -> bool,
+) -> Option<(&'a str, f64)> {
+    ranked
+        .iter()
+        .find(|(name, probability)| *probability >= accept && installed(name))
+        .map(|(name, probability)| (name.as_str(), *probability))
 }
 
 /// The confidence the held-out split supports. With no held-out split this is
@@ -834,6 +989,15 @@ pub fn load(path: &Path) -> Option<LexicalModel> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    const PHANTOM_LABEL: &str = "rust";
+    const POSTGRES_LABEL: &str = "postgres-migration-safety";
+    fn sourced_row(text: &str, skill: Option<&str>) -> SourcedRow {
+        SourcedRow {
+            text: text.to_string(),
+            skill: skill.map(str::to_string),
+            provider: String::new(),
+        }
+    }
 
     fn separable_rows() -> Vec<(String, Option<String>)> {
         let mut rows = Vec::new();
@@ -894,15 +1058,14 @@ mod tests {
 
     #[test]
     fn split_keeps_three_way_disjoint_slices() {
-        let rows: Vec<(String, Option<String>)> = (0..40)
-            .map(|index| {
-                (
-                    format!("title {index}"),
-                    Some(format!("skill {}", index % 4)),
-                )
+        let rows: Vec<SourcedRow> = (0..40)
+            .map(|index| SourcedRow {
+                text: format!("title {index}"),
+                skill: Some(format!("skill {}", index % 4)),
+                provider: String::new(),
             })
             .collect();
-        let (train_rows, validation_rows, test_rows) = split(&rows, DEFAULT_SEED);
+        let (train_rows, validation_rows, test_rows) = split_sourced(&rows, DEFAULT_SEED);
         assert_eq!(
             train_rows.len() + validation_rows.len() + test_rows.len(),
             rows.len(),
@@ -911,9 +1074,13 @@ mod tests {
         assert!(!validation_rows.is_empty(), "validation fits the threshold");
         assert!(!test_rows.is_empty(), "test is what gets reported");
         let mut seen: Vec<&String> = Vec::new();
-        for (prompt, _) in train_rows.iter().chain(&validation_rows).chain(&test_rows) {
-            assert!(!seen.contains(&prompt), "title appears twice: {prompt}");
-            seen.push(prompt);
+        for row in train_rows.iter().chain(&validation_rows).chain(&test_rows) {
+            assert!(
+                !seen.contains(&&row.text),
+                "title appears twice: {}",
+                row.text
+            );
+            seen.push(&row.text);
         }
     }
 
@@ -943,6 +1110,84 @@ mod tests {
             .collect();
         let model = train(&rows).expect("still trains");
         assert!(!model.usable, "eight rows must not earn a usable model");
+    }
+
+    #[test]
+    fn crates_boilerplate_drops_the_language_and_keeps_cargo() {
+        let masked = mask_crates_boilerplate(&format!(
+            "A {PHANTOM_LABEL} library and crate for cargo and postgres"
+        ));
+        let produced = features(&masked);
+        assert!(!produced.iter().any(|feature| feature == PHANTOM_LABEL));
+        assert!(!produced.iter().any(|feature| feature == "library"));
+        assert!(!produced.iter().any(|feature| feature == "crate"));
+        assert!(produced.iter().any(|feature| feature == "cargo"));
+        assert!(produced.iter().any(|feature| feature == "postgres"));
+        assert!(
+            features("trust the borrow checker")
+                .iter()
+                .any(|feature| feature == "trust"),
+            "a word that merely contains {PHANTOM_LABEL} stays"
+        );
+    }
+
+    #[test]
+    fn uninstalled_skill_rows_leave_the_training_set() {
+        let rows = vec![
+            sourced_row("borrow checker lifetime", Some(PHANTOM_LABEL)),
+            sourced_row("postgres vacuum autovacuum", Some(POSTGRES_LABEL)),
+            sourced_row("unlabelled blurb", None),
+        ];
+        let (kept, dropped) = drop_uninstalled_skills(&rows, &|name| name != PHANTOM_LABEL);
+        assert_eq!(dropped, 1);
+        assert_eq!(kept.len(), 2);
+        assert!(kept
+            .iter()
+            .all(|row| row.skill.as_deref() != Some(PHANTOM_LABEL)));
+    }
+
+    #[test]
+    fn select_installed_skips_a_phantom_class_above_the_floor() {
+        let ranked = vec![
+            (PHANTOM_LABEL.to_string(), 0.62),
+            (POSTGRES_LABEL.to_string(), 0.31),
+            ("websocket-realtime-design".to_string(), 0.07),
+        ];
+        let chosen = select_installed(&ranked, 0.25, &|name| name != PHANTOM_LABEL);
+        assert_eq!(chosen.map(|(name, _)| name), Some(POSTGRES_LABEL));
+        assert!(
+            select_installed(&ranked, 0.40, &|name| name != PHANTOM_LABEL).is_none(),
+            "the runner-up must clear the same floor on its own probability"
+        );
+    }
+
+    #[test]
+    fn sourced_training_keeps_the_provider_on_the_training_slice() {
+        let mut rows = Vec::new();
+        for index in 0..80 {
+            rows.push(SourcedRow {
+                text: format!("{PHANTOM_LABEL} library crate postgres vacuum autovacuum {index}"),
+                skill: Some(POSTGRES_LABEL.to_string()),
+                provider: CRATES_PROVIDER.to_string(),
+            });
+            rows.push(SourcedRow {
+                text: format!("borrow checker lifetime error in cargo build {index}"),
+                skill: Some(PHANTOM_LABEL.to_string()),
+                provider: "stackexchange:stackoverflow".to_string(),
+            });
+        }
+        let (train_rows, validation_rows, _) = split_sourced(&rows, DEFAULT_SEED);
+        let crates_train = train_rows.iter().any(|row| row.provider == CRATES_PROVIDER);
+        assert!(crates_train, "the training slice still knows the provider");
+        assert!(
+            validation_rows
+                .iter()
+                .filter(|row| row.provider == CRATES_PROVIDER)
+                .any(|row| row.text.contains("library")),
+            "validation text stays raw"
+        );
+        let model = train_sourced(&rows).expect("sourced corpus trains");
+        assert!(model.held_out.is_some());
     }
 
     #[test]

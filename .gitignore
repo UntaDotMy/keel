@@ -71,12 +71,14 @@ docs/audits/**/raw/
 *.rej
 
 # Local planning scratch files
+/HANDOFF-classifier-improvement.md
 /KEEL-10-10-IMPROVEMENT-PLAN.md
 /KEEL-JEV-INSPIRED-IMPROVEMENT-PLAN.md
 plan.md
 todo.md
 todo.local.md
 .scratch/
+.commandcode/
 
 # Local session / agent continuation scratch (never ship)
 .omo/
