@@ -824,6 +824,79 @@ pub fn skill_seed_rows(
     rows
 }
 
+/// Rows a person labelled for keel's own skills: host-shaped prompts with the
+/// skill they should load. Kept outside the fetched corpora so a provider
+/// refresh cannot drop them, and trusted like the seeds because the label is
+/// deliberate rather than a community tag.
+pub const USER_ROW_PROVIDER: &str = "user-labelled";
+
+/// Where those rows live. A missing file means none were written, not an error.
+pub fn user_rows_path(claude_home: &std::path::Path) -> std::path::PathBuf {
+    crate::runtime::state_directory(claude_home)
+        .join("benchmarks")
+        .join("user-rows.json")
+}
+
+/// Reads the labelled rows and drops any that name a skill this install does not
+/// have, or that repeat a host benchmark prompt: an evaluation row in training is
+/// a training number wearing an evaluation label.
+pub fn read_user_rows(
+    claude_home: &std::path::Path,
+) -> (
+    Vec<crate::utility::lexical_experts::SourcedRow>,
+    usize,
+    usize,
+) {
+    let Ok(text) = std::fs::read_to_string(user_rows_path(claude_home)) else {
+        return (Vec::new(), 0, 0);
+    };
+    // fallback: a malformed file means no labelled rows, never a failed run.
+    let entries: Vec<serde_json::Value> = serde_json::from_str(&text).unwrap_or_default();
+    let reserved: std::collections::HashSet<String> = HOST_BENCHMARK
+        .iter()
+        .map(|(prompt, _)| normalize_text(prompt))
+        .collect();
+    let mut rows = Vec::new();
+    let mut uninstalled = 0usize;
+    let mut benchmark = 0usize;
+    for entry in entries {
+        let (text, skill) = if let serde_json::Value::Array(pair) = &entry {
+            match (pair.first(), pair.get(1)) {
+                (Some(text), Some(skill)) => (
+                    text.as_str().unwrap_or_default().to_string(),
+                    skill.as_str().unwrap_or_default().to_string(),
+                ),
+                _ => continue,
+            }
+        } else {
+            match (entry.get("text"), entry.get("skill")) {
+                (Some(text), Some(skill)) => (
+                    text.as_str().unwrap_or_default().to_string(),
+                    skill.as_str().unwrap_or_default().to_string(),
+                ),
+                _ => continue,
+            }
+        };
+        if text.trim().is_empty() || skill.is_empty() {
+            continue;
+        }
+        if reserved.contains(&normalize_text(&text)) {
+            benchmark += 1;
+            continue;
+        }
+        if crate::utility::skill_match::installed_skill_path(claude_home, &skill).is_none() {
+            uninstalled += 1;
+            continue;
+        }
+        rows.push(crate::utility::lexical_experts::SourcedRow {
+            text,
+            skill: Some(skill),
+            provider: USER_ROW_PROVIDER.to_string(),
+        });
+    }
+    (rows, uninstalled, benchmark)
+}
+
 /// OpenAlex stores an abstract as word to positions. Rebuild it in position
 /// order, which is the only order that reproduces the sentence.
 fn abstract_from_inverted_index(index: &serde_json::Value) -> String {

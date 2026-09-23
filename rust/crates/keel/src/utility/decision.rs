@@ -2808,6 +2808,16 @@ pub fn handle_decision_tool(arguments: &Value) -> Result<String, String> {
                 .collect::<std::collections::HashSet<_>>()
                 .len();
             rows.extend(seeds);
+            // why: rows a person labelled for keel's own skills are the only
+            // host-shaped evidence the fetched corpora never carry.
+            let (user_rows, user_uninstalled, user_benchmark) =
+                crate::utility::decision_benchmark::read_user_rows(&home);
+            let user_count = user_rows.len();
+            rows.extend(user_rows);
+            // why: the frozen out-of-scope prompts train the class that owns "no
+            // installed skill does this"; a threshold was measured and lost.
+            let abstain_count = crate::utility::lexical_experts::abstain_rows().len();
+            rows.extend(crate::utility::lexical_experts::abstain_rows());
             let started = std::time::Instant::now();
             let vectors = crate::utility::word_vectors::table_for(&home);
             let encoder = crate::utility::embedding::encoder_for(&home);
@@ -2831,6 +2841,10 @@ pub fn handle_decision_tool(arguments: &Value) -> Result<String, String> {
                     .get("probes")
                     .and_then(Value::as_bool)
                     .unwrap_or(false),
+                probe_rejection_floor: arguments
+                    .get("probe_floor")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(crate::utility::lexical_experts::PROBE_REJECTION_FLOOR),
             };
             let (model, calibration_fit) = {
                 let mut progress = if quiet {
@@ -2864,6 +2878,10 @@ pub fn handle_decision_tool(arguments: &Value) -> Result<String, String> {
                 "training_rows": model.training_rows,
                 "skills": model.skills,
                 "seeded_skills": seeded_skills,
+                "user_rows": user_count,
+                "abstain_rows": abstain_count,
+                "user_rows_dropped_uninstalled": user_uninstalled,
+                "user_rows_dropped_benchmark": user_benchmark,
                 "vector_rows": model.vector_rows,
                 "usable": model.usable,
                 "config": {
@@ -3213,6 +3231,7 @@ pub fn run_decision_command(
             flag_set.string_flag("split", "");
             flag_set.bool_flag("no-stratify", false);
             flag_set.bool_flag("probes", false);
+            flag_set.string_flag("probe-floor", "");
             flag_set.bool_flag("quiet", false);
             flag_set.string_flag("pages", "2");
         }
@@ -3391,6 +3410,11 @@ pub fn run_decision_command(
             "split": flag_set.string_value("split").trim().to_string(),
             "no_stratify": flag_set.bool_value("no-stratify"),
             "probes": flag_set.bool_value("probes"),
+            "probe_floor": flag_set
+                .string_value("probe-floor")
+                .trim()
+                .parse::<f64>()
+                .ok(),
             "quiet": flag_set.bool_value("quiet"),
             "openalex": flag_set.bool_value("openalex"),
         }),

@@ -17,6 +17,20 @@ pub const LEXICAL_SCHEMA: u32 = 3;
 /// crates.io rows share this tag. Their descriptions name the language
 /// ("a rust library") even when the skill is websocket or postgres.
 pub const CRATES_PROVIDER: &str = "crates.io";
+/// Providers whose label is deliberate rather than a community tag: keel's own
+/// skill text, and rows a person labelled. The noise prune exists for the weak
+/// tags and would otherwise delete exactly the rows the thin classes need.
+pub const TRUSTED_PROVIDERS: &[&str] = &["keel-skill-seed", "user-labelled", ABSTAIN_PROVIDER];
+
+/// The class that owns prompts no skill owns. Thresholds were measured and lost
+/// at every floor; a class is what the out-of-scope literature says to train, and
+/// it is not an installed skill, so serving treats its win as silence.
+pub const NO_SKILL_CLASS: &str = "keel-no-skill";
+pub const ABSTAIN_PROVIDER: &str = "keel-abstain";
+
+fn trusted_provider(provider: &str) -> bool {
+    TRUSTED_PROVIDERS.contains(&provider)
+}
 const DEFAULT_SEED: u64 = 42;
 const EPOCHS: usize = 30;
 const LEARNING_RATE: f64 = 0.5;
@@ -27,18 +41,22 @@ const EARLY_STOP_PATIENCE: usize = 5;
 const MIN_WORD: usize = 3;
 const REFUSE_BELOW_ROWS: usize = 100;
 const REFUSE_BELOW_ACCURACY: f64 = 0.50;
-/// Out-of-scope rows the accept point must reject. They never train a class
-/// weight: a prompt with no skill has no label to fit, only a threshold to move.
-const PROBE_REJECTION_FLOOR: f64 = 0.9;
+/// Out-of-scope rows the accept point must reject, unless a caller fits a
+/// different share. They never train a class weight: a prompt with no skill has
+/// no label to fit, only a threshold to move.
+pub const PROBE_REJECTION_FLOOR: f64 = 0.9;
 /// A class below this many rows is not judged by the label-noise prune. A fold
 /// model that never saw the class contradicts it by construction, and pruning
 /// those rows deleted whole classes from the head.
 const MIN_ROWS_TO_JUDGE: usize = 10;
 
-/// Prompts whose right answer is no skill at all. Frozen here so the rejection
-/// floor is measured against text no provider and no host prompt supplied.
+/// Prompts whose right answer is no skill at all. Frozen here so the acceptance
+/// floor is measured against text no provider and no host prompt supplied. Two
+/// kinds: general asks that no installed skill owns, and repository-shaped asks
+/// that no installed skill owns either. The second kind is what a threshold
+/// fitted on the first kind alone gets wrong.
 pub fn abstention_probes() -> Vec<String> {
-    [
+    const GENERAL: &[&str] = &[
         "What is the boiling point of water at sea level if I am only asking for the number?",
         "Remind me of the capital of Portugal, nothing about this repository.",
         "Write a haiku about the first snow and keep it cheerful.",
@@ -51,10 +69,92 @@ pub fn abstention_probes() -> Vec<String> {
         "How tall is the tallest tree in the Amazon basin?",
         "Explain the offside rule to someone who has never watched football.",
         "Give me a two-week strength routine with no equipment.",
-    ]
-    .iter()
-    .map(|probe| probe.to_string())
-    .collect()
+        "Summarise the plot of a film I have not named.",
+        "What should I cook for dinner with eggs and rice?",
+        "Tell me a joke about accountants.",
+        "Which visa do I need for a two-week holiday in Vietnam?",
+        "How do I remove red wine from a cotton shirt?",
+        "What is the exchange rate between the euro and the yen today?",
+        "Suggest three podcasts about ancient history.",
+        "Write a birthday message for my niece.",
+        "How long does a passport renewal take in the Philippines?",
+        "What is a good beginner guitar for a twelve year old?",
+        "Explain why the sky is blue at sunset.",
+        "Give me a packing list for a rainy weekend in the mountains.",
+        "What time is it in São Paulo right now?",
+        "Recommend a book about the history of cartography.",
+        "How do I train a puppy not to chew furniture?",
+        "What are the rules for a chess draw by repetition?",
+        "Draft a polite email declining a wedding invitation.",
+        "How many calories are in a cup of cooked quinoa?",
+    ];
+    const REPOSITORY_SHAPED: &[&str] = &[
+        "Rename the variable in the example from the language tutorial I copied.",
+        "What is the difference between a list and a tuple, in general?",
+        "Explain what a compiler is to a new colleague.",
+        "Which laptop should I buy for university in September?",
+        "Summarise this quarter's marketing numbers for the board.",
+        "Book a meeting room for the design review on Thursday.",
+        "Draft the job advert for a junior support engineer.",
+        "What is the company holiday policy for December?",
+        "Convert this spreadsheet into a chart for the client deck.",
+        "How do I claim back the train fare on expenses?",
+        "What is the difference between a checking and a savings account?",
+        "Explain our pricing tiers to a customer in plain language.",
+        "Recommend a name for a new coffee shop.",
+        "Which font pair should I use for the wedding invitation?",
+        "How many holidays do I have left this year?",
+        "Write the agenda for the all-hands on Friday.",
+        "Can you summarise the podcast episode I linked yesterday?",
+        "What is the weather forecast for the office location tomorrow?",
+        "Find me a plumber who works weekends in this neighbourhood.",
+        "Explain the difference between a stock and a bond.",
+        "Draft a leave request for the last week of August.",
+        "What is the minimum wage in this country?",
+        "How do I appeal a parking ticket?",
+        "Recommend a restaurant near the conference venue.",
+        "What is the deadline for filing personal taxes here?",
+        "Explain how a mortgage amortises to me.",
+        "How do I set up a personal blog for my photography?",
+        "Summarise the health benefits described in this leaflet.",
+        "What is the best time of day to water tomatoes?",
+        "Translate my CV into Spanish.",
+        "Explain the rules for overtime pay in my contract.",
+        "What should I wear to a first interview at a bank?",
+        "How do I cancel a gym membership?",
+        "Recommend a bedtime routine for a toddler.",
+        "What is the difference between a CV and a résumé?",
+        "Explain compound interest to a teenager.",
+        "How do I register a small business name?",
+        "What are the rules for carrying liquids on a plane?",
+        "Suggest a name for our office football team.",
+        "How do I fix a squeaky door hinge?",
+        "What is the local recycling schedule?",
+        "Explain the offside trap in more detail.",
+        "Draft a thank-you note after a job interview.",
+        "Which mobile plan has the cheapest data abroad?",
+        "How do I make sourdough from scratch?",
+        "What is the best way to learn to swim as an adult?",
+        "Explain how a bicycle derailleur works.",
+        "Recommend a documentary about deep sea life.",
+        "What is the difference between a latte and a flat white?",
+        "How do I stop my houseplants dying in winter?",
+        "Summarise the news about the election.",
+        "What is the penalty for late company filing?",
+        "Explain how to read a nutrition label.",
+        "How do I get a refund for a cancelled flight?",
+        "Recommend an exercise for lower back pain.",
+        "What is the difference between a lease and a rental agreement?",
+        "How do I prepare for a driving theory test?",
+        "Explain why my bread did not rise.",
+        "Draft a message to reschedule a dentist appointment.",
+        "What is a reasonable tip for a taxi in this city?",
+    ];
+    GENERAL
+        .iter()
+        .chain(REPOSITORY_SHAPED)
+        .map(|probe| probe.to_string())
+        .collect()
 }
 
 /// Slice proportions. Validation fits the accept point and the prior weight, so
@@ -108,6 +208,10 @@ pub struct TrainConfig {
     pub stratify: bool,
     /// Reject out-of-scope probes before reporting coverage.
     pub abstention_probes: bool,
+    /// Share of the probes the accept point must reject when they are used. A
+    /// hundred percent is the conformal quantile over twelve rows and refuses
+    /// almost everything, so the share is measured rather than assumed.
+    pub probe_rejection_floor: f64,
 }
 
 impl Default for TrainConfig {
@@ -118,6 +222,7 @@ impl Default for TrainConfig {
             // Rejected by measurement: the probes raised the accept point
             // 0.30 -> 0.55 and cost decoded answers on every surface (5/3, 20/13, 52/44).
             abstention_probes: false,
+            probe_rejection_floor: PROBE_REJECTION_FLOOR,
         }
     }
 }
@@ -371,6 +476,36 @@ pub struct LexicalModel {
 /// A prompt with its weak label: a community tag mapped to a keel skill.
 pub type LabelledRows = Vec<(String, String)>;
 
+/// Splits the training rows into the weak-labelled ones and the frozen
+/// out-of-scope rows, which form the class that owns "no installed skill does
+/// this". They are appended after the label-noise prune, never before it: a row
+/// with no class to be wrong about cannot be contradicted.
+fn add_abstain_class(rows: &[SourcedRow]) -> (LabelledRows, LabelledRows) {
+    let mut labelled = Vec::with_capacity(rows.len());
+    let mut abstain = Vec::new();
+    for row in rows {
+        match row.skill.clone() {
+            Some(skill) if skill == NO_SKILL_CLASS => abstain.push((row.text.clone(), skill)),
+            Some(skill) => labelled.push((row.text.clone(), skill)),
+            None => {}
+        }
+    }
+    (labelled, abstain)
+}
+
+/// The out-of-scope rows as training rows, tagged with the provider that marks
+/// them as deliberate rather than weakly labelled.
+pub fn abstain_rows() -> Vec<SourcedRow> {
+    abstention_probes()
+        .into_iter()
+        .map(|text| SourcedRow {
+            text,
+            skill: Some(NO_SKILL_CLASS.to_string()),
+            provider: ABSTAIN_PROVIDER.to_string(),
+        })
+        .collect()
+}
+
 /// Raw rows as fetched, where an unlabelled row is allowed and then dropped.
 pub type RawRows = [(String, Option<String>)];
 
@@ -497,13 +632,19 @@ pub fn train_sourced_observed(
     ));
     // Rejected: masking crates boilerplate on this slice moved held-out
     // accuracy 0.7386 → 0.7285 and Brier 0.1380 → 0.1428 (accept 0.25 → 0.35).
-    let train_pairs = pairs_of(&train_rows);
+    let (train_pairs, abstain_pairs) = add_abstain_class(&train_rows);
     let validation_pairs = pairs_of(&validation_rows);
     let test_pairs = pairs_of(&test_rows);
     // why: community tags carry label noise, and pruning the rows the fitted
     // model confidently contradicts lifted held-out accuracy in measurement.
     progress.step("label-noise prune (5 folds, held out per fold)");
-    let (train_rows, pruned) = prune_label_noise(&train_pairs, priors, progress);
+    let trusted: Vec<bool> = train_rows
+        .iter()
+        .map(|row| trusted_provider(&row.provider))
+        .collect();
+    let (train_rows, pruned) = prune_label_noise(&train_pairs, &trusted, priors, progress);
+    let mut train_rows = train_rows;
+    train_rows.extend(abstain_pairs.clone());
     progress.line(format!(
         "         dropped {pruned} contradicted rows, {} kept",
         train_rows.len()
@@ -526,7 +667,9 @@ pub fn train_sourced_observed(
         &test_pairs,
         vectors.map(|table| std::sync::Arc::new(table.clone())),
         encoder.map(|encoder| std::sync::Arc::new(encoder.clone())),
-        config.abstention_probes,
+        config
+            .abstention_probes
+            .then_some(config.probe_rejection_floor),
         progress,
     ) {
         Some(scored) => (Some(scored.0), scored.1),
@@ -1525,6 +1668,7 @@ struct OutOfFold {
 /// with the rows it memorized, so the folds are what make this worth doing.
 fn prune_label_noise(
     rows: &LabelledRows,
+    trusted: &[bool],
     priors: Priors<'_>,
     progress: &mut Progress<'_>,
 ) -> (LabelledRows, usize) {
@@ -1625,8 +1769,16 @@ fn prune_label_noise(
     let mut kept = Vec::with_capacity(rows.len());
     let mut pruned = 0usize;
     let mut exempt = 0usize;
+    let mut deliberate = 0usize;
     let mut exempt_classes: std::collections::HashSet<&str> = std::collections::HashSet::new();
-    for ((prompt, skill), judgement) in rows.iter().zip(&judgements) {
+    for (index, ((prompt, skill), judgement)) in rows.iter().zip(&judgements).enumerate() {
+        // A row keel or a person labelled is not a weak label: a fold model that
+        // never saw the class cannot contradict it, only guess.
+        if trusted.get(index).copied().unwrap_or(false) {
+            deliberate += 1;
+            kept.push((prompt.clone(), skill.clone()));
+            continue;
+        }
         // A class this thin has no evidence to be contradicted by: the fold that
         // never saw it erased 29 of the corpus's 52 classes without this floor.
         if class_size.get(skill.as_str()).copied().unwrap_or(0) < MIN_ROWS_TO_JUDGE {
@@ -1649,7 +1801,7 @@ fn prune_label_noise(
         }
     }
     progress.line(format!(
-        "         kept {exempt} rows in {} class(es) too thin to judge (under {MIN_ROWS_TO_JUDGE} rows)",
+        "         kept {exempt} rows in {} class(es) too thin to judge (under {MIN_ROWS_TO_JUDGE} rows) and {deliberate} labelled deliberately",
         exempt_classes.len()
     ));
     (kept, pruned)
@@ -1664,9 +1816,15 @@ fn score_held_out(
     test_rows: &LabelledRows,
     vectors: Option<std::sync::Arc<crate::utility::word_vectors::WordVectors>>,
     encoder: Option<std::sync::Arc<crate::utility::embedding::Encoder>>,
-    with_probes: bool,
+    // Some(floor) runs the out-of-scope probes and makes the accept point reject
+    // that share of them; None leaves the threshold to the precision floor alone.
+    probes: Option<f64>,
     progress: &mut Progress<'_>,
 ) -> Option<(HeldOut, CalibrationFit)> {
+    let (with_probes, probe_floor) = match probes {
+        Some(floor) => (true, floor),
+        None => (false, PROBE_REJECTION_FLOOR),
+    };
     if test_rows.is_empty() {
         return None;
     }
@@ -1720,8 +1878,15 @@ fn score_held_out(
         probes.len()
     ));
     let candidate = fit_entropy_temperatures(&scorer, &calibration, best_scale);
-    let static_fit = fit_accept(&scorer, &calibration, &probes, best_scale, &[]);
-    let adaptive_fit = fit_accept(&scorer, &calibration, &probes, best_scale, &candidate);
+    let static_fit = fit_accept(&scorer, &calibration, &probes, probe_floor, best_scale, &[]);
+    let adaptive_fit = fit_accept(
+        &scorer,
+        &calibration,
+        &probes,
+        probe_floor,
+        best_scale,
+        &candidate,
+    );
     let static_ece = ece_for_documents(&scorer, &calibration, best_scale, &[]);
     let adaptive_ece = ece_for_documents(&scorer, &calibration, best_scale, &candidate);
     let static_coverage = coverage_for(&scorer, &calibration, best_scale, &[], static_fit.accept);
@@ -2000,6 +2165,7 @@ fn fit_accept(
     scorer: &Scorer,
     calibration: &[(String, HashMap<String, f64>)],
     probes: &[HashMap<String, f64>],
+    probe_floor: f64,
     scale: f64,
     bins: &[(f64, f64)],
 ) -> AcceptFit {
@@ -2056,7 +2222,7 @@ fn fit_accept(
             } else {
                 rejected as f64 / probes.len() as f64
             };
-            if rejection >= PROBE_REJECTION_FLOOR && probing_accept == 1.0 {
+            if rejection >= probe_floor && probing_accept == 1.0 {
                 probing_accept = threshold;
             }
         }
@@ -2527,7 +2693,8 @@ mod tests {
         let (kept, _) = {
             let mut sink = |line: &str| trace.push(line.to_string());
             let mut progress = Progress::to(&mut sink);
-            prune_label_noise(&rows, Priors { vectors: None }, &mut progress)
+            let trusted = vec![false; rows.len()];
+            prune_label_noise(&rows, &trusted, Priors { vectors: None }, &mut progress)
         };
         assert_eq!(
             kept.iter().filter(|(_, skill)| skill == "thin").count(),

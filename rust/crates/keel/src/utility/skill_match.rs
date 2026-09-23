@@ -609,6 +609,14 @@ pub fn match_skill_for_prompt_with_details(
             )?;
             let accept = head.accept();
             let ranked = head.rank(prompt)?;
+            // The out-of-scope class winning means no skill owns this prompt, so
+            // the router stays silent instead of falling through to a runner-up.
+            if ranked
+                .first()
+                .is_some_and(|(name, _)| name == crate::utility::lexical_experts::NO_SKILL_CLASS)
+            {
+                return None;
+            }
             let (name, confidence) =
                 crate::utility::lexical_experts::select_installed(&ranked, accept, &|name| {
                     resolve_skill_path(claude_home, name).is_some_and(|path| path.is_file())
