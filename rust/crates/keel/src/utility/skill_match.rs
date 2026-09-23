@@ -620,10 +620,8 @@ pub fn match_skill_for_prompt_with_details(
                 if confirmed_by_curated_tier(prompt, &found.name, claude_home) {
                     return Some(found);
                 }
-                // Measured: a weak term match for one skill used to veto a head
-                // answer for another, and that deleted 3 of 19 correct answers on
-                // the host corpus. The head already clears its own fitted accept
-                // point inside verdict(), so it speaks and the term match does not.
+                // Measured: this veto deleted correct head answers (host corpus
+                // 7/21 -> 10/21 without it), so the head's own accept point rules.
                 let (name, confidence) = verdict()?;
                 Some(SkillSelectionDecision {
                     name,
@@ -4140,13 +4138,14 @@ mod tests {
     fn a_weak_term_match_does_not_veto_the_head() {
         // Plan J03 used to silence a sub-0.60 term match unless the head named
         // the same skill, which deleted correct head answers on the host corpus.
+        const HEAD_SKILL: &str = "planner";
         let skills = &[
             ("reviewer", "review code diffs carefully"),
-            ("planner", "plan project tasks roadmaps"),
+            (HEAD_SKILL, "plan project tasks roadmaps"),
         ];
         let prompt = "reviewer review this code diff j03-veto";
         let home = home_with_skills("gate-head", skills);
-        write_head_artifact(&home, "planner", &["review", "code", "diff"]);
+        write_head_artifact(&home, HEAD_SKILL, &["review", "code", "diff"]);
         for _ in 0..80 {
             crate::utility::decision::record_and_save_skill_calibration(
                 &home, "reviewer", 1.0, false,
@@ -4156,7 +4155,7 @@ mod tests {
         let found = match_skill_for_prompt_with_details(&home, prompt)
             .expect("the head answers even though the term match was weak");
         assert_eq!(
-            found.name, "planner",
+            found.name, HEAD_SKILL,
             "the head's own answer is returned, not the vetoed term match"
         );
         assert!(
