@@ -620,8 +620,15 @@ pub fn match_skill_for_prompt_with_details(
                 if confirmed_by_curated_tier(prompt, &found.name, claude_home) {
                     return Some(found);
                 }
+                // Measured: a weak term match for one skill used to veto a head
+                // answer for another, and that deleted 3 of 19 correct answers on
+                // the host corpus. The head already clears its own fitted accept
+                // point inside verdict(), so it speaks and the term match does not.
                 let (name, confidence) = verdict()?;
-                (name == found.name).then_some(SkillSelectionDecision {
+                Some(SkillSelectionDecision {
+                    name,
+                    relevance: confidence,
+                    utility: confidence,
                     confidence,
                     ..found
                 })
@@ -4127,6 +4134,93 @@ mod tests {
         );
         let _ = fs::remove_dir_all(&clean);
         let _ = fs::remove_dir_all(&poisoned);
+    }
+
+    #[test]
+    fn a_weak_term_match_does_not_veto_the_head() {
+        // Plan J03 used to silence a sub-0.60 term match unless the head named
+        // the same skill, which deleted correct head answers on the host corpus.
+        let skills = &[
+            ("reviewer", "review code diffs carefully"),
+            ("planner", "plan project tasks roadmaps"),
+        ];
+        let prompt = "reviewer review this code diff j03-veto";
+        let home = home_with_skills("gate-head", skills);
+        write_head_artifact(&home, "planner", &["review", "code", "diff"]);
+        for _ in 0..80 {
+            crate::utility::decision::record_and_save_skill_calibration(
+                &home, "reviewer", 1.0, false,
+            )
+            .expect("record calibration");
+        }
+        let found = match_skill_for_prompt_with_details(&home, prompt)
+            .expect("the head answers even though the term match was weak");
+        assert_eq!(
+            found.name, "planner",
+            "the head's own answer is returned, not the vetoed term match"
+        );
+        assert!(
+            found.confidence > 0.0,
+            "the returned confidence is the head's, not the term model's: {}",
+            found.confidence
+        );
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    /// A minimal usable artifact: no word vectors, no centroids, accept at zero,
+    /// and one expert holding the given terms so the head ranks them.
+    fn write_head_artifact(home: &Path, skill: &str, terms: &[&str]) {
+        use crate::utility::lexical_experts::{
+            HeldOut, LexicalExpert, LexicalModel, LEXICAL_SCHEMA,
+        };
+        let artifact = crate::utility::lexical_experts::artifact_path(home);
+        if let Some(parent) = artifact.parent() {
+            fs::create_dir_all(parent).expect("artifact dir");
+        }
+        let model = LexicalModel {
+            schema: LEXICAL_SCHEMA,
+            training_rows: 100,
+            skills: 1,
+            experts: vec![LexicalExpert {
+                name: skill.to_string(),
+                bias: 0.0,
+                terms: terms
+                    .iter()
+                    .map(|term| ((*term).to_string(), 5.0))
+                    .collect(),
+            }],
+            idf: terms
+                .iter()
+                .map(|term| ((*term).to_string(), 1.0))
+                .collect(),
+            held_out: Some(HeldOut {
+                rows: 10,
+                decided: 10,
+                correct: 9,
+                accuracy: 0.9,
+                brier: 0.1,
+                scale: 1.0,
+                accept: 0.0,
+                accept_per_skill: Vec::new(),
+                operating_points: Vec::new(),
+                ece: 0.0,
+                entropy_temperatures: Vec::new(),
+                per_class: Vec::new(),
+                macro_f1: 0.0,
+                weighted_f1: 0.0,
+                confusion: Default::default(),
+                probe_rejection: 0.0,
+            }),
+            usable: true,
+            vector_rows: 0,
+            embedding_dim: 0,
+            centroids: Vec::new(),
+        };
+        fs::write(
+            &artifact,
+            serde_json::to_string(&model).expect("serialize model"),
+        )
+        .expect("write model");
     }
 
     #[test]
